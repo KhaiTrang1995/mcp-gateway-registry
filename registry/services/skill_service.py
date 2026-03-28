@@ -196,9 +196,10 @@ def _build_fetch_headers(
 ) -> tuple[str, dict[str, str]]:
     """Build fetch URL and auth headers for a SKILL.md request.
 
-    Returns (fetch_url, headers) tuple.  The URL is returned unchanged;
-    platform-specific modules may override to translate web URLs to
-    authenticated API endpoints.
+    For GitLab URLs with credentials, translates /-/raw/ web URLs to
+    API v4 endpoints that accept PRIVATE-TOKEN headers.
+
+    Returns (fetch_url, headers) tuple.
     """
     headers: dict[str, str] = {}
     fetch_url = url
@@ -212,6 +213,16 @@ def _build_fetch_headers(
     elif auth_scheme == "api_key":
         header_name = auth_header_name or "PRIVATE-TOKEN"
         headers[header_name] = auth_credential
+
+    if headers and "gitlab" in url.lower():
+        try:
+            from ..utils.gitlab_url_utils import translate_gitlab_to_api_url
+
+            api_url = translate_gitlab_to_api_url(url)
+            if api_url:
+                fetch_url = api_url
+        except ImportError:
+            pass
 
     return fetch_url, headers
 
@@ -290,6 +301,18 @@ def _resolve_tree_api(
         - ``skill_dir``: directory portion of the path leading up to
           ``SKILL.md`` (``""`` when SKILL.md is at the repo root).
     """
+    # Try GitLab translation first (Meraki: defensive import so removing
+    # gitlab_url_utils leaves upstream features fully functional for GitHub).
+    try:
+        from ..utils.gitlab_url_utils import translate_gitlab_tree_api_url
+
+        gitlab_result = translate_gitlab_tree_api_url(skill_md_url)
+        if gitlab_result is not None:
+            return gitlab_result
+    except ImportError:
+        pass
+
+    # Fall through to upstream GitHub / GHES handling.
     parsed = urlparse(skill_md_url)
     hostname = parsed.hostname or ""
     if not hostname:
