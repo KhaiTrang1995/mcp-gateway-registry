@@ -68,11 +68,18 @@ git log {base_tag}..HEAD --format="%aN" | sort | uniq -c | sort -rn
 # Env var changes
 git diff {base_tag}..HEAD -- .env.example
 
-# Helm chart changes
+# Helm chart changes (any file change inside charts/ requires
+# `helm dependency build/update` for stack-chart consumers, even if
+# Chart.yaml dependency lists are unchanged - subchart templates,
+# values, and helpers are repackaged into .tgz on dependency rebuild).
 git diff {base_tag}..HEAD -- charts/ --stat
 
-# Helm chart dependency changes (breaking change indicator)
-git diff {base_tag}..HEAD -- charts/registry/Chart.yaml charts/auth-server/Chart.yaml charts/mcp-gateway-registry-stack/Chart.yaml
+# If ANY of these report changes, the upgrade instructions MUST tell
+# Helm/EKS users to run `helm dependency build` and `helm dependency update`:
+git diff {base_tag}..HEAD --stat -- 'charts/registry/' 'charts/auth-server/' 'charts/mcpgw/' 'charts/mcp-gateway-registry-stack/' 'charts/mongodb-configure/' 'charts/keycloak-configure/'
+
+# Helm chart dependency-list changes (separate signal: added/removed deps)
+git diff {base_tag}..HEAD -- charts/registry/Chart.yaml charts/auth-server/Chart.yaml charts/mcp-gateway-registry-stack/Chart.yaml charts/mcpgw/Chart.yaml
 
 # Closed issues since the base tag was cut
 # Use the base tag's date as the floor; gh issue list does not natively
@@ -182,9 +189,16 @@ helm dependency update
 helm upgrade mcp-gateway . -f your-values.yaml
 ```
 
-{Note: If there are NO Helm chart dependency changes (no Chart.yaml dependency
-additions/removals), omit the helm dependency build/update commands and just
-show the helm upgrade command.}
+{CRITICAL: Include the `helm dependency build` and `helm dependency update`
+commands whenever ANY file under `charts/` changes between base and HEAD,
+not just Chart.yaml dependency-list changes. The packaged subchart `.tgz`
+files inside `charts/mcp-gateway-registry-stack/charts/` are gitignored
+and only get repackaged when consumers run `helm dependency build/update`.
+If subchart templates/values/helpers changed, a plain `git pull` followed
+by `helm upgrade` will use the OLD packaged subcharts, missing the changes.
+
+Only omit `helm dependency build/update` if `git diff {base_tag}..HEAD --stat -- charts/`
+shows ZERO files changed.}
 
 #### Terraform / ECS
 
@@ -367,6 +381,7 @@ Once the user confirms the release notes are ready:
 - **Always include upgrade instructions** for all three deployment methods (Docker Compose, Helm/EKS, Terraform/ECS).
 - **Always list breaking changes first** in the upgrade section -- this is the most critical information for operators.
 - **Always verify Helm Chart.yaml diffs** to detect dependency additions/removals -- these are the most common breaking changes for EKS users.
+- **Always check the full `charts/` tree diff**, not just `Chart.yaml`. If ANY file under `charts/` changed between base and HEAD, the upgrade instructions MUST include `helm dependency build` and `helm dependency update` for stack-chart consumers. The packaged `.tgz` subcharts inside `charts/mcp-gateway-registry-stack/charts/` are gitignored and only repackage when those commands run -- a plain `git pull` + `helm upgrade` will silently use stale subcharts.
 - **DockerHub image list** should match the components defined in `scripts/publish_containers.sh` in the `COMPONENTS` array. Read this file to get the current list rather than hardcoding.
 
 ## Example Usage
