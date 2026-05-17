@@ -128,13 +128,17 @@ def _extract_date(
 def _build_daily_index(
     rows: list[dict[str, str]],
     internal_ids: set[str],
+    exclude_day: str | None = None,
 ) -> dict[str, set[str]]:
     """Build {date_str: set(registry_id)} for customer instances only.
 
     Events from internal_ids are excluded. Null/empty registry_ids are
-    excluded (we can't attribute them to a single instance).
+    excluded (we can't attribute them to a single instance). When exclude_day
+    is provided, events on that date are dropped so the chart doesn't show
+    a misleading dip from a still-in-progress day.
     """
     by_day: dict[str, set[str]] = defaultdict(set)
+    skipped = 0
     for r in rows:
         rid = (r.get("registry_id") or "").strip()
         if not rid or rid in internal_ids:
@@ -142,7 +146,12 @@ def _build_daily_index(
         d = _extract_date(r.get("ts", ""))
         if not d:
             continue
+        if exclude_day and d == exclude_day:
+            skipped += 1
+            continue
         by_day[d].add(rid)
+    if exclude_day:
+        logger.info(f"Excluded incomplete day {exclude_day}: dropped {skipped} customer events")
     return by_day
 
 
@@ -287,6 +296,15 @@ def main() -> None:
         default=None,
         help="Optional path to write a CSV sidecar of the daily series (date, daily_active, ma7, streak7).",
     )
+    parser.add_argument(
+        "--exclude-incomplete-day",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD. Events on this date are dropped before computing "
+            "DAI/MA7/S7 so the chart doesn't show a misleading dip from a "
+            "still-in-progress day."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.csv_dir):
@@ -302,7 +320,7 @@ def main() -> None:
 
     all_rows = _read_all_csvs(csv_files)
     unique_rows = _dedupe_by_id_ts(all_rows)
-    by_day = _build_daily_index(unique_rows, internal_ids)
+    by_day = _build_daily_index(unique_rows, internal_ids, args.exclude_incomplete_day)
 
     dates, dai, ma7, streak7 = _compute_series(by_day)
     if not dates:

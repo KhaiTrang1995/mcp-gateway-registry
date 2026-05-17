@@ -311,6 +311,7 @@ def _compute_per_instance_latest_platform(
 def _compute_daily_spend(
     rows: list[dict[str, str]],
     internal_ids: set[str],
+    exclude_day: str | None = None,
 ) -> tuple[list[dict[str, float | int | str]], dict[str, int]]:
     """Compute per-day spend rows and per-platform instance counts.
 
@@ -336,6 +337,7 @@ def _compute_daily_spend(
     # Build per-day sets and per-instance-per-day max-seen search_queries_total
     by_day_instances: dict[str, set[str]] = defaultdict(set)
     by_instance_daily_max: dict[str, dict[str, int]] = defaultdict(dict)
+    skipped_incomplete = 0
     for r in rows_sorted:
         if not _is_aws_customer(r, internal_ids):
             continue
@@ -343,11 +345,18 @@ def _compute_daily_spend(
         d = r.get("ts", "")[:10]
         if not d or len(d) < 10:
             continue
+        if exclude_day and d == exclude_day:
+            skipped_incomplete += 1
+            continue
         by_day_instances[d].add(rid)
         sqt = _parse_int(r.get("search_queries_total"))
         prev_max = by_instance_daily_max[rid].get(d, 0)
         if sqt > prev_max:
             by_instance_daily_max[rid][d] = sqt
+    if exclude_day:
+        logger.info(
+            f"Excluded incomplete day {exclude_day}: dropped {skipped_incomplete} AWS customer events"
+        )
 
     # Per-instance latest compute platform -> daily rate
     latest_platform = _compute_per_instance_latest_platform(rows, internal_ids)
@@ -758,6 +767,14 @@ def main() -> None:
         default=None,
         help="Optional path to write JSON summary with headline numbers",
     )
+    parser.add_argument(
+        "--exclude-incomplete-day",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD. Events on this date are dropped from the chart "
+            "and headline numbers so a still-in-progress day doesn't show as a dip."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.csv_dir):
@@ -773,7 +790,11 @@ def main() -> None:
 
     all_rows = _read_all_csvs(csv_files)
     unique_rows = _dedupe_by_id_ts(all_rows)
-    daily, platform_instance_counts = _compute_daily_spend(unique_rows, internal_ids)
+    daily, platform_instance_counts = _compute_daily_spend(
+        unique_rows,
+        internal_ids,
+        args.exclude_incomplete_day,
+    )
     if not daily:
         logger.error("No AWS customer events found after filtering")
         raise SystemExit(1)

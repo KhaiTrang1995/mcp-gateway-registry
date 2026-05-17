@@ -99,12 +99,15 @@ Generate a timeseries chart showing unique registry installs per cloud provider 
 ```bash
 /usr/bin/python3 .claude/skills/usage-report/generate_timeseries_chart.py \
   --csv-dir OUTPUT_DIR \
-  --output $DATE_DIR/registry-installs-timeseries-YYYY-MM-DD.png
+  --output $DATE_DIR/registry-installs-timeseries-YYYY-MM-DD.png \
+  --exclude-incomplete-day YYYY-MM-DD
 ```
 
 This produces a PNG with two subplots:
 - **Cumulative Unique Registry Installs** -- running total of unique registry_ids per cloud provider
 - **Daily Active Registry Installs** -- unique registry_ids seen each day per cloud provider
+
+> **`--exclude-incomplete-day`** drops events on the given date (today's date, the in-progress day) before charting so the trailing data point doesn't show a misleading dip. Always pass today's `YYYY-MM-DD`. Snapshot tables and headline tallies still see the full data; only the chart series are trimmed.
 
 ### Step 5b2: Generate Compute Platform Timeseries Chart
 
@@ -114,7 +117,8 @@ Generate a second timeseries chart, parallel to the cloud-provider one, showing 
 /usr/bin/python3 .claude/skills/usage-report/generate_compute_timeseries_chart.py \
   --csv-dir OUTPUT_DIR \
   --output $DATE_DIR/compute-installs-timeseries-YYYY-MM-DD.png \
-  --snapshots-table $DATE_DIR/compute-platform-snapshots-YYYY-MM-DD.md
+  --snapshots-table $DATE_DIR/compute-platform-snapshots-YYYY-MM-DD.md \
+  --exclude-incomplete-day YYYY-MM-DD
 ```
 
 This produces:
@@ -156,7 +160,8 @@ Customer-only: internal instances loaded from `known-internal-instances.md` are 
   --csv-dir OUTPUT_DIR \
   --output $DATE_DIR/active-instances-YYYY-MM-DD.png \
   --internal-instances .claude/skills/usage-report/known-internal-instances.md \
-  --csv-out $DATE_DIR/active-instances-YYYY-MM-DD.csv
+  --csv-out $DATE_DIR/active-instances-YYYY-MM-DD.csv \
+  --exclude-incomplete-day YYYY-MM-DD
 ```
 
 Same data-sourcing behavior as the other historical charts (scans all CSVs across dated subdirectories). Embed in the Liveness section under an "Engagement over Time" subheading.
@@ -189,8 +194,11 @@ Platform for a given instance is resolved via its **most-recent non-empty `compu
   --output $DATE_DIR/ltv-spend-YYYY-MM-DD.png \
   --internal-instances .claude/skills/usage-report/known-internal-instances.md \
   --csv-out $DATE_DIR/ltv-spend-YYYY-MM-DD.csv \
-  --summary-json $DATE_DIR/ltv-spend-YYYY-MM-DD.json
+  --summary-json $DATE_DIR/ltv-spend-YYYY-MM-DD.json \
+  --exclude-incomplete-day YYYY-MM-DD
 ```
+
+> When `--exclude-incomplete-day` is passed, the JSON summary's `yesterday` block refers to the **last complete day** (typically YYYY-MM-DD - 1), not today. Headline tables in the report should label this clearly (e.g. "Yesterday (2026-05-16, last complete day)").
 
 Outputs:
 - PNG chart with three panels: daily EC2 compute USD (all-days + proven overlay), daily Bedrock USD, cumulative LTV USD (both lines with shaded range between them).

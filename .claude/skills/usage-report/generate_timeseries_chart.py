@@ -249,6 +249,14 @@ def main() -> None:
         required=True,
         help="Path to save the output PNG",
     )
+    parser.add_argument(
+        "--exclude-incomplete-day",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD. Events on this date are dropped before charting "
+            "so the chart doesn't show a misleading dip from a still-in-progress day."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.csv_dir):
@@ -266,6 +274,13 @@ def main() -> None:
         raise SystemExit(1)
 
     unique_rows = _deduplicate_events(all_rows)
+    if args.exclude_incomplete_day:
+        kept = [r for r in unique_rows if (r.get("ts") or "")[:10] != args.exclude_incomplete_day]
+        logger.info(
+            f"Excluded incomplete day {args.exclude_incomplete_day}: "
+            f"{len(unique_rows)} -> {len(kept)} events"
+        )
+        unique_rows = kept
 
     cumulative_data = _compute_cumulative_installs(unique_rows)
     daily_data = _compute_daily_unique_installs(unique_rows)

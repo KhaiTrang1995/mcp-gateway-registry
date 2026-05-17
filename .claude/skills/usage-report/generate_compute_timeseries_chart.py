@@ -327,6 +327,15 @@ def main() -> None:
             "by date). Reads one CSV per dated subdirectory under --csv-dir."
         ),
     )
+    parser.add_argument(
+        "--exclude-incomplete-day",
+        default=None,
+        help=(
+            "Optional YYYY-MM-DD. Events on this date are dropped from the chart "
+            "(but kept in the snapshot table) so the chart doesn't show a "
+            "misleading dip from a still-in-progress day."
+        ),
+    )
     args = parser.parse_args()
 
     if not os.path.isdir(args.csv_dir):
@@ -344,9 +353,16 @@ def main() -> None:
         raise SystemExit(1)
 
     unique_rows = _deduplicate_events(all_rows)
+    chart_rows = unique_rows
+    if args.exclude_incomplete_day:
+        chart_rows = [r for r in unique_rows if (r.get("ts") or "")[:10] != args.exclude_incomplete_day]
+        logger.info(
+            f"Excluded incomplete day {args.exclude_incomplete_day}: "
+            f"{len(unique_rows)} -> {len(chart_rows)} events (chart only)"
+        )
 
-    cumulative_data = _compute_cumulative_installs(unique_rows)
-    daily_data = _compute_daily_unique_installs(unique_rows)
+    cumulative_data = _compute_cumulative_installs(chart_rows)
+    daily_data = _compute_daily_unique_installs(chart_rows)
 
     if not cumulative_data:
         logger.error("No identified registry instances found in data")
