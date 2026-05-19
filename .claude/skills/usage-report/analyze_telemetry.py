@@ -409,6 +409,144 @@ def _build_cloud_detection_method_breakdown_table(
     return "\n".join(lines), rows
 
 
+def _build_largest_catalogs_table(
+    instances: list[dict],
+    internal_ids: set[str],
+    top_n: int = 10,
+) -> str:
+    """Build a markdown table ranking instances by registered-object count.
+
+    Sort key is `max_servers + max_agents + max_skills` for the latest
+    heartbeat per instance. This surfaces the comprehensive-catalog
+    deployments (lots of registered MCP servers/agents/skills) which can
+    rank low on the activity-score leaderboard if they have not generated
+    much search volume yet.
+    """
+    enriched: list[dict] = []
+    for inst in instances:
+        if _is_internal(inst.get("registry_id_full", inst["registry_id"]), internal_ids):
+            continue
+        servers = inst.get("max_servers", 0)
+        agents = inst.get("max_agents", 0)
+        skills = inst.get("max_skills", 0)
+        catalog = servers + agents + skills
+        if catalog == 0:
+            continue
+        enriched.append({**inst, "catalog_total": catalog})
+    enriched.sort(key=lambda x: x["catalog_total"], reverse=True)
+    top = enriched[:top_n]
+
+    lines: list[str] = []
+    lines.append("## Largest Catalogs (by Registered Servers + Agents + Skills)")
+    lines.append("")
+    if not top:
+        lines.append("*No customer instances with registered objects in this report.*")
+        lines.append("")
+        return "\n".join(lines)
+
+    lines.append(
+        "| Rank | Registry ID | Cloud/Compute/Auth "
+        "| Version | Servers | Agents | Skills | Catalog Total |"
+    )
+    lines.append(
+        "|------|-------------|-------------------"
+        "|---------|---------|--------|--------|---------------|"
+    )
+    for i, inst in enumerate(top, 1):
+        label = f"{inst['cloud']}/{inst['compute']}/{inst['auth']}"
+        lines.append(
+            f"| {i} "
+            f"| `{inst['registry_id']}` "
+            f"| {label} "
+            f"| `{inst.get('version', 'unknown')}` "
+            f"| {inst.get('max_servers', 0)} "
+            f"| {inst.get('max_agents', 0)} "
+            f"| {inst.get('max_skills', 0)} "
+            f"| {inst['catalog_total']} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _build_most_engaged_operators_table(
+    upgrade_trajectories: list[dict],
+    instance_lifetime: list[dict],
+    instances: list[dict],
+    internal_ids: set[str],
+    top_n: int = 10,
+) -> str:
+    """Build a markdown table of customers with the longest upgrade chains.
+
+    Activity scoreboards reward feature volume; persistence scoreboards
+    reward staying alive. Neither rewards the operator who tracks the
+    project closely enough to upgrade across multiple versions. This
+    table ranks non-internal customer instances by `version_changes`
+    (length of distinct-version trajectory minus one), with a tiebreaker
+    on lifetime age_days.
+    """
+    if not upgrade_trajectories:
+        return ""
+
+    # Index instance metadata for fast lookup
+    age_by_id: dict[str, int] = {}
+    for li in instance_lifetime or []:
+        rid_short = li.get("registry_id", "")
+        if rid_short:
+            age_by_id[rid_short] = li.get("age_days", 0)
+
+    inst_meta: dict[str, dict] = {}
+    for inst in instances:
+        rid_short = inst.get("registry_id", "")
+        if rid_short:
+            inst_meta[rid_short] = inst
+
+    enriched: list[dict] = []
+    for traj in upgrade_trajectories:
+        rid_short = traj.get("registry_id", "")
+        rid_full = traj.get("registry_id_full", rid_short)
+        if _is_internal(rid_full, internal_ids):
+            continue
+        meta = inst_meta.get(rid_short, {})
+        enriched.append(
+            {
+                "registry_id": rid_short,
+                "version_changes": traj.get("version_changes", 0),
+                "trajectory": traj.get("trajectory", []),
+                "age_days": age_by_id.get(rid_short, 0),
+                "cloud": meta.get("cloud", "unknown"),
+                "compute": meta.get("compute", "unknown"),
+                "auth": meta.get("auth", "unknown"),
+            }
+        )
+    enriched.sort(key=lambda x: (-x["version_changes"], -x["age_days"]))
+    top = enriched[:top_n]
+
+    lines: list[str] = []
+    lines.append("## Most Engaged Operators (by Upgrade-Chain Length)")
+    lines.append("")
+    lines.append(
+        "Customer instances ranked by the number of distinct versions they have "
+        "ever reported. Length 7 means the operator upgraded six times. "
+        "Tiebreaker: longest lifetime."
+    )
+    lines.append("")
+    lines.append(
+        "| Rank | Registry ID | Cloud/Compute/Auth | Version Changes | Age (days) | Trajectory |"
+    )
+    lines.append(
+        "|------|-------------|-------------------|----------------:|-----------:|------------|"
+    )
+    for i, row in enumerate(top, 1):
+        label = f"{row['cloud']}/{row['compute']}/{row['auth']}"
+        path = " -> ".join(f"`{v}`" for v in row["trajectory"])
+        lines.append(
+            f"| {i} | `{row['registry_id']}` | {label} | {row['version_changes']} | "
+            f"{row['age_days']} | {path} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def _build_most_active_table(
     instances: list[dict],
     internal_ids: set[str],
@@ -1681,9 +1819,23 @@ def _build_markdown_tables(
         if cc_md:
             lines.append(cc_md)
 
-    # Most Active Instances
+    # Most Active Instances (search-volume + feature-volume blend)
     most_active_md = _build_most_active_table(instances, internal_ids or set())
     lines.append(most_active_md)
+
+    # Largest Catalogs (servers + agents + skills, regardless of search)
+    largest_catalogs_md = _build_largest_catalogs_table(instances, internal_ids or set())
+    lines.append(largest_catalogs_md)
+
+    # Most Engaged Operators (by upgrade-chain length)
+    most_engaged_md = _build_most_engaged_operators_table(
+        upgrade_trajectories or [],
+        instance_lifetime or [],
+        instances,
+        internal_ids or set(),
+    )
+    if most_engaged_md:
+        lines.append(most_engaged_md)
 
     # Instance Timelines
     lines.append("## Instance Timelines")

@@ -360,6 +360,8 @@ Read the generated `tables-YYYY-MM-DD.md` and include its tables directly in the
 - Search Usage table
 - Sticky Instance Breakdown table (one row per cloud/compute/storage/auth profile, with count, percentage, and change vs previous)
 - Most Active Instances table (top 10 non-internal instances by activity score, with Version and Embeddings columns)
+- Largest Catalogs table (top 10 non-internal instances by registered objects, sort key `max_servers + max_agents + max_skills`, with Version and per-object columns; surfaces comprehensive-catalog deployments that may rank low on the search-driven activity score)
+- Most Engaged Operators table (top 10 non-internal instances by upgrade-chain length, sort key `version_changes` with `age_days` tiebreaker; shows the operators tracking the project closely enough to upgrade across multiple releases)
 - Per-instance daily timelines (with servers, agents, skills, search queries)
 
 Also read the generated `liveness-YYYY-MM-DD.md` (from Step 6c) and include its tier summary, confirmed-alive instance list, and cloud/compute/auth breakdowns as a dedicated **Liveness** section in the report (placed after "Registry Instance Lifetime" and before "Version Adoption"). The Executive Summary should mention the Confirmed-Alive and Stronger-Alive counts as the revenue-countable leading and trailing indicators.

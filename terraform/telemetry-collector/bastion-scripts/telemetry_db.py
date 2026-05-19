@@ -538,57 +538,61 @@ def _print_summary(documents: list[dict]) -> None:
         for mode, count in mode_dist.most_common():
             print(f"  {mode:20s} : {count:4d} ({count / len(startup_events) * 100:5.1f}%)")
 
-    # Aggregate field summaries for heartbeat events
+    # Aggregate field summaries for heartbeat events.
+    #
+    # We report two distinct numbers per registered-object field:
+    #   1. Fleet sum (latest heartbeat per instance) -- the honest
+    #      "how many objects are currently registered across the fleet"
+    #      number. Heartbeats fire ~once per 24h, so summing across all
+    #      heartbeats double-counts every instance by its heartbeat
+    #      count, which inflates the figure 3-4x for active instances.
+    #   2. Per-instance distribution (median / p90 / max) using each
+    #      instance's latest heartbeat -- the "what does a typical
+    #      registered catalog look like" number.
     if heartbeat_events:
         print("\n" + "-" * 80)
         print("HEARTBEAT EVENTS - Field Distribution")
         print("-" * 80)
 
-        # Server count statistics
-        server_counts = [
-            d.get("servers_count", 0)
-            for d in heartbeat_events
-            if d.get("servers_count") is not None
-        ]
-        if server_counts:
-            print("\nRegistered MCP Servers:")
-            print(f"  Average: {sum(server_counts) / len(server_counts):.1f}")
-            print(f"  Min:     {min(server_counts)}")
-            print(f"  Max:     {max(server_counts)}")
-            print(f"  Total:   {sum(server_counts)}")
+        # Build a per-instance latest-heartbeat map. Sort by ts ascending so
+        # the dict ends up holding the most recent heartbeat per registry_id.
+        sorted_hb = sorted(heartbeat_events, key=lambda d: d.get("ts") or "")
+        latest_per_instance: dict[str, dict] = {}
+        for d in sorted_hb:
+            rid = (d.get("registry_id") or "").strip()
+            if rid:
+                latest_per_instance[rid] = d
+        n_instances = len(latest_per_instance)
+        print(f"\nUnique instances that heartbeated: {n_instances}")
 
-        # Agent count statistics
-        agent_counts = [
-            d.get("agents_count", 0) for d in heartbeat_events if d.get("agents_count") is not None
-        ]
-        if agent_counts:
-            print("\nRegistered Agents:")
-            print(f"  Average: {sum(agent_counts) / len(agent_counts):.1f}")
-            print(f"  Min:     {min(agent_counts)}")
-            print(f"  Max:     {max(agent_counts)}")
-            print(f"  Total:   {sum(agent_counts)}")
+        def _percentile(values: list[int], pct: float) -> int:
+            if not values:
+                return 0
+            s = sorted(values)
+            idx = int(round((len(s) - 1) * pct))
+            return s[idx]
 
-        # Skills count statistics
-        skills_counts = [
-            d.get("skills_count", 0) for d in heartbeat_events if d.get("skills_count") is not None
-        ]
-        if skills_counts:
-            print("\nRegistered Skills:")
-            print(f"  Average: {sum(skills_counts) / len(skills_counts):.1f}")
-            print(f"  Min:     {min(skills_counts)}")
-            print(f"  Max:     {max(skills_counts)}")
-            print(f"  Total:   {sum(skills_counts)}")
+        def _print_object_stats(label: str, field: str) -> None:
+            counts = [int(d.get(field, 0) or 0) for d in latest_per_instance.values()]
+            if not counts:
+                return
+            nonzero = [c for c in counts if c > 0]
+            fleet_sum = sum(counts)
+            median_all = _percentile(counts, 0.5)
+            median_nz = _percentile(nonzero, 0.5) if nonzero else 0
+            p90 = _percentile(counts, 0.9)
+            max_v = max(counts)
+            print(f"\nRegistered {label}:")
+            print(f"  Fleet sum (latest heartbeat per instance): {fleet_sum}")
+            print(f"  Instances with > 0:    {len(nonzero)} of {n_instances}")
+            print(f"  Median per instance:   {median_all}  (median among non-zero: {median_nz})")
+            print(f"  p90 per instance:      {p90}")
+            print(f"  Max per instance:      {max_v}")
 
-        # Peers count statistics
-        peers_counts = [
-            d.get("peers_count", 0) for d in heartbeat_events if d.get("peers_count") is not None
-        ]
-        if peers_counts:
-            print("\nFederation Peers:")
-            print(f"  Average: {sum(peers_counts) / len(peers_counts):.1f}")
-            print(f"  Min:     {min(peers_counts)}")
-            print(f"  Max:     {max(peers_counts)}")
-            print(f"  Total:   {sum(peers_counts)}")
+        _print_object_stats("MCP Servers", "servers_count")
+        _print_object_stats("Agents",      "agents_count")
+        _print_object_stats("Skills",      "skills_count")
+        _print_object_stats("Federation Peers", "peers_count")
 
         # Search backend distribution
         search_backend_dist = Counter(
