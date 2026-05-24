@@ -979,6 +979,11 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $auth_method $upstream_http_x_auth_method;
         rewrite_by_lua_file /etc/nginx/lua/capture_body.lua;
         content_by_lua_file /etc/nginx/lua/virtual_router.lua;
+
+        # Route 401s through @auth_error so the WWW-Authenticate header
+        # mandated by RFC 9728 §5.1 is emitted (issue #989).
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
     }}"""
                 location_blocks.append(block)
                 logger.debug(f"Generated virtual server location block for {vs.path}")

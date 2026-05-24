@@ -110,6 +110,21 @@ class TestGenerateVirtualServerBlocks:
         assert "virtual_router.lua" in result
 
     @pytest.mark.asyncio
+    async def test_block_routes_401_through_auth_error(self, mock_virtual_server_repository):
+        """Virtual-server blocks must route 401s through @auth_error so the
+        RFC 9728 WWW-Authenticate header is emitted (issue #989)."""
+        vs = _make_vs_config()
+        mock_virtual_server_repository.list_enabled.return_value = [vs]
+
+        from registry.core.nginx_service import NginxConfigService
+
+        service = NginxConfigService()
+        result = await service._generate_virtual_server_blocks()
+
+        assert "error_page 401 = @auth_error" in result
+        assert "error_page 403 = @forbidden_error" in result
+
+    @pytest.mark.asyncio
     async def test_multiple_virtual_servers(self, mock_virtual_server_repository):
         """Test that multiple virtual servers produce multiple location blocks."""
         vs1 = _make_vs_config(path="/virtual/dev", server_name="Dev")
