@@ -959,3 +959,36 @@ class TestAuth0Factory:
         # Act & Assert
         with pytest.raises(ValueError, match="AUTH0_CLIENT_SECRET"):
             get_auth_provider("auth0")
+
+
+class TestAuth0AuthorizationServerMetadata:
+    """Tests for RFC 8414 metadata exposure via authorization_server_metadata()."""
+
+    def test_returns_rfc8414_required_fields(self):
+        from auth_server.providers.auth0 import Auth0Provider
+
+        provider = Auth0Provider(
+            domain="test-tenant.auth0.com",
+            client_id="c",
+            client_secret="s",
+        )
+
+        metadata = provider.authorization_server_metadata()
+
+        assert metadata["issuer"] == "https://test-tenant.auth0.com/"
+        assert metadata["authorization_endpoint"] == "https://test-tenant.auth0.com/authorize"
+        assert metadata["token_endpoint"] == "https://test-tenant.auth0.com/oauth/token"
+        assert metadata["jwks_uri"] == "https://test-tenant.auth0.com/.well-known/jwks.json"
+        assert "S256" in metadata["code_challenge_methods_supported"]
+        assert "authorization_code" in metadata["grant_types_supported"]
+
+    def test_authorization_server_issuer_default(self):
+        from auth_server.providers.auth0 import Auth0Provider
+
+        provider = Auth0Provider(
+            domain="test-tenant.auth0.com",
+            client_id="c",
+            client_secret="s",
+        )
+
+        assert provider.authorization_server_issuer() == "https://test-tenant.auth0.com/"

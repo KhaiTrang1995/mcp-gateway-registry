@@ -788,10 +788,41 @@ class EntraIdProvider(AuthProvider):
             raise ValueError(f"Device code token polling failed: {e}")
 
     def authorization_server_metadata(self) -> dict[str, Any]:
-        """Return Entra ID's RFC 8414 metadata. Implemented in sub-issue A commit 4."""
-        raise NotImplementedError(
-            "Entra authorization_server_metadata() not yet implemented (issue #989 commit 4)"
-        )
+        """Return Entra ID's RFC 8414 metadata for the v2.0 endpoint.
+
+        Phase 1 emits the Entra v2 OIDC metadata only. The v1 issuer
+        (`https://sts.windows.net/{tenant}/`) is a valid token source
+        recognized in validate_token but is not advertised here. The
+        `api://<app-id>/<scope>` verbatim scope-format support required
+        for Entra v1 deployments is tracked in sub-issue F (#990).
+        """
+        # TODO(#990): Sub-issue F adds Entra v1 `api://<app-id>/<scope>` verbatim
+        # scope passthrough. When that lands, this method should accept a
+        # caller-supplied `scopes_supported` and emit them unchanged for the
+        # v1 issuer, plus expose a separate v1 metadata document if needed.
+        return {
+            "issuer": self.issuer_v2,
+            "authorization_endpoint": self.auth_url,
+            "token_endpoint": self.token_url,
+            "userinfo_endpoint": self.userinfo_url,
+            "jwks_uri": self.jwks_url,
+            "end_session_endpoint": self.logout_url,
+            "response_types_supported": ["code", "id_token", "code id_token"],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+                "client_credentials",
+            ],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_basic",
+                "client_secret_post",
+                "private_key_jwt",
+            ],
+            "code_challenge_methods_supported": ["S256"],
+            "subject_types_supported": ["pairwise"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "scopes_supported": ["openid", "email", "profile", "offline_access"],
+        }
 
     def get_provider_info(self) -> dict[str, Any]:
         """Get provider-specific information.

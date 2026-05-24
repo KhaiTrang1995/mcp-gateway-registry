@@ -369,3 +369,50 @@ class TestOktaFactoryIntegration:
         provider = factory_module.get_auth_provider("okta")
         assert isinstance(provider, OktaProvider)
         assert provider.okta_domain == "dev-123.okta.com"
+
+
+class TestOktaAuthorizationServerMetadata:
+    """Tests for RFC 8414 metadata exposure via authorization_server_metadata()."""
+
+    def test_org_authorization_server(self, monkeypatch):
+        """Org server (no OKTA_AUTH_SERVER_ID) uses /oauth2/v1/* endpoints."""
+        monkeypatch.delenv("OKTA_AUTH_SERVER_ID", raising=False)
+
+        from auth_server.providers.okta import OktaProvider
+
+        provider = OktaProvider(
+            okta_domain="dev-123456.okta.com",
+            client_id="c",
+            client_secret="s",
+        )
+
+        metadata = provider.authorization_server_metadata()
+
+        assert metadata["issuer"] == "https://dev-123456.okta.com"
+        assert metadata["authorization_endpoint"] == "https://dev-123456.okta.com/oauth2/v1/authorize"
+        assert metadata["token_endpoint"] == "https://dev-123456.okta.com/oauth2/v1/token"
+        assert metadata["jwks_uri"] == "https://dev-123456.okta.com/oauth2/v1/keys"
+
+    def test_custom_authorization_server(self, monkeypatch):
+        """Custom auth server uses /oauth2/{auth_server_id}/v1/* endpoints."""
+        monkeypatch.setenv("OKTA_AUTH_SERVER_ID", "custom-as-1")
+
+        from auth_server.providers.okta import OktaProvider
+
+        provider = OktaProvider(
+            okta_domain="dev-123456.okta.com",
+            client_id="c",
+            client_secret="s",
+        )
+
+        metadata = provider.authorization_server_metadata()
+
+        assert metadata["issuer"] == "https://dev-123456.okta.com/oauth2/custom-as-1"
+        assert (
+            metadata["authorization_endpoint"]
+            == "https://dev-123456.okta.com/oauth2/custom-as-1/v1/authorize"
+        )
+        assert (
+            metadata["token_endpoint"]
+            == "https://dev-123456.okta.com/oauth2/custom-as-1/v1/token"
+        )

@@ -575,10 +575,35 @@ class Auth0Provider(AuthProvider):
             raise ValueError(f"Failed to parse Auth0 ID token: {e}") from e
 
     def authorization_server_metadata(self) -> dict[str, Any]:
-        """Return Auth0's RFC 8414 metadata. Implemented in sub-issue A commit 4."""
-        raise NotImplementedError(
-            "Auth0 authorization_server_metadata() not yet implemented (issue #989 commit 4)"
-        )
+        """Return Auth0's RFC 8414 metadata.
+
+        Auth0 already serves an RFC 8414-compliant OpenID configuration at
+        https://{domain}/.well-known/openid-configuration; we build the doc
+        directly from the provider's known endpoint values. This avoids the
+        upstream HTTP fetch on every discovery request.
+        """
+        return {
+            "issuer": self.issuer,
+            "authorization_endpoint": self.auth_url,
+            "token_endpoint": self.token_url,
+            "userinfo_endpoint": self.userinfo_url,
+            "jwks_uri": self.jwks_url,
+            "end_session_endpoint": self.logout_url,
+            "response_types_supported": ["code"],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+                "client_credentials",
+            ],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_basic",
+                "client_secret_post",
+            ],
+            "code_challenge_methods_supported": ["S256"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "scopes_supported": ["openid", "email", "profile"],
+        }
 
     def get_provider_info(self) -> dict[str, Any]:
         """Get provider-specific information.

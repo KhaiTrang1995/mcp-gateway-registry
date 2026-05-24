@@ -199,3 +199,50 @@ class TestFetchGroupsViaGraph:
         mock_client.get.assert_awaited_once()
         _args, kwargs = mock_client.get.call_args
         assert kwargs["headers"]["Authorization"] == "Bearer the-access-token"
+
+
+class TestEntraAuthorizationServerMetadata:
+    """Tests for RFC 8414 metadata exposure via authorization_server_metadata()."""
+
+    def test_emits_v2_metadata(self, monkeypatch):
+        """Phase 1 emits Entra v2 metadata only; v1 verbatim handling waits on #990."""
+        monkeypatch.delenv("ENTRA_LOGIN_BASE_URL", raising=False)
+        monkeypatch.delenv("ENTRA_GRAPH_BASE_URL", raising=False)
+
+        from auth_server.providers.entra import EntraIdProvider
+
+        provider = EntraIdProvider(
+            tenant_id="tenant-abc",
+            client_id="c",
+            client_secret="s",
+        )
+
+        metadata = provider.authorization_server_metadata()
+
+        assert metadata["issuer"] == "https://login.microsoftonline.com/tenant-abc/v2.0"
+        assert (
+            metadata["authorization_endpoint"]
+            == "https://login.microsoftonline.com/tenant-abc/oauth2/v2.0/authorize"
+        )
+        assert (
+            metadata["token_endpoint"]
+            == "https://login.microsoftonline.com/tenant-abc/oauth2/v2.0/token"
+        )
+        assert "S256" in metadata["code_challenge_methods_supported"]
+
+    def test_authorization_server_issuer_returns_v2(self, monkeypatch):
+        monkeypatch.delenv("ENTRA_LOGIN_BASE_URL", raising=False)
+        monkeypatch.delenv("ENTRA_GRAPH_BASE_URL", raising=False)
+
+        from auth_server.providers.entra import EntraIdProvider
+
+        provider = EntraIdProvider(
+            tenant_id="tenant-abc",
+            client_id="c",
+            client_secret="s",
+        )
+
+        assert (
+            provider.authorization_server_issuer()
+            == "https://login.microsoftonline.com/tenant-abc/v2.0"
+        )

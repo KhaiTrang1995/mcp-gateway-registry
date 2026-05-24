@@ -556,10 +556,37 @@ class OktaProvider(AuthProvider):
             raise ValueError(f"M2M token generation failed: {e}")
 
     def authorization_server_metadata(self) -> dict[str, Any]:
-        """Return Okta's RFC 8414 metadata. Implemented in sub-issue A commit 4."""
-        raise NotImplementedError(
-            "Okta authorization_server_metadata() not yet implemented (issue #989 commit 4)"
-        )
+        """Return Okta's RFC 8414 metadata.
+
+        Okta serves an RFC 8414-compliant document at either
+        `https://{domain}/.well-known/openid-configuration` (org server) or
+        `https://{domain}/oauth2/{auth_server_id}/.well-known/openid-configuration`
+        (custom auth server). We build the doc directly from the provider's
+        known endpoint values, which already account for the OKTA_AUTH_SERVER_ID
+        branch in __init__.
+        """
+        return {
+            "issuer": self.issuer,
+            "authorization_endpoint": self.auth_url,
+            "token_endpoint": self.token_url,
+            "userinfo_endpoint": self.userinfo_url,
+            "jwks_uri": self.jwks_url,
+            "end_session_endpoint": self.logout_url,
+            "response_types_supported": ["code"],
+            "grant_types_supported": [
+                "authorization_code",
+                "refresh_token",
+                "client_credentials",
+            ],
+            "token_endpoint_auth_methods_supported": [
+                "client_secret_basic",
+                "client_secret_post",
+            ],
+            "code_challenge_methods_supported": ["S256"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+            "scopes_supported": ["openid", "email", "profile", "groups"],
+        }
 
     def get_provider_info(self) -> dict[str, Any]:
         """Get provider-specific information.
