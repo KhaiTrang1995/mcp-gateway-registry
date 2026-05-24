@@ -623,7 +623,7 @@ Captured here so future hardening passes have a checklist:
 | Issue | Risk | Fix path |
 | --- | --- | --- |
 | Anonymous DCR for MCP clients | A caller already inside the network perimeter can mint unlimited DCR records (no escalation; gated by IdP login + per-user scopes), polluting the realm's clients table | nginx `limit_req_zone` on the registration endpoint as a stopgap, OR migrate to CIMD on Keycloak 26.6+ which eliminates DCR entirely |
-| Old DCR'd clients accumulate in the realm | DB bloat, no security impact (public clients with no `client_secret` and no privileged scopes) | Janitor process, Keycloak `Client Registration Token Expiration` policy, or supersession by CIMD |
+| Old DCR'd clients accumulate in the realm | DB bloat, no security impact (public clients with no `client_secret` and no privileged scopes) | Run `bash keycloak/setup/cleanup-stale-dcr-clients.sh` (idempotent; `--dry-run` previews). Use `--dry-run` first to see what would be deleted. CIMD adoption (Keycloak 26.6+, sub-issue #993) eventually obviates the issue entirely. |
 
 ### Pointers when something breaks
 
@@ -647,3 +647,4 @@ Captured here so future hardening passes have a checklist:
 - [.scratchpad/coding-assistant-oauth/discussion-2026-05-24-claude-connector-q-and-a.md](../.scratchpad/coding-assistant-oauth/discussion-2026-05-24-claude-connector-q-and-a.md) — running discussion log including all live-test findings
 - [keycloak/setup/init-keycloak.sh](../keycloak/setup/init-keycloak.sh) — fresh-install setup script
 - [keycloak/setup/upgrade-realm-for-dcr.sh](../keycloak/setup/upgrade-realm-for-dcr.sh) — standalone upgrade script for existing installs
+- [keycloak/setup/cleanup-stale-dcr-clients.sh](../keycloak/setup/cleanup-stale-dcr-clients.sh) — on-demand cleanup of DCR'd clients with no active sessions; supports `--dry-run`
