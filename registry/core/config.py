@@ -215,6 +215,25 @@ class Settings(BaseSettings):
     otel_otlp_export_interval_ms: int = 30000  # OTLP export interval in milliseconds
     otel_exporter_otlp_metrics_temporality_preference: str = "cumulative"  # cumulative or delta
 
+    # OTel-native metric emission migration (issue #1122)
+    metrics_legacy_http_post: bool = Field(
+        default=False,
+        description=(
+            "When True, ALSO emit metrics via the legacy HTTP POST path to "
+            "metrics-service:8890 in addition to the native OTel path. "
+            "For one-release Compose migration only; removed in 1.26.0."
+        ),
+    )
+    otel_metric_export_interval_ms: int = Field(
+        default=15000,
+        ge=1000,
+        description=(
+            "OTel SDK metric export push interval in milliseconds. "
+            "Default 15s gives near-real-time dashboards during incident "
+            "response. Raise to 30000+ for high-traffic production."
+        ),
+    )
+
     # Security scanning settings (MCP Servers)
     security_scan_enabled: bool = True
     security_scan_on_registration: bool = True
@@ -723,14 +742,10 @@ class Settings(BaseSettings):
         if v is None:
             return "text"
         if not isinstance(v, str):
-            raise ValueError(
-                f"APP_LOG_CONSOLE_FORMAT must be a string, got {type(v).__name__}"
-            )
+            raise ValueError(f"APP_LOG_CONSOLE_FORMAT must be a string, got {type(v).__name__}")
         normalized = v.strip().lower()
         if normalized not in ("json", "text"):
-            raise ValueError(
-                f"APP_LOG_CONSOLE_FORMAT must be 'json' or 'text', got {v!r}"
-            )
+            raise ValueError(f"APP_LOG_CONSOLE_FORMAT must be 'json' or 'text', got {v!r}")
         return normalized
 
     @field_validator("storage_backend", mode="before")

@@ -134,10 +134,69 @@ def _log_startup_configuration() -> None:
 
 
 def _initialize_deployment_metrics() -> None:
-    """Initialize deployment mode Prometheus metrics."""
+    """Initialize deployment mode Prometheus metrics.
+
+    The DEPLOYMENT_MODE_INFO call is preserved for backward compatibility
+    with the legacy Prometheus Gauge API, but is now a no-op shim. The OTel
+    ObservableGauge in registry.observability.meters reads the current
+    deployment mode on every export cycle.
+    """
     DEPLOYMENT_MODE_INFO.labels(
         deployment_mode=settings.deployment_mode.value, registry_mode=settings.registry_mode.value
     ).set(1)
+
+
+def _endpoint_is_localhost(url: str) -> bool:
+    """Return True if the URL host is 127.0.0.1, ::1, or localhost."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def _log_otel_state() -> None:
+    """Emit a single startup log line describing OTel SDK + legacy-flag state.
+
+    Issue #1122: lets operators see at a glance whether OTel emission is
+    active, which OTLP endpoint is configured, the export interval, and
+    whether the legacy HTTP POST path is also enabled. Also warns at startup
+    if the OTLP endpoint uses HTTP to a non-localhost host (telemetry would
+    be unencrypted in transit).
+    """
+    from opentelemetry import metrics
+
+    provider = metrics.get_meter_provider()
+    provider_name = type(provider).__name__
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    legacy = settings.metrics_legacy_http_post
+    interval_ms = settings.otel_metric_export_interval_ms
+
+    if "NoOp" in provider_name or "Default" in provider_name:
+        logger.warning(
+            "OTel metrics DISABLED (provider=%s). Set OTEL_EXPORTER_OTLP_ENDPOINT "
+            "to enable native OTel metric emission. Legacy HTTP POST: %s.",
+            provider_name,
+            legacy,
+        )
+        return
+
+    logger.info(
+        "OTel metrics enabled (provider=%s, endpoint=%s, interval_ms=%s, legacy_http_post=%s)",
+        provider_name,
+        otlp_endpoint,
+        interval_ms,
+        legacy,
+    )
+
+    if otlp_endpoint.startswith("http://") and not _endpoint_is_localhost(otlp_endpoint):
+        logger.warning(
+            "OTEL_EXPORTER_OTLP_ENDPOINT uses http:// to a non-localhost host (%s). "
+            "Telemetry will be UNENCRYPTED in transit. Use https:// in production.",
+            otlp_endpoint,
+        )
 
 
 # Stats and deployment detection functions moved to registry/api/system_routes.py
@@ -363,6 +422,9 @@ async def lifespan(app: FastAPI):
     # Initialize Prometheus metrics
     _initialize_deployment_metrics()
 
+    # Log OTel SDK + metrics emission state (issue #1122)
+    _log_otel_state()
+
     # Validate required configuration settings
     logger.info("🔍 Validating configuration...")
     errors = []
@@ -476,9 +538,7 @@ async def lifespan(app: FastAPI):
                     )
             logger.info(f"✅ {backend_name} index rebuilt with {len(all_skills)} skills")
         else:
-            logger.info(
-                f"✅ {backend_name} search index is persistent, skipping startup re-index"
-            )
+            logger.info(f"✅ {backend_name} search index is persistent, skipping startup re-index")
             # Still need to load agent state (in-memory service cache)
             logger.info("📋 Loading agent cards and state...")
             await agent_service.load_agents_and_state()
