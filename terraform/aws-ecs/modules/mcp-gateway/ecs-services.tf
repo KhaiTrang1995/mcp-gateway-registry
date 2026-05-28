@@ -53,16 +53,10 @@ module "ecs_service_auth" {
     EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
   }
   create_tasks_iam_role = true
-  tasks_iam_role_policies = merge(
-    {
-      SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
-      EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
-    },
-    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
-    var.enable_observability ? {
-      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
-    } : {}
-  )
+  tasks_iam_role_policies = {
+    SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
+    EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
+  }
 
   # Enable Service Connect
   service_connect_configuration = {
@@ -78,7 +72,7 @@ module "ecs_service_auth" {
   }
 
   # Container definitions
-  container_definitions = merge({
+  container_definitions = {
     auth-server = {
       cpu                    = tonumber(var.cpu)
       memory                 = tonumber(var.memory)
@@ -368,31 +362,19 @@ module "ecs_service_auth" {
           name  = "TOOL_FILTER_AUDIT_LOG_LEVEL"
           value = var.tool_filter_audit_log_level
         },
-        # Metrics pipeline (only wired when observability is enabled)
+        # Metrics pipeline (only wired when observability is enabled).
+        # Issue #1122: auth-server intentionally has no OTel sidecar on ECS
+        # because uvicorn 0.0.0.0:8888 races with Service Connect Envoy's
+        # 127.0.0.1:8888 outbound interceptor. The legacy metrics-service
+        # POST path is the only metrics surface for auth-server on ECS for
+        # this PR; registry+mcpgw still get the full OTel-native pipeline.
         {
           name  = "METRICS_SERVICE_URL"
           value = var.enable_observability ? "http://metrics-service:8890" : ""
         },
-        # OTel-native metrics emission (Issue #1122). The legacy flag is
-        # off by default; metrics flow only via the OTel SDK push to the
-        # per-task ADOT sidecar at localhost:4317.
         {
           name  = "METRICS_LEGACY_HTTP_POST"
-          value = "false"
-        },
-        {
-          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
-          value = "15000"
-        },
-        # OTel SDK OTLP push target. Pointed at the same-task ADOT sidecar
-        # only when observability is enabled, otherwise empty (SDK no-ops).
-        {
-          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
-          value = var.enable_observability ? "http://localhost:4317" : ""
-        },
-        {
-          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
-          value = "grpc"
+          value = var.enable_observability ? "true" : "false"
         }
         ],
         # PR #947: MongoDB connection string override (plain-text variant).
@@ -503,44 +485,7 @@ module "ecs_service_auth" {
         startPeriod = 60
       }
     }
-    },
-    # Issue #1122: per-task ADOT collector sidecar.
-    # Receives OTLP metrics from the auth-server container on
-    # localhost:4317 and remote-writes them to AMP.
-    # Only created when observability is enabled.
-    var.enable_observability ? {
-      adot-collector = {
-        cpu                    = 128
-        memory                 = 256
-        essential              = false
-        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
-        versionConsistency     = "disabled"
-        readonlyRootFilesystem = false
-
-        command = ["--config=env:AOT_CONFIG_CONTENT"]
-
-        environment = [
-          {
-            name  = "AOT_CONFIG_CONTENT"
-            value = local.adot_otlp_to_amp_config
-          },
-          {
-            name  = "AWS_REGION"
-            value = data.aws_region.current.id
-          }
-        ]
-
-        enable_cloudwatch_logging              = true
-        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-auth-server-adot"
-        cloudwatch_log_group_retention_in_days = 30
-
-        dependencies = [{
-          containerName = "auth-server"
-          condition     = "START"
-        }]
-      }
-    } : {}
-  )
+  }
 
   volume = {
     mcp-logs = {
@@ -671,8 +616,10 @@ module "ecs_service_registry" {
   # Container definitions
   container_definitions = merge({
     registry = {
-      cpu                    = tonumber(var.cpu)
-      memory                 = tonumber(var.memory)
+      # Issue #1122: leave room for the ADOT sidecar so per-container cpu/memory
+      # sums stay within the task-level limit when observability is enabled.
+      cpu                    = var.enable_observability ? tonumber(var.cpu) - local.adot_sidecar_cpu : tonumber(var.cpu)
+      memory                 = var.enable_observability ? tonumber(var.memory) - local.adot_sidecar_memory : tonumber(var.memory)
       essential              = true
       image                  = var.registry_image_uri
       versionConsistency     = "disabled"
@@ -1020,6 +967,16 @@ module "ecs_service_registry" {
           name  = "TOOL_FILTER_AUDIT_LOG_LEVEL"
           value = var.tool_filter_audit_log_level
         },
+        # Override the scopes_supported array advertised in the gateway's
+        # /.well-known/oauth-protected-resource document. Required when the
+        # IdP's RFC 7591 DCR rejects scopes that don't exist as client-scope
+        # objects in the realm — e.g. Keycloak rejects 'mcp-registry-admin'
+        # because that name is a logical group in DocumentDB, not a Keycloak
+        # client-scope. Defaults to standard OIDC scopes that always exist.
+        {
+          name  = "MCP_ADVERTISED_SCOPES"
+          value = var.mcp_advertised_scopes
+        },
         {
           name  = "DEPLOYMENT_MODE"
           value = var.deployment_mode
@@ -1324,8 +1281,8 @@ module "ecs_service_registry" {
     # Issue #1122: per-task ADOT collector sidecar for the registry service.
     var.enable_observability ? {
       adot-collector = {
-        cpu                    = 128
-        memory                 = 256
+        cpu                    = local.adot_sidecar_cpu
+        memory                 = local.adot_sidecar_memory
         essential              = false
         image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
         versionConsistency     = "disabled"
@@ -1650,8 +1607,10 @@ module "ecs_service_mcpgw" {
 
   container_definitions = merge({
     mcpgw-server = {
-      cpu                    = 512
-      memory                 = 1024
+      # Issue #1122: leave room for the ADOT sidecar (cpu/memory sums must
+      # not exceed the task-level limit of 512/1024).
+      cpu                    = var.enable_observability ? 512 - local.adot_sidecar_cpu : 512
+      memory                 = var.enable_observability ? 1024 - local.adot_sidecar_memory : 1024
       essential              = true
       image                  = var.mcpgw_image_uri
       versionConsistency     = "disabled"
@@ -1755,8 +1714,8 @@ module "ecs_service_mcpgw" {
     # Issue #1122: per-task ADOT collector sidecar for the mcpgw service.
     var.enable_observability ? {
       adot-collector = {
-        cpu                    = 128
-        memory                 = 256
+        cpu                    = local.adot_sidecar_cpu
+        memory                 = local.adot_sidecar_memory
         essential              = false
         image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
         versionConsistency     = "disabled"

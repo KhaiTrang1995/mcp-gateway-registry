@@ -16,6 +16,13 @@ locals {
   amp_remote_write_endpoint = var.enable_observability ? "${aws_prometheus_workspace.mcp[0].prometheus_endpoint}api/v1/remote_write" : ""
   amp_query_endpoint        = var.enable_observability ? aws_prometheus_workspace.mcp[0].prometheus_endpoint : ""
 
+  # ADOT sidecar resource reservations (Issue #1122). Subtracted from each
+  # main container's cpu/memory when observability is enabled so the sum
+  # of all containers stays within the task-level limit (ECS rejects the
+  # task definition otherwise).
+  adot_sidecar_cpu    = 128
+  adot_sidecar_memory = 256
+
   # ADOT collector configuration (embedded YAML)
   # ADOT runs as a sidecar in the metrics-service task, scrapes localhost:9465
   adot_config = var.enable_observability ? yamlencode({
