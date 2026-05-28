@@ -1126,12 +1126,18 @@ app = FastAPI(
 )
 
 # Issue #1122: programmatic FastAPI auto-instrumentation (HTTP semantic
-# conventions). See registry/main.py for the full rationale.
+# conventions). See registry/main.py for the full rationale. Skipped when
+# the opentelemetry-instrument wrapper has already instrumented the app to
+# avoid the "already instrumented" warning and any double-instrumentation
+# side effects observed on ECS.
 try:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
-    FastAPIInstrumentor.instrument_app(app)
-    logger.info("Programmatic FastAPI auto-instrumentation enabled (issue #1122)")
+    if getattr(app, "_is_instrumented_by_opentelemetry", False):
+        logger.info("FastAPI already instrumented by opentelemetry-instrument; skipping programmatic instrument_app")
+    else:
+        FastAPIInstrumentor.instrument_app(app)
+        logger.info("Programmatic FastAPI auto-instrumentation enabled (issue #1122)")
 except ImportError:
     logger.debug("opentelemetry-instrumentation-fastapi not installed; HTTP auto-metrics disabled")
 except Exception as exc:
@@ -1854,6 +1860,7 @@ async def validate_request(request: Request):
             f"Client-Id={mask_sensitive_id(client_id) if client_id else 'None'}, "
             f"Region={region}, Original-URL={original_url}"
         )
+
         logger.info(f"Server Name from URL: {server_name_from_url}")
 
         # Only activate static token auth when there is no session cookie
