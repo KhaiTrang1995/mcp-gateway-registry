@@ -18,7 +18,13 @@ import httpx
 from fastmcp import Context, FastMCP
 from logging_setup import setup_mcpgw_logging
 from models import AgentInfo, RegistryStats, ServerInfo, SkillInfo, ToolSearchResult
+from observability_bootstrap import init_meter_provider_if_needed, track_tool
 from starlette.responses import JSONResponse
+
+# Issue #1122: start the OTel Prometheus exporter listener so the in-cluster
+# Prometheus can scrape mcpgw on :9464. No-op when
+# OTEL_EXPORTER_PROMETHEUS_HOST is unset.
+init_meter_provider_if_needed()
 
 _log_file = setup_mcpgw_logging()
 logger = logging.getLogger(__name__)
@@ -119,7 +125,9 @@ if OIDC_ENABLED:
         ],
         require_authorization_consent=False,
     )
-    logger.info("OAuth enabled (OAuthProxy → Keycloak %s, realm=%s)", KEYCLOAK_EXTERNAL_URL, KEYCLOAK_REALM)
+    logger.info(
+        "OAuth enabled (OAuthProxy → Keycloak %s, realm=%s)", KEYCLOAK_EXTERNAL_URL, KEYCLOAK_REALM
+    )
 else:
     logger.info("OAuth disabled – using bearer-token passthrough with M2M for registry calls")
 
@@ -138,9 +146,7 @@ if _auth_provider:
     @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
     async def _redirect_protected_resource(_):  # noqa: ANN001
         """Redirect root well-known to the MCP-prefixed path (FastMCP path-prefix workaround)."""
-        return RedirectResponse(
-            url="/.well-known/oauth-protected-resource/mcp", status_code=302
-        )
+        return RedirectResponse(url="/.well-known/oauth-protected-resource/mcp", status_code=302)
 
 
 def _validate_top_n(top_n: int) -> int:
@@ -198,7 +204,9 @@ def _extract_bearer_token(ctx: Context | None) -> str:
                     auth_header = request.headers.get("x-authorization")
                 if auth_header and auth_header.lower().startswith("bearer "):
                     return auth_header.split(" ", 1)[1]
-                raise ValueError("Bearer token not found in Authorization or X-Authorization header")
+                raise ValueError(
+                    "Bearer token not found in Authorization or X-Authorization header"
+                )
             raise ValueError("Request object or headers not found in request_context")
         raise ValueError("request_context not available in Context")
     except ValueError:
@@ -223,6 +231,7 @@ async def _get_registry_headers(ctx: Context | None) -> dict[str, str]:
 
 
 @mcp.tool()
+@track_tool()
 async def list_services(ctx: Context | None = None) -> dict[str, Any]:
     """
     List all MCP servers registered in the gateway.
@@ -236,7 +245,9 @@ async def list_services(ctx: Context | None = None) -> dict[str, Any]:
         headers = await _get_registry_headers(ctx)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{REGISTRY_URL}/api/servers", headers=headers, params={"limit": 2000})
+            response = await client.get(
+                f"{REGISTRY_URL}/api/servers", headers=headers, params={"limit": 2000}
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -289,6 +300,7 @@ async def list_services(ctx: Context | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@track_tool()
 async def list_agents(ctx: Context | None = None) -> dict[str, Any]:
     """
     List all agents registered in the gateway.
@@ -302,7 +314,9 @@ async def list_agents(ctx: Context | None = None) -> dict[str, Any]:
         headers = await _get_registry_headers(ctx)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{REGISTRY_URL}/api/agents", headers=headers, params={"limit": 2000})
+            response = await client.get(
+                f"{REGISTRY_URL}/api/agents", headers=headers, params={"limit": 2000}
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -342,6 +356,7 @@ async def list_agents(ctx: Context | None = None) -> dict[str, Any]:
 
 
 @mcp.tool()
+@track_tool()
 async def list_skills(ctx: Context | None = None) -> dict[str, Any]:
     """
     List all skills registered in the gateway.
@@ -355,7 +370,9 @@ async def list_skills(ctx: Context | None = None) -> dict[str, Any]:
         headers = await _get_registry_headers(ctx)
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(f"{REGISTRY_URL}/api/skills", headers=headers, params={"limit": 2000})
+            response = await client.get(
+                f"{REGISTRY_URL}/api/skills", headers=headers, params={"limit": 2000}
+            )
             response.raise_for_status()
             data = response.json()
 
@@ -394,8 +411,8 @@ async def list_skills(ctx: Context | None = None) -> dict[str, Any]:
         }
 
 
-
 @mcp.tool()
+@track_tool()
 async def get_skill_content(
     skill_name: str,
     resource_path: str | None = None,
@@ -460,14 +477,18 @@ async def get_skill_content(
 
     except httpx.HTTPStatusError as e:
         logger.error("HTTP error fetching skill content: %s", e.response.status_code)
-        return {"skill_name": skill_name, "error": f"HTTP {e.response.status_code}", "status": "failed"}
+        return {
+            "skill_name": skill_name,
+            "error": f"HTTP {e.response.status_code}",
+            "status": "failed",
+        }
     except Exception as e:
         logger.error("Failed to get skill content: %s", e)
         return {"skill_name": skill_name, "error": str(e), "status": "failed"}
 
 
-
 @mcp.tool()
+@track_tool()
 async def intelligent_tool_finder(
     query: str,
     top_n: int = 5,
@@ -562,6 +583,7 @@ async def intelligent_tool_finder(
 
 
 @mcp.tool()
+@track_tool()
 async def healthcheck(ctx: Context | None = None) -> dict[str, Any]:
     """
     Get registry health status and statistics.

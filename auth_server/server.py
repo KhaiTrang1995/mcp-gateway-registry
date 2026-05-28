@@ -90,6 +90,58 @@ MAX_TOKENS_PER_USER_PER_HOUR = int(os.environ.get("MAX_TOKENS_PER_USER_PER_HOUR"
 # exist; fall back to env vars so this module stays importable during
 # the rollout window in which the Settings class may not yet carry the
 # new fields (parallel agent work).
+def _endpoint_is_localhost(url: str) -> bool:
+    """Return True if the URL host is 127.0.0.1, ::1, or localhost."""
+    from urllib.parse import urlsplit
+
+    try:
+        host = urlsplit(url).hostname or ""
+    except ValueError:
+        return False
+    return host in {"localhost", "127.0.0.1", "::1"}
+
+
+def _log_otel_state() -> None:
+    """Emit a single startup log line describing OTel SDK + legacy-flag state.
+
+    Issue #1122: lets operators see at a glance whether OTel emission is
+    active, which OTLP endpoint is configured, the export interval, and
+    whether the legacy HTTP POST path is also enabled. Also warns if the
+    OTLP endpoint uses HTTP to a non-localhost host.
+    """
+    from opentelemetry import metrics
+
+    provider = metrics.get_meter_provider()
+    provider_name = type(provider).__name__
+    otlp_endpoint = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    legacy = os.getenv("METRICS_LEGACY_HTTP_POST", "false").lower() == "true"
+    interval_ms = os.getenv("OTEL_METRIC_EXPORT_INTERVAL_MS", "15000")
+
+    if "NoOp" in provider_name or "Default" in provider_name or "Proxy" in provider_name:
+        logger.warning(
+            "OTel metrics DISABLED (provider=%s). Set OTEL_EXPORTER_OTLP_ENDPOINT "
+            "or OTEL_EXPORTER_PROMETHEUS_HOST to enable. Legacy HTTP POST: %s.",
+            provider_name,
+            legacy,
+        )
+        return
+
+    logger.info(
+        "OTel metrics enabled (provider=%s, endpoint=%s, interval_ms=%s, legacy_http_post=%s)",
+        provider_name,
+        otlp_endpoint,
+        interval_ms,
+        legacy,
+    )
+
+    if otlp_endpoint.startswith("http://") and not _endpoint_is_localhost(otlp_endpoint):
+        logger.warning(
+            "OTEL_EXPORTER_OTLP_ENDPOINT uses http:// to a non-localhost host (%s). "
+            "Telemetry will be UNENCRYPTED in transit. Use https:// in production.",
+            otlp_endpoint,
+        )
+
+
 def _read_mcp_filter_enabled() -> bool:
     try:
         value = getattr(settings, "mcp_tools_list_filter_enabled", None)
@@ -1039,6 +1091,9 @@ def check_rate_limit(username: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for FastAPI application."""
+    # Log OTel SDK + metrics emission state (issue #1122)
+    _log_otel_state()
+
     # Startup: Load scopes configuration
     global SCOPES_CONFIG
     try:
@@ -1069,6 +1124,24 @@ app = FastAPI(
     lifespan=lifespan,
     root_path=ROOT_PATH,
 )
+
+# Issue #1122: programmatic FastAPI auto-instrumentation (HTTP semantic
+# conventions). See registry/main.py for the full rationale. Skipped when
+# the opentelemetry-instrument wrapper has already instrumented the app to
+# avoid the "already instrumented" warning and any double-instrumentation
+# side effects observed on ECS.
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+    if getattr(app, "_is_instrumented_by_opentelemetry", False):
+        logger.info("FastAPI already instrumented by opentelemetry-instrument; skipping programmatic instrument_app")
+    else:
+        FastAPIInstrumentor.instrument_app(app)
+        logger.info("Programmatic FastAPI auto-instrumentation enabled (issue #1122)")
+except ImportError:
+    logger.debug("opentelemetry-instrumentation-fastapi not installed; HTTP auto-metrics disabled")
+except Exception as exc:
+    logger.warning("FastAPI auto-instrumentation failed: %s", exc)
 
 
 # Router for service-to-service /internal/* endpoints.
@@ -1787,6 +1860,7 @@ async def validate_request(request: Request):
             f"Client-Id={mask_sensitive_id(client_id) if client_id else 'None'}, "
             f"Region={region}, Original-URL={original_url}"
         )
+
         logger.info(f"Server Name from URL: {server_name_from_url}")
 
         # Only activate static token auth when there is no session cookie
@@ -1973,7 +2047,9 @@ async def validate_request(request: Request):
 
                 if not validation_result:
                     auth_provider = get_auth_provider()
-                    logger.info(f"Using authentication provider: {auth_provider.__class__.__name__}")
+                    logger.info(
+                        f"Using authentication provider: {auth_provider.__class__.__name__}"
+                    )
 
                     # Provider-specific validation
                     if hasattr(auth_provider, "validate_token"):

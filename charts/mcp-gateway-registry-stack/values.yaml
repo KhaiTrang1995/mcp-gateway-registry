@@ -290,6 +290,12 @@ registry:
     otelOtlpExportIntervalMs: "30000"  # Export interval in milliseconds
     otelExporterOtlpMetricsTemporalityPreference: "cumulative"  # cumulative or delta
 
+    # OTel-native metric emission (Issue #1122)
+    metricsLegacyHttpPost: false
+    otelMetricExportIntervalMs: "15000"
+    otelExporterPrometheusHost: "0.0.0.0"
+    otelExporterPrometheusPort: "9464"
+
     # Telemetry configuration
     # Anonymous usage telemetry (startup ping + daily heartbeat, both on by default)
     mcpTelemetryDisabled: false  # Set to true to disable all telemetry

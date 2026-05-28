@@ -16,6 +16,13 @@ locals {
   amp_remote_write_endpoint = var.enable_observability ? "${aws_prometheus_workspace.mcp[0].prometheus_endpoint}api/v1/remote_write" : ""
   amp_query_endpoint        = var.enable_observability ? aws_prometheus_workspace.mcp[0].prometheus_endpoint : ""
 
+  # ADOT sidecar resource reservations (Issue #1122). Subtracted from each
+  # main container's cpu/memory when observability is enabled so the sum
+  # of all containers stays within the task-level limit (ECS rejects the
+  # task definition otherwise).
+  adot_sidecar_cpu    = 128
+  adot_sidecar_memory = 256
+
   # ADOT collector configuration (embedded YAML)
   # ADOT runs as a sidecar in the metrics-service task, scrapes localhost:9465
   adot_config = var.enable_observability ? yamlencode({
@@ -61,6 +68,52 @@ locals {
       pipelines = {
         metrics = {
           receivers = ["prometheus"]
+          exporters = ["prometheusremotewrite"]
+        }
+      }
+    }
+  }) : ""
+
+  # ADOT collector configuration for OTLP-receive + AMP-remote-write
+  # (Issue #1122). One sidecar per main service task (registry, auth-server,
+  # mcpgw): each main container OTLP-pushes to localhost:4317; the sidecar
+  # remote-writes to AMP. This replaces the legacy metrics-service pull
+  # pattern with a per-task push pattern that surfaces in-process counters
+  # to AMP for the first time.
+  adot_otlp_to_amp_config = var.enable_observability ? yamlencode({
+    receivers = {
+      otlp = {
+        protocols = {
+          grpc = {
+            endpoint = "0.0.0.0:4317"
+          }
+          http = {
+            endpoint = "0.0.0.0:4318"
+          }
+        }
+      }
+    }
+    exporters = {
+      prometheusremotewrite = {
+        endpoint = local.amp_remote_write_endpoint
+        auth = {
+          authenticator = "sigv4auth"
+        }
+      }
+    }
+    extensions = {
+      sigv4auth = {
+        region = data.aws_region.current.id
+      }
+      health_check = {
+        endpoint = "0.0.0.0:13133"
+      }
+    }
+    service = {
+      extensions = ["sigv4auth", "health_check"]
+      pipelines = {
+        metrics = {
+          receivers = ["otlp"]
           exporters = ["prometheusremotewrite"]
         }
       }

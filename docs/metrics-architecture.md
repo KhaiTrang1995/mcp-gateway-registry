@@ -14,7 +14,50 @@ The metrics system collects, processes, and visualizes telemetry data from all M
 - **Secure & Scalable**: API key authentication with rate limiting
 - **Multiple Export Paths**: Direct Prometheus scraping or OTLP export to any observability platform
 
+> **Migration in progress (issue #1122)**: as of 1.25.0, registry/auth-server/mcpgw emit metrics natively via the OpenTelemetry SDK, in-process. The legacy HTTP POST path to `metrics-service:8890` is preserved behind the `METRICS_LEGACY_HTTP_POST=true` flag for one release and removed entirely in 1.26.0. See the "Native OTel Emission (Post-1.25.0)" section below for the new architecture; the diagram below describes the legacy path.
+
 ## High-Level Architecture
+
+### End-to-End Sequence (Docker Compose)
+
+The diagram below shows the complete flow from a service emitting an event to an operator viewing it in Grafana. ECS deployments swap Prometheus/Grafana for Amazon Managed Prometheus (AMP) via an ADOT collector sidecar; the producer side (services posting to metrics-service) is identical.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Reg as Registry<br/>(:7860)
+    participant Auth as Auth Server<br/>(:8888)
+    participant Mcpgw as Mcpgw<br/>(:8003)
+    participant Metrics as metrics-service<br/>(:8890 API, :9465 Prom)
+    participant DB as SQLite<br/>(metrics.db)
+    participant Prom as Prometheus<br/>(:9090)
+    participant Graf as Grafana<br/>(:3000)
+    participant Op as Operator (browser)
+
+    Note over Reg,Mcpgw: App services emit events as they handle requests
+    Reg->>Metrics: POST /metrics<br/>(METRICS_SERVICE_URL, API key)
+    Auth->>Metrics: POST /metrics<br/>(token validations, auth events)
+    Mcpgw->>Metrics: POST /metrics<br/>(tool discovery, tool exec)
+
+    Note over Metrics,DB: Persist + aggregate via OpenTelemetry SDK
+    Metrics->>DB: INSERT row per event
+    Metrics->>Metrics: OTEL meter updates<br/>counters/histograms in memory
+
+    Note over Prom,Metrics: Prometheus pulls every 10s
+    loop every 10s (scrape_interval)
+        Prom->>Metrics: GET :9465/metrics<br/>(OTEL Prometheus exporter)
+        Metrics-->>Prom: text exposition format<br/>(mcp_tool_executions_total, etc.)
+        Prom->>Prom: append to TSDB
+    end
+
+    Note over Graf,Op: Operator views dashboards
+    Op->>Graf: open http://host:3000
+    Graf->>Prom: PromQL query<br/>(rate(...), histogram_quantile(...))
+    Prom-->>Graf: time-series data
+    Graf-->>Op: rendered dashboard
+```
+
+### Component View
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -71,6 +114,73 @@ The metrics system collects, processes, and visualizes telemetry data from all M
                                                          │  • Any OTLP-compatible   │
                                                          └──────────────────────────┘
 ```
+
+## Native OTel Emission (Post-1.25.0)
+
+In 1.25.0+ the application services emit metrics directly through the OpenTelemetry SDK in-process. The metrics-service container is deprecated and removed in 1.26.0.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Reg as Registry<br/>(:7860 + :9464 OTel)
+    participant Auth as Auth Server<br/>(:8888 + :9464 OTel)
+    participant Mcpgw as Mcpgw<br/>(:8003 + :9464 OTel)
+    participant ADOT as ADOT sidecar<br/>(per-task on ECS only)
+    participant AMP as Amazon Managed<br/>Prometheus
+    participant Prom as Prometheus<br/>(Compose only)
+    participant Op as Operator
+
+    Note over Reg,Mcpgw: Each service does work
+    Reg->>Reg: counter.add(1, attrs)<br/>(in-process, sub-microsecond)
+    Auth->>Auth: counter.add(1, attrs)
+    Mcpgw->>Mcpgw: counter.add(1, attrs)
+
+    Note over Reg,Mcpgw: OTel SDK background flush every 15s
+    rect rgb(230, 240, 255)
+        Note over Reg,ADOT: ECS path (each service has its own ADOT sidecar)
+        Reg->>ADOT: OTLP push (localhost:4317)
+        ADOT->>AMP: prometheus_remote_write (sigv4)
+    end
+    rect rgb(230, 255, 240)
+        Note over Reg,Prom: Compose path (Prometheus scrapes each service)
+        Prom->>Reg: GET :9464/metrics<br/>(OTel exporter-prometheus)
+        Prom->>Auth: GET :9464/metrics
+        Prom->>Mcpgw: GET :9464/metrics
+    end
+
+    Op->>AMP: PromQL via Grafana
+    AMP-->>Op: time series
+    Op->>Prom: PromQL via Grafana
+    Prom-->>Op: time series
+```
+
+### What changed compared to the legacy path
+
+| Aspect | Legacy (pre-1.25.0) | Native OTel (1.25.0+) |
+|--------|---------------------|------------------------|
+| Emission shape | HTTP POST to `metrics-service:8890` per event | In-process `Counter.add(value, attrs)` |
+| Per-emission latency | ~5-10 ms (network + serialize) | sub-microsecond (memory write) |
+| Auth surface | 6 API keys for 3 services | none (in-process) |
+| ECS topology | Centralized metrics-service ECS task with ADOT sidecar | Per-service ADOT sidecar in each task |
+| EKS support | None (no metrics-service Helm chart) | Native (registry/auth-server/mcpgw expose `:9464`, NetworkPolicy gates scrape) |
+| In-process counters | Invisible everywhere (`prometheus_client.Counter` in process memory) | Exposed via the same OTel pipeline |
+| Cardinality risk | High (`user_hash`, `query` text, etc. as labels) | Bounded (pruned to safe attribute set) |
+
+### How to opt in to the legacy path during the transition
+
+For one release (1.25.0), operators on Compose who need the legacy `metrics-service` path active for verification can set:
+
+```bash
+METRICS_LEGACY_HTTP_POST=true
+```
+
+This causes the services to emit metrics via BOTH paths simultaneously: the new OTel emission AND the old HTTP POST. The `metrics_emission_path_total{path}` counter lets operators verify both are active. The flag and the entire `metrics-service` container are removed in 1.26.0.
+
+### Where in-process counters now live
+
+Each in-process counter (e.g. `nginx_config_writes_total`, `peer_sync_failures_total`, `m2m_orphan_cleanups_total`, `mcp_registry_cloud_detection_total`, the four logout counters, etc.) was previously declared with `prometheus_client.Counter` and never exposed. As of 1.25.0 they are declared in `registry/observability/meters.py` (and `auth_server/observability/meters.py`) using OTel `Counter` instruments wrapped in compatibility adapters that preserve the legacy `.labels(...).inc()` API.
+
+This means EKS deployments now see ~19 counters that were previously invisible there.
 
 ## How It Works
 

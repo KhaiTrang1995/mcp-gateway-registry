@@ -755,6 +755,15 @@ deployment_mode = "registry-only"
 # Default: true
 # enable_observability = true
 
+# Override the scopes_supported array advertised in the gateway's
+# /.well-known/oauth-protected-resource document. Required when the IdP's
+# RFC 7591 DCR rejects scopes that don't exist as client-scope objects in
+# the realm — e.g. Keycloak rejects the gateway's logical group names like
+# 'mcp-registry-admin' because they are not Keycloak client-scopes. Default
+# ("profile email offline_access") is the safe set of OIDC scopes that all
+# major IdPs ship with by default.
+# mcp_advertised_scopes = "profile email offline_access"
+
 # Container image URIs for observability services (required when enable_observability = true)
 # metrics_service_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-metrics-service:latest"
 # grafana_image_uri         = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-grafana:latest"

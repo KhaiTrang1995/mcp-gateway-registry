@@ -1003,6 +1003,21 @@ variable "tool_filter_audit_log_level" {
   default     = "INFO"
 }
 
+variable "mcp_advertised_scopes" {
+  description = <<-EOT
+    Space-separated override for the `scopes_supported` array in the gateway's
+    /.well-known/oauth-protected-resource document. Required when the IdP's
+    RFC 7591 DCR rejects scopes that don't exist as client-scope objects in
+    the realm. Default ("profile email offline_access") is the safe set of
+    OIDC scopes that all major IdPs ship with by default. Set to "" to fall
+    back to scope names from the registry's scopes config (which advertises
+    DocumentDB group names — Keycloak / Auth0 / Okta will reject those
+    during DCR unless they are also defined as client-scopes in the realm).
+  EOT
+  type        = string
+  default     = "profile email offline_access"
+}
+
 # =============================================================================
 # DEPLOYMENT MODE CONFIGURATION
 # =============================================================================

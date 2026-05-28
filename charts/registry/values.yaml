@@ -102,6 +102,35 @@ app:
   otelOtlpExportIntervalMs: "30000"  # Export interval in milliseconds
   otelExporterOtlpMetricsTemporalityPreference: "cumulative"  # cumulative or delta
 
+  # OTel-native metric emission (Issue #1122)
+  # In 1.25.0+ the registry emits metrics natively via the OTel SDK.
+  # metricsLegacyHttpPost=true ALSO posts to metrics-service (one-release transition).
+  # The metrics-service container is removed entirely in 1.26.0.
+  metricsLegacyHttpPost: false
+  # OTel SDK metric export interval in milliseconds (default 15s).
+  otelMetricExportIntervalMs: "15000"
+
+  # OTel exporter-prometheus listener: where in-cluster Prometheus scrapes
+  # the registry's in-process meters. On EKS, defaults to 0.0.0.0 because
+  # Prometheus runs in a different pod; the NetworkPolicy below restricts
+  # who can reach this port.
+  otelExporterPrometheusHost: "0.0.0.0"
+  otelExporterPrometheusPort: "9464"
+
+# Metrics scrape configuration (Issue #1122)
+# Controls the NetworkPolicy that gates the OTel exporter-prometheus port.
+metricsScrape:
+  port: 9464
+  # NetworkPolicy resource that gates ingress to the scrape port.
+  # Default: only Prometheus pods in the `monitoring` namespace can scrape.
+  # Override the selectors below to match your in-cluster Prometheus.
+  networkPolicy:
+    enabled: true
+    fromNamespaceSelector:
+      kubernetes.io/metadata.name: monitoring
+    fromPodSelector:
+      app.kubernetes.io/name: prometheus
+
   # Telemetry configuration
   # Anonymous usage telemetry (startup ping + daily heartbeat, both on by default)
   mcpTelemetryDisabled: false  # Set to true to disable all telemetry

@@ -362,10 +362,19 @@ module "ecs_service_auth" {
           name  = "TOOL_FILTER_AUDIT_LOG_LEVEL"
           value = var.tool_filter_audit_log_level
         },
-        # Metrics pipeline (only wired when observability is enabled)
+        # Metrics pipeline (only wired when observability is enabled).
+        # Issue #1122: auth-server intentionally has no OTel sidecar on ECS
+        # because uvicorn 0.0.0.0:8888 races with Service Connect Envoy's
+        # 127.0.0.1:8888 outbound interceptor. The legacy metrics-service
+        # POST path is the only metrics surface for auth-server on ECS for
+        # this PR; registry+mcpgw still get the full OTel-native pipeline.
         {
           name  = "METRICS_SERVICE_URL"
           value = var.enable_observability ? "http://metrics-service:8890" : ""
+        },
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = var.enable_observability ? "true" : "false"
         }
         ],
         # PR #947: MongoDB connection string override (plain-text variant).
@@ -529,15 +538,15 @@ module "ecs_service_registry" {
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
-  name                               = "${local.name_prefix}-registry"
-  cluster_arn                        = var.ecs_cluster_arn
-  cpu                                = tonumber(var.cpu)
-  memory                             = tonumber(var.memory)
-  desired_count                      = var.enable_autoscaling ? var.autoscaling_min_capacity : var.registry_replicas
-  health_check_grace_period_seconds  = 900
-  enable_autoscaling       = var.enable_autoscaling
-  autoscaling_min_capacity = var.autoscaling_min_capacity
-  autoscaling_max_capacity = var.autoscaling_max_capacity
+  name                              = "${local.name_prefix}-registry"
+  cluster_arn                       = var.ecs_cluster_arn
+  cpu                               = tonumber(var.cpu)
+  memory                            = tonumber(var.memory)
+  desired_count                     = var.enable_autoscaling ? var.autoscaling_min_capacity : var.registry_replicas
+  health_check_grace_period_seconds = 900
+  enable_autoscaling                = var.enable_autoscaling
+  autoscaling_min_capacity          = var.autoscaling_min_capacity
+  autoscaling_max_capacity          = var.autoscaling_max_capacity
   autoscaling_policies = var.enable_autoscaling ? {
     cpu = {
       policy_type = "TargetTrackingScaling"
@@ -584,6 +593,10 @@ module "ecs_service_registry" {
     },
     var.aws_registry_federation_enabled ? {
       BedrockAgentCoreAccess = aws_iam_policy.bedrock_agentcore_access[0].arn
+    } : {},
+    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
+    var.enable_observability ? {
+      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
     } : {}
   )
 
@@ -601,10 +614,12 @@ module "ecs_service_registry" {
   }
 
   # Container definitions
-  container_definitions = {
+  container_definitions = merge({
     registry = {
-      cpu                    = tonumber(var.cpu)
-      memory                 = tonumber(var.memory)
+      # Issue #1122: leave room for the ADOT sidecar so per-container cpu/memory
+      # sums stay within the task-level limit when observability is enabled.
+      cpu                    = var.enable_observability ? tonumber(var.cpu) - local.adot_sidecar_cpu : tonumber(var.cpu)
+      memory                 = var.enable_observability ? tonumber(var.memory) - local.adot_sidecar_memory : tonumber(var.memory)
       essential              = true
       image                  = var.registry_image_uri
       versionConsistency     = "disabled"
@@ -952,6 +967,16 @@ module "ecs_service_registry" {
           name  = "TOOL_FILTER_AUDIT_LOG_LEVEL"
           value = var.tool_filter_audit_log_level
         },
+        # Override the scopes_supported array advertised in the gateway's
+        # /.well-known/oauth-protected-resource document. Required when the
+        # IdP's RFC 7591 DCR rejects scopes that don't exist as client-scope
+        # objects in the realm — e.g. Keycloak rejects 'mcp-registry-admin'
+        # because that name is a logical group in DocumentDB, not a Keycloak
+        # client-scope. Defaults to standard OIDC scopes that always exist.
+        {
+          name  = "MCP_ADVERTISED_SCOPES"
+          value = var.mcp_advertised_scopes
+        },
         {
           name  = "DEPLOYMENT_MODE"
           value = var.deployment_mode
@@ -1094,6 +1119,23 @@ module "ecs_service_registry" {
           name  = "METRICS_SERVICE_URL"
           value = var.enable_observability ? "http://metrics-service:8890" : ""
         },
+        # OTel-native metrics emission (Issue #1122)
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = "false"
+        },
+        {
+          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
+          value = "15000"
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.enable_observability ? "http://localhost:4317" : ""
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+          value = "grpc"
+        },
         # Service Connect namespace for FQDN alias injection in entrypoint.
         # Enables Python health checker to resolve both short names and FQDNs.
         {
@@ -1235,7 +1277,41 @@ module "ecs_service_registry" {
         startPeriod = 60
       }
     }
-  }
+    },
+    # Issue #1122: per-task ADOT collector sidecar for the registry service.
+    var.enable_observability ? {
+      adot-collector = {
+        cpu                    = local.adot_sidecar_cpu
+        memory                 = local.adot_sidecar_memory
+        essential              = false
+        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+        versionConsistency     = "disabled"
+        readonlyRootFilesystem = false
+
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.adot_otlp_to_amp_config
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.id
+          }
+        ]
+
+        enable_cloudwatch_logging              = true
+        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-registry-adot"
+        cloudwatch_log_group_retention_in_days = 30
+
+        dependencies = [{
+          containerName = "registry"
+          condition     = "START"
+        }]
+      }
+    } : {}
+  )
 
   # EFS volumes removed - registry uses ephemeral storage and DocumentDB for persistence
   volume = {}
@@ -1506,10 +1582,16 @@ module "ecs_service_mcpgw" {
     EcsExecTaskExecution = aws_iam_policy.ecs_exec_task_execution.arn
   }
   create_tasks_iam_role = true
-  tasks_iam_role_policies = {
-    SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
-    EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
-  }
+  tasks_iam_role_policies = merge(
+    {
+      SecretsManagerAccess = aws_iam_policy.ecs_secrets_access.arn
+      EcsExecTask          = aws_iam_policy.ecs_exec_task.arn
+    },
+    # Issue #1122: per-task ADOT sidecar needs AMP remote-write permission
+    var.enable_observability ? {
+      AMPRemoteWrite = aws_iam_policy.adot_amp_write[0].arn
+    } : {}
+  )
 
   service_connect_configuration = {
     namespace = aws_service_discovery_private_dns_namespace.mcp.arn
@@ -1523,10 +1605,12 @@ module "ecs_service_mcpgw" {
     }]
   }
 
-  container_definitions = {
+  container_definitions = merge({
     mcpgw-server = {
-      cpu                    = 512
-      memory                 = 1024
+      # Issue #1122: leave room for the ADOT sidecar (cpu/memory sums must
+      # not exceed the task-level limit of 512/1024).
+      cpu                    = var.enable_observability ? 512 - local.adot_sidecar_cpu : 512
+      memory                 = var.enable_observability ? 1024 - local.adot_sidecar_memory : 1024
       essential              = true
       image                  = var.mcpgw_image_uri
       versionConsistency     = "disabled"
@@ -1576,6 +1660,23 @@ module "ecs_service_mcpgw" {
         {
           name  = "APP_LOG_LEVEL"
           value = var.app_log_level
+        },
+        # OTel-native metrics emission (Issue #1122)
+        {
+          name  = "METRICS_LEGACY_HTTP_POST"
+          value = "false"
+        },
+        {
+          name  = "OTEL_METRIC_EXPORT_INTERVAL_MS"
+          value = "15000"
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_ENDPOINT"
+          value = var.enable_observability ? "http://localhost:4317" : ""
+        },
+        {
+          name  = "OTEL_EXPORTER_OTLP_PROTOCOL"
+          value = "grpc"
         }
         ],
         # Extra environment variables from user (Issue #1000)
@@ -1609,7 +1710,41 @@ module "ecs_service_mcpgw" {
         startPeriod = 30
       }
     }
-  }
+    },
+    # Issue #1122: per-task ADOT collector sidecar for the mcpgw service.
+    var.enable_observability ? {
+      adot-collector = {
+        cpu                    = local.adot_sidecar_cpu
+        memory                 = local.adot_sidecar_memory
+        essential              = false
+        image                  = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+        versionConsistency     = "disabled"
+        readonlyRootFilesystem = false
+
+        command = ["--config=env:AOT_CONFIG_CONTENT"]
+
+        environment = [
+          {
+            name  = "AOT_CONFIG_CONTENT"
+            value = local.adot_otlp_to_amp_config
+          },
+          {
+            name  = "AWS_REGION"
+            value = data.aws_region.current.id
+          }
+        ]
+
+        enable_cloudwatch_logging              = true
+        cloudwatch_log_group_name              = "/ecs/${local.name_prefix}-mcpgw-adot"
+        cloudwatch_log_group_retention_in_days = 30
+
+        dependencies = [{
+          containerName = "mcpgw-server"
+          condition     = "START"
+        }]
+      }
+    } : {}
+  )
 
   volume = {
     mcpgw-data = {

@@ -245,6 +245,8 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("otel_otlp_endpoint", "OTLP Endpoint", False),
             ("otel_otlp_export_interval_ms", "Export Interval (ms)", False),
             ("otel_exporter_otlp_metrics_temporality_preference", "Metrics Temporality", False),
+            ("otel_metric_export_interval_ms", "OTel Metric Export Interval (ms)", False),
+            ("metrics_legacy_http_post", "Legacy HTTP POST Path (deprecated)", False),
         ],
     },
     "telemetry": {
