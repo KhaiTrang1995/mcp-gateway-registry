@@ -25,11 +25,8 @@ exporters:
   prometheus:
     endpoint: 0.0.0.0:8889
 
-  # Log every received metric / span to stdout. Use `verbosity: detailed` to
-  # see attribute breakdowns (high signal but very chatty); use `normal` for
-  # smaller logs.
   debug:
-    verbosity: detailed
+    verbosity: basic
 
 extensions:
   health_check:
@@ -40,7 +37,7 @@ service:
   pipelines:
     metrics:
       receivers: [otlp]
-      exporters: [debug, prometheus]
+      exporters: [prometheus]
     traces:
       receivers: [otlp]
       exporters: [debug]
