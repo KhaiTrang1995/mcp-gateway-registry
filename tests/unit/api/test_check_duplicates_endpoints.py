@@ -27,6 +27,7 @@ def _admin_user_context() -> dict[str, Any]:
         "ui_permissions": {
             "register_service": ["all"],
             "publish_agent": ["all"],
+            "publish_skill": ["all"],
         },
     }
 

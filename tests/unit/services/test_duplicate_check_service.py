@@ -390,14 +390,13 @@ class TestExactMatchCheck:
         assert [m.path for m in result.advisory_matches] == ["/sim"]
         assert result.similarity_search_available is True
 
-    async def test_self_excluded_by_owner_match(self, monkeypatch) -> None:
-        """Re-registering one's own server should not collide with itself.
+    async def test_own_entry_still_surfaces_as_collision(self, monkeypatch) -> None:
+        """Re-registering one's own server still surfaces as collision.
 
-        External callers (CLI, federation, CI) may not know to pass
-        ``self_path``; the service auto-excludes when the matching
-        document was registered by the same user. UI flows that pass
-        ``self_path`` already get the exclusion via the path branch;
-        this is the safety net for everything else.
+        Users should see their own duplicates so they can choose to
+        update rather than create a second entry at the same URL.
+        The self_path exclusion is the only way to suppress a match
+        (used by the edit flow where the user IS updating that entry).
         """
         service = _build_service(
             monkeypatch,
@@ -414,10 +413,11 @@ class TestExactMatchCheck:
                 user_context={"username": "alice", "is_admin": True},
             )
         )
-        assert result.collision_with == []
+        assert len(result.collision_with) == 1
+        assert result.collision_with[0].path == "/me"
 
-    async def test_self_excluded_by_owner_for_skill(self, monkeypatch) -> None:
-        """Skills use the ``owner`` field, not ``registered_by``."""
+    async def test_own_skill_still_surfaces_as_collision(self, monkeypatch) -> None:
+        """Skills owned by the caller still surface as collisions."""
         service = _build_service(
             monkeypatch,
             skill_match={
@@ -433,7 +433,8 @@ class TestExactMatchCheck:
                 user_context={"username": "alice", "is_admin": True},
             )
         )
-        assert result.collision_with == []
+        assert len(result.collision_with) == 1
+        assert result.collision_with[0].path == "/skills/mine"
 
     async def test_collision_surfaces_when_owner_differs(self, monkeypatch) -> None:
         """Auto-exclusion fires only on exact username match.
