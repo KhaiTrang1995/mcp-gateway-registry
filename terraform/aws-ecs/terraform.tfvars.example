@@ -753,8 +753,8 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 #     - Nginx config is NOT updated on server changes
 #     - Frontend shows direct connection mode (proxy_pass_url)
 #     - Use when registry is separate from gateway infrastructure
-# Default: "with-gateway" (uncomment to change)
-deployment_mode = "registry-only"
+# Default: "with-gateway" (uncomment and set to "registry-only" to change)
+# deployment_mode = "registry-only"
 
 # REGISTRY_MODE controls which features are enabled (informational - for UI feature flags)
 # This setting affects the /api/config response which the frontend can use
