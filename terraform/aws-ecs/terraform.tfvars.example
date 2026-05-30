@@ -96,23 +96,29 @@ keycloak_database_username = "keycloak"
 keycloak_database_password = "CHANGE-ME-DB-PASSWORD"
 
 # ============================================================================
-# CONTAINER IMAGE URIS (REQUIRED)
+# CONTAINER IMAGES (Optional - pre-built public ECR images used by default)
 # ============================================================================
+# Core services (registry, auth-server, mcpgw) default to pre-built images
+# from public.ecr.aws/p3v1o3c6/. No build step is required for a standard
+# deployment. Override below only if using custom-built images from your
+# private ECR (run `make build-push` first):
+#
+# registry_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-registry:latest"
+# auth_server_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-auth-server:latest"
+# mcpgw_image_uri       = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-mcpgw:latest"
 
-# Registry image from ECR
-registry_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-registry:1.24.3"
-
-# Auth server image from ECR
-auth_server_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-auth-server:1.24.3"
-
-# MCP Server images from ECR
-currenttime_image_uri         = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-currenttime:1.24.3"
-mcpgw_image_uri               = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-mcpgw:1.24.3"
-realserverfaketools_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-realserverfaketools:1.24.3"
-
-# A2A Agent images from ECR
-flight_booking_agent_image_uri   = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-flight-booking-agent:1.24.3"
-travel_assistant_agent_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-travel-assistant-agent:1.24.3"
+# ============================================================================
+# DEMO SERVERS (Optional - disabled by default)
+# ============================================================================
+# To deploy demo MCP servers and A2A agents, set enable_demo_servers = true
+# and provide image URIs. These images are NOT available on public ECR and
+# must be built from source (run `make build-push`).
+#
+# enable_demo_servers = true
+# currenttime_image_uri            = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-currenttime:latest"
+# realserverfaketools_image_uri    = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-realserverfaketools:latest"
+# flight_booking_agent_image_uri   = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-flight-booking-agent:latest"
+# travel_assistant_agent_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-travel-assistant-agent:latest"
 
 # ============================================================================
 # OPTIONAL: ADDITIONAL CONFIGURATION
@@ -241,6 +247,21 @@ session_cookie_domain = ""
 # dedup_registration_hint_enabled = true
 # dedup_score_threshold           = 0.7
 # dedup_max_suggestions           = 3
+
+# ============================================================================
+# STORAGE BACKEND
+# ============================================================================
+# Selects where the registry stores servers, agents, scopes, and embeddings.
+# Default: "documentdb" (provisions an Amazon DocumentDB cluster in this state).
+# Accepted values:
+#   "documentdb"    - Provision AWS DocumentDB (this module manages the cluster).
+#                     NOTE: DocumentDB is not available in every region - verify
+#                     your aws_region supports it before deploying.
+#   "file"          - JSON files only, no DocumentDB provisioned (local/dev).
+#   "mongodb-ce" / "mongodb" / "mongodb-atlas"
+#                   - External MongoDB you already own. No DocumentDB provisioned.
+#                     Requires mongodb_connection_string or *_secret_arn (see below).
+storage_backend = "documentdb"
 
 # ============================================================================
 # DOCUMENTDB ELASTIC CLUSTER CONFIGURATION
@@ -732,8 +753,8 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 #     - Nginx config is NOT updated on server changes
 #     - Frontend shows direct connection mode (proxy_pass_url)
 #     - Use when registry is separate from gateway infrastructure
-# Default: "with-gateway" (uncomment to change)
-deployment_mode = "registry-only"
+# Default: "with-gateway" (uncomment and set to "registry-only" to change)
+# deployment_mode = "registry-only"
 
 # REGISTRY_MODE controls which features are enabled (informational - for UI feature flags)
 # This setting affects the /api/config response which the frontend can use

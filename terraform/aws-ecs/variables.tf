@@ -120,46 +120,64 @@ variable "keycloak_log_level" {
 
 #
 # MCP Gateway Services - Container Images
+# Core services default to pre-built images from public ECR (no build required).
+# Override these only if deploying custom-built images from a private ECR.
 #
 
 variable "registry_image_uri" {
-  description = "Container image URI for registry service"
+  description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = ""
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.24.3"
 }
 
 variable "auth_server_image_uri" {
-  description = "Container image URI for auth server service"
+  description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "mcpgateway/auth-server:latest"
-}
-
-variable "currenttime_image_uri" {
-  description = "Container image URI for currenttime MCP server"
-  type        = string
-  default     = ""
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.24.3"
 }
 
 variable "mcpgw_image_uri" {
-  description = "Container image URI for mcpgw MCP server"
+  description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
+  type        = string
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.24.3"
+}
+
+variable "keycloak_image_uri" {
+  description = "Container image URI for Keycloak. Defaults to the official public image, run non-optimized so no custom build or private ECR push is required (the task supplies KC_* config at runtime). Override with a custom-built image if desired."
+  type        = string
+  default     = "quay.io/keycloak/keycloak:25.0"
+}
+
+#
+# Demo Servers (disabled by default)
+#
+
+variable "enable_demo_servers" {
+  description = "Deploy demo MCP servers and A2A agents (currenttime, realserverfaketools, flight-booking-agent, travel-assistant-agent). Requires setting the corresponding image URIs."
+  type        = bool
+  default     = false
+}
+
+variable "currenttime_image_uri" {
+  description = "Container image URI for currenttime MCP server (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "realserverfaketools_image_uri" {
-  description = "Container image URI for realserverfaketools MCP server"
+  description = "Container image URI for realserverfaketools MCP server (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "flight_booking_agent_image_uri" {
-  description = "Container image URI for flight booking A2A agent"
+  description = "Container image URI for flight booking A2A agent (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
 
 variable "travel_assistant_agent_image_uri" {
-  description = "Container image URI for travel assistant A2A agent"
+  description = "Container image URI for travel assistant A2A agent (only used when enable_demo_servers is true)"
   type        = string
   default     = ""
 }
@@ -378,7 +396,7 @@ variable "storage_backend" {
     `terraform plan` time via a precondition on the mcp_gateway module.
   DESC
   type        = string
-  default     = "file"
+  default     = "documentdb"
 
   validation {
     condition = contains(
@@ -1136,9 +1154,9 @@ variable "metrics_service_image_uri" {
 }
 
 variable "grafana_image_uri" {
-  description = "Container image URI for Grafana OSS (custom image with baked-in provisioning). Required when enable_observability is true."
+  description = "Container image URI for Grafana. Defaults to the stock public Grafana OSS image; provisioning (AMP datasource + dashboards) is applied at runtime by the grafana-config sidecar, so no custom-built image is required. Override with a custom image if desired."
   type        = string
-  default     = ""
+  default     = "grafana/grafana:12.4.3"
 }
 
 variable "grafana_admin_password" {

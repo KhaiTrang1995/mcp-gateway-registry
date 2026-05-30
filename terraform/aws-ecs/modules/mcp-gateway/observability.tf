@@ -128,7 +128,11 @@ locals {
 
 #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_metrics" {
-  count   = var.enable_observability ? 1 : 0
+  # metrics-service is optional: the core services (registry/auth/mcpgw) emit OTel
+  # straight to their own ADOT sidecars, so the standalone metrics-service is only
+  # created when an image is explicitly provided. Avoids requiring a build for a
+  # standard observability deploy.
+  count   = var.enable_observability && var.metrics_service_image_uri != "" ? 1 : 0
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -602,6 +606,56 @@ module "ecs_service_grafana" {
         timeout     = 5
         retries     = 3
         startPeriod = 30
+      }
+    }
+
+    # Post-install sidecar (replaces the custom Grafana image's baked-in
+    # provisioning): waits for Grafana, creates the AMP datasource (SigV4),
+    # and imports the bundled dashboard via the Grafana HTTP API. Non-essential
+    # and runs on every task start, so it self-heals across task replacements.
+    grafana-config = {
+      essential              = false
+      image                  = "public.ecr.aws/docker/library/alpine:3.21"
+      readonlyRootFilesystem = false
+
+      dependsOn = [{
+        containerName = "grafana"
+        condition     = "START"
+      }]
+
+      command = ["/bin/sh", "-c", <<-EOT
+        apk add --no-cache curl >/dev/null 2>&1 || true
+        echo "Waiting for Grafana to be ready..."
+        i=0; while [ $i -lt 60 ]; do curl -sf http://localhost:3000/api/health >/dev/null 2>&1 && break; i=$((i+1)); sleep 5; done
+        GURL="http://admin:$${GF_SECURITY_ADMIN_PASSWORD}@localhost:3000"
+        echo "Creating Amazon Managed Prometheus datasource..."
+        printf '{"name":"Amazon Managed Prometheus","type":"prometheus","access":"proxy","url":"%s","isDefault":true,"jsonData":{"sigV4Auth":true,"sigV4Region":"%s","httpMethod":"GET"}}' "$${AMP_ENDPOINT}" "$${AWS_REGION}" > /tmp/ds.json
+        curl -s -X DELETE "$${GURL}/api/datasources/name/Amazon%20Managed%20Prometheus" >/dev/null 2>&1 || true
+        curl -s -X POST "$${GURL}/api/datasources" -H "Content-Type: application/json" --data @/tmp/ds.json >/dev/null 2>&1 || true
+        echo "Importing MCP analytics dashboard..."
+        printf '{"dashboard":%s,"overwrite":true,"folderId":0}' "$${DASHBOARD_JSON}" > /tmp/dash.json
+        curl -s -X POST "$${GURL}/api/dashboards/db" -H "Content-Type: application/json" --data @/tmp/dash.json >/dev/null 2>&1 || true
+        echo "Grafana post-install complete."
+      EOT
+      ]
+
+      environment = [
+        { name = "AWS_REGION", value = data.aws_region.current.id },
+        { name = "AMP_ENDPOINT", value = local.amp_query_endpoint },
+        { name = "GF_SECURITY_ADMIN_PASSWORD", value = var.grafana_admin_password },
+        { name = "DASHBOARD_JSON", value = file("${path.module}/../../grafana/dashboards/mcp-analytics-comprehensive.json") },
+      ]
+
+      # Log into the grafana container's log group (do NOT create a second group
+      # with the same name — that races the grafana container and fails apply).
+      enable_cloudwatch_logging = false
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          "awslogs-group"         = "/ecs/${local.name_prefix}-grafana"
+          "awslogs-region"        = data.aws_region.current.id
+          "awslogs-stream-prefix" = "config"
+        }
       }
     }
   }

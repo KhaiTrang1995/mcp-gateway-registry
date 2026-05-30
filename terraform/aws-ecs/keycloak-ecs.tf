@@ -58,6 +58,19 @@ locals {
     {
       name  = "KEYCLOAK_LOGLEVEL"
       value = var.keycloak_log_level
+    },
+    {
+      # Public-image support: the official quay.io/keycloak image is NOT pre-built
+      # with our options (the custom image baked these via `kc.sh build`). Running a
+      # non-optimized `start` (see command below) makes Keycloak build from these at
+      # startup. KC_DB must be the Aurora vendor (mysql); KC_FEATURES matches the
+      # custom Dockerfile's token-exchange feature.
+      name  = "KC_DB"
+      value = "mysql"
+    },
+    {
+      name  = "KC_FEATURES"
+      value = "token-exchange"
     }
   ]
 
@@ -273,9 +286,15 @@ resource "aws_ecs_task_definition" "keycloak" {
   container_definitions = jsonencode([
     {
       name               = "keycloak"
-      image              = "${aws_ecr_repository.keycloak.repository_url}:latest"
+      image              = var.keycloak_image_uri
       versionConsistency = "disabled"
       essential          = true
+
+      # Non-optimized start so a stock public Keycloak image works without a
+      # pre-baked `kc.sh build`. Keycloak builds from the KC_* env at startup
+      # (~20-30s slower first boot). The official image's entrypoint is kc.sh,
+      # so this becomes `kc.sh start`.
+      command = ["start"]
 
       portMappings = [
         {
