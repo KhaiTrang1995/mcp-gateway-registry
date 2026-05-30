@@ -259,6 +259,7 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("telemetry_debug", "Debug Mode", False),
             ("telemetry_endpoint", "Collector Endpoint", False),
             ("telemetry_imds_probe_disabled", "Telemetry: Disable IMDS Probe", False),
+            ("mcp_cloud_provider", "Cloud Provider Override", False),
         ],
     },
     "demo_server": {
@@ -321,9 +322,18 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("github_api_base_url", "API Base URL", False),
         ],
     },
+    "registration_dedup": {
+        "title": "Registration Deduplication",
+        "order": 21,
+        "fields": [
+            ("dedup_registration_hint_enabled", "UI Hint Enabled", False),
+            ("dedup_score_threshold", "Score Threshold", False),
+            ("dedup_max_suggestions", "Max Suggestions", False),
+        ],
+    },
     "agent_batch": {
         "title": "Agent Batch API",
-        "order": 21,
+        "order": 22,
         "fields": [
             ("batch_worker_enabled", "Worker Enabled", False),
             ("batch_max_operations_per_job", "Max Operations Per Job", False),
@@ -645,6 +655,7 @@ async def get_config() -> dict[str, Any]:
         "registry_mode": settings.registry_mode.value,
         "nginx_updates_enabled": settings.nginx_updates_enabled,
         "registration_gate_enabled": settings.registration_gate_enabled,
+        "dedup_registration_hint_enabled": settings.dedup_registration_hint_enabled,
         "asset_lifecycle_statuses": [s.value for s in LifecycleStatus],
         "coding_assistants": settings.coding_assistants_list,
         "ui_title": settings.effective_ui_title,
