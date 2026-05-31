@@ -5018,7 +5018,7 @@ def cmd_embeddings_reindex(args: argparse.Namespace) -> int:
             response = client._make_request(
                 method="POST",
                 endpoint="/api/admin/embeddings/reindex",
-                json={"paths": batch},
+                data={"paths": batch},
             )
             result = response.json()
             total_success += result.get("success", 0)
