@@ -1,15 +1,27 @@
-# Fix Missing Search Embeddings
+# Why are some of my assets not showing up in semantic search?
 
-## Problem
+## Question
 
-Some servers, agents, or skills are registered in the registry but do not appear in semantic search results. This happens when embedding generation fails during registration (e.g., embedding model temporarily unavailable, network timeout, or model initialization error).
+I have servers, agents, or skills registered in the registry, but they do not appear when I search for them using semantic search. Keyword search on the list pages finds them fine, but the semantic search endpoint returns no results for these assets. What's happening and how do I fix it?
 
-## How to Detect
+## Answer
 
-Use the `embeddings-missing` command to scan for documents that exist in source collections but have no corresponding entry in the search embeddings index:
+This happens when embedding generation fails during registration. The asset gets stored in the source collection (servers, agents, or skills) but never makes it to the embeddings index. Common causes:
+
+- Embedding model was temporarily unavailable (network timeout, cold start)
+- Model initialization failed at the time of registration
+- Asset was imported via federation sync without triggering re-indexing
+
+The registry provides admin APIs to detect and fix this.
+
+## How to detect missing embeddings
+
+### Via CLI (registry_management.py)
 
 ```bash
-uv run python registry_management.py embeddings-missing
+uv run python api/registry_management.py \
+    --registry-url http://localhost --token-file .token \
+    embeddings-missing
 ```
 
 Example output:
@@ -28,40 +40,36 @@ Missing documents (2):
   /my-new-agent                                     a2a_agent       My New Agent
 ```
 
-## How to Fix
-
-Re-index all missing documents in one command:
+### Via REST API
 
 ```bash
-uv run python registry_management.py embeddings-reindex --all-missing
-```
-
-Or re-index specific paths:
-
-```bash
-uv run python registry_management.py embeddings-reindex \
-    --paths /atlassian/ /my-new-agent
-```
-
-Example output:
-
-```
-Found 2 missing documents. Reindexing...
-  Batch 1: 2 success, 0 failed
-
-Reindex complete: 2 success, 0 failed
-```
-
-## Using the API Directly
-
-If you prefer to call the REST API directly (e.g., from a script or monitoring system):
-
-```bash
-# Check for missing embeddings
 curl -s -H "Authorization: Bearer $TOKEN" \
     https://your-registry/api/admin/embeddings/missing | jq .
+```
 
-# Re-index specific paths
+## How to fix missing embeddings
+
+### Re-index all missing documents
+
+```bash
+uv run python api/registry_management.py \
+    --registry-url http://localhost --token-file .token \
+    embeddings-reindex --all-missing
+```
+
+This finds all missing documents and generates their embeddings in batches of 100.
+
+### Re-index specific paths
+
+```bash
+uv run python api/registry_management.py \
+    --registry-url http://localhost --token-file .token \
+    embeddings-reindex --paths /atlassian/ /my-new-agent
+```
+
+### Via REST API
+
+```bash
 curl -s -X POST \
     -H "Authorization: Bearer $TOKEN" \
     -H "Content-Type: application/json" \
@@ -69,15 +77,15 @@ curl -s -X POST \
     https://your-registry/api/admin/embeddings/reindex | jq .
 ```
 
-## When to Run This
+## When should I run this?
 
 - After upgrading the registry (some documents may not have been re-indexed)
-- After a transient embedding model failure (check logs for "Embedding model unavailable" warnings)
-- After federation sync imports new assets (synced assets may arrive without embeddings)
+- After seeing "Embedding model unavailable" warnings in logs
+- After federation sync imports new assets
 - As a periodic health check (schedule weekly or after deployments)
 
 ## Requirements
 
-- Admin permissions required (the "Get JWT Token" button in the UI provides an admin token)
+- Admin permissions required (use the "Get JWT Token" button in the registry UI)
 - The embedding model must be available and healthy for re-indexing to succeed
 - Batch limit: 100 paths per API call (the CLI handles batching automatically)
