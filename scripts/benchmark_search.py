@@ -1,24 +1,25 @@
-"""Benchmark search scoring: compare legacy vs RRF fusion methods.
+"""Benchmark search quality against a deployed AI Registry.
 
-Runs a set of queries against a deployment and captures results for
-before/after comparison. Set SEARCH_FUSION_METHOD=legacy on the old
-deployment and SEARCH_FUSION_METHOD=rrf on the new one, then diff
-the output JSON files.
+Runs the ground truth query set (100 queries) against a live deployment's
+/api/search/semantic endpoint and captures results for quality assessment
+and before/after comparison.
 
 Usage:
-    # Capture baseline (legacy scoring)
+    # Test against your registry (provide URL and token file)
+    uv run python scripts/benchmark_search.py \
+        --url https://your-registry.example.com \
+        --token-file .token \
+        --output results.json
+
+    # Compare two runs (e.g., before and after upgrade)
+    uv run python scripts/benchmark_search.py \
+        --compare results_before.json results_after.json
+
+    # Use inline token instead of file
     uv run python scripts/benchmark_search.py \
         --url http://localhost \
-        --output results_legacy.json
-
-    # Capture new (RRF scoring)
-    uv run python scripts/benchmark_search.py \
-        --url http://localhost \
-        --output results_rrf.json
-
-    # Compare side by side
-    uv run python scripts/benchmark_search.py \
-        --compare results_legacy.json results_rrf.json
+        --token "eyJhbG..." \
+        --output results.json
 """
 
 import argparse
@@ -36,7 +37,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-QUERIES_FILE = Path(__file__).parent.parent / "tests/fixtures/search_dataset/benchmark_queries.json"
+QUERIES_FILE = Path(__file__).parent.parent / "tests/fixtures/search_dataset/ground_truth.json"
 
 
 def _load_queries(
@@ -249,11 +250,13 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-    # Run against a deployment
-    uv run python scripts/benchmark_search.py --url http://localhost --output baseline.json
+    # Test against your deployed registry
+    uv run python scripts/benchmark_search.py \\
+        --url https://registry.example.com --token-file .token --output results.json
 
-    # Compare two runs
-    uv run python scripts/benchmark_search.py --compare baseline.json new.json
+    # Compare before/after upgrade
+    uv run python scripts/benchmark_search.py \\
+        --compare results_before.json results_after.json
 """,
     )
     parser.add_argument(
@@ -270,7 +273,13 @@ Example usage:
         "--token",
         type=str,
         default=None,
-        help="Bearer token for authentication",
+        help="Bearer token for authentication (inline)",
+    )
+    parser.add_argument(
+        "--token-file",
+        type=str,
+        default=None,
+        help="Path to file containing bearer token (e.g. .token)",
     )
     parser.add_argument(
         "--queries",
@@ -294,11 +303,22 @@ Example usage:
     if not args.url or not args.output:
         parser.error("--url and --output are required when not using --compare")
 
+    token = args.token
+    if not token and args.token_file:
+        token_path = Path(args.token_file)
+        if not token_path.exists():
+            parser.error(f"Token file not found: {token_path}")
+        raw = token_path.read_text().strip()
+        if raw.lower().startswith("bearer "):
+            token = raw[7:]
+        else:
+            token = raw
+
     queries = _load_queries(Path(args.queries))
     logger.info(f"Loaded {len(queries)} benchmark queries")
     logger.info(f"Target: {args.url}")
 
-    results = _run_benchmark(args.url, queries, args.token)
+    results = _run_benchmark(args.url, queries, token)
 
     output_path = Path(args.output)
     with open(output_path, "w") as f:

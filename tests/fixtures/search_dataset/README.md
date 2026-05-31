@@ -1,20 +1,87 @@
 # Search Evaluation Test Harness
 
-This folder contains a self-contained evaluation harness for testing search scoring methods offline. No server, Docker, or database required.
+## Dataset
 
-## What It Does
+The evaluation dataset ([ground_truth.json](ground_truth.json)) contains 100 search queries with human-annotated expected results, tested against 378 indexed documents ([unified_dataset.json](unified_dataset.json)).
 
-Runs a set of queries against a local document dataset using the same embedding model as production (all-MiniLM-L6-v2, 384 dimensions), scores results using both RRF and legacy methods, and measures quality against human-annotated ground truth using standard information retrieval metrics.
+The documents in this dataset come from three sources:
+
+1. **[Anthropic MCP Server Registry](https://github.com/modelcontextprotocol/servers)**: Federated MCP servers from the public Anthropic registry (context7, exa, hydrata, strava, linkedin, petstore, etc.)
+2. **[Anthropic Skills Registry](https://github.com/anthropics/skills)**: Skills from the public Anthropic skills repo (pr-review, mcp-builder, claude-api, etc.)
+3. **[GoDaddy ANS (Agent Name Service)](https://www.godaddy.com/ans)**: Agents verified via the Agent Name Service identity protocol
+4. **Custom entries**: Servers, agents, and skills registered during development and testing of this registry (travel agents, support agents, AWS KB, SRE gateway, etc.)
+
+## Testing Approaches
+
+Two ways to test search quality:
+
+1. **Against a live deployment** (default): Point at your registry URL with a token file and run queries against the real API
+2. **Standalone offline**: Run scoring locally using a dataset dump with the same embedding model as production
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `unified_dataset.json` | 378 documents with embeddings (dumped from `mcp_embeddings_384_default`) |
-| `ground_truth.json` | 100 queries with expected results and relevance grades |
-| `../../scripts/evaluate_search.py` | The evaluation script that runs everything |
+| [unified_dataset.json](unified_dataset.json) | 378 documents with embeddings (for offline mode) |
+| [ground_truth.json](ground_truth.json) | 100 queries with expected results and relevance grades |
+| [../../scripts/benchmark_search.py](../../scripts/benchmark_search.py) | Live deployment testing |
+| [../../scripts/evaluate_search.py](../../scripts/evaluate_search.py) | Offline evaluation with both scoring methods |
 
-## How to Run
+## Method 1: Test Against Your Deployed Registry (Recommended)
+
+This is the default approach. Provide the URL of your deployed AI Registry and a token file. The script runs the ground truth queries against the live `/api/search/semantic` endpoint and reports quality metrics.
+
+### Setup
+
+Create a token file containing your JWT token. You can get a short-lived token from the "Get JWT Token" button in the top-left corner of the registry UI.
+
+```bash
+# Paste the token from the registry UI into a file
+echo "eyJhbGciOi..." > .token
+```
+
+Note: This is a short-lived token. If tests fail with 401 errors, generate a fresh one.
+
+### Run
+
+```bash
+# Test against your deployment
+uv run python scripts/benchmark_search.py \
+    --url https://your-registry.example.com \
+    --token-file .token \
+    --output results.json
+
+# Compare two deployments (e.g., before and after upgrade)
+uv run python scripts/benchmark_search.py \
+    --url https://old-deployment.example.com \
+    --token-file .token \
+    --output results_before.json
+
+uv run python scripts/benchmark_search.py \
+    --url https://new-deployment.example.com \
+    --token-file .token \
+    --output results_after.json
+
+uv run python scripts/benchmark_search.py \
+    --compare results_before.json results_after.json
+```
+
+### What It Reports
+
+For each query:
+- Which servers, tools, agents, skills were returned
+- Their relevance scores
+- Whether results were reranked between runs
+
+Summary:
+- Score health (unique scores vs saturated at 1.0)
+- Side-by-side ranking differences
+
+## Method 2: Standalone Offline Evaluation
+
+Runs both scoring methods (RRF and legacy) locally against the document dataset using the same embedding model as production. No server, Docker, or network required.
+
+### Run
 
 ```bash
 cd /path/to/mcp-gateway-registry
@@ -33,7 +100,7 @@ uv run python scripts/evaluate_search.py --method rrf
 uv run python scripts/evaluate_search.py --method legacy
 ```
 
-First run downloads the embedding model (~80MB). Subsequent runs use the cached model and complete in ~20 seconds.
+First run downloads the embedding model (~80MB from HuggingFace). Subsequent runs use the cached model and complete in ~20 seconds.
 
 ## How the Evaluation Works
 
@@ -68,28 +135,42 @@ For each query, we know which documents should appear and how relevant they are 
 
 ### NDCG@10 (Normalized Discounted Cumulative Gain at position 10)
 
-Measures how well the top 10 results match the ideal ranking.
+The primary metric for search quality. NDCG measures whether the right documents appear in the right order within the top 10 results. It gives more credit for placing a highly relevant document at position #1 than at position #8, using a logarithmic discount. The score is normalized against the ideal ranking so that 1.0 means the system produced the perfect ordering.
 
 - **1.0** = perfect (all expected documents appear in ideal order)
 - **0.0** = none of the expected documents appear in top 10
 - **0.5** = expected documents appear but not in ideal positions
 
-NDCG rewards relevant documents ranked higher. Finding the right answer at position #1 is worth more than finding it at position #8.
+Reference: Jarvelin, K. and Kekalainen, J. (2002). "Cumulated gain-based evaluation of IR techniques." ACM Transactions on Information Systems, 20(4), 422-446.
 
 ### Recall@10
 
-What fraction of expected documents appear anywhere in the top 10.
+Measures completeness: what fraction of the known relevant documents actually appear somewhere in the top 10. A system can have high recall but low NDCG if it finds the right documents but ranks them poorly. Conversely, low recall means relevant documents are being missed entirely.
 
 - **1.0** = all expected documents found
 - **0.5** = half of the expected documents found
 
 ### MRR (Mean Reciprocal Rank)
 
-How quickly the first relevant result appears.
+Measures how quickly a user finds their first useful result. In practice, users often only look at the first few results. MRR captures whether the system puts at least one relevant document near the top. Averaged across all queries, it reflects the typical user experience of "how many results do I have to scan before finding something useful."
 
 - **1.0** = first result is relevant
 - **0.5** = second result is the first relevant one
 - **0.1** = tenth result is the first relevant one
+
+Reference: Voorhees, E. M. (1999). "The TREC-8 Question Answering Track Report." Proceedings of TREC-8.
+
+### RRF (Reciprocal Rank Fusion)
+
+The scoring method used by our hybrid search. RRF combines two independently-ranked lists (vector similarity and keyword matching) into a single ranking using only ordinal positions, not raw scores. This avoids the normalization problem that arises when combining scores from different scales (cosine similarity is bounded 0-1, while keyword boost scores are unbounded). The formula `1/(k + rank)` with k=60 gives a smooth decay where the top-ranked document in each list contributes most, but lower-ranked documents still participate.
+
+Reference: Cormack, G. V., Clarke, C. L. A., and Buettcher, S. (2009). "Reciprocal Rank Fusion outperforms Condorcet and individual Rank Learning Methods." Proceedings of the 32nd International ACM SIGIR Conference on Research and Development in Information Retrieval, 758-759.
+
+Production implementations:
+- Elasticsearch: https://www.elastic.co/guide/en/elasticsearch/reference/current/rrf.html
+- OpenSearch: https://opensearch.org/blog/hybrid-search/
+- MongoDB Atlas: https://www.mongodb.com/docs/atlas/atlas-vector-search/tutorials/reciprocal-rank-fusion/
+- Weaviate: https://weaviate.io/blog/hybrid-search-fusion-algorithms
 
 ## Ground Truth Format
 

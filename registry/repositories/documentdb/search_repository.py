@@ -259,7 +259,7 @@ def _reciprocal_rank_fusion(
     return results
 
 
-SCORE_DISPLAY_FLOOR: float = 0.20
+SCORE_DISPLAY_FLOOR: float = 0.25
 
 
 def _normalize_scores(
@@ -293,9 +293,10 @@ def _normalize_scores(
     normalized = []
     for doc, score in scored_results:
         norm = (score - min_score) / (max_score - min_score)
-        if norm < SCORE_DISPLAY_FLOOR:
+        display_score = round(norm, 4)
+        if display_score < SCORE_DISPLAY_FLOOR:
             continue
-        normalized.append((doc, round(norm, 4)))
+        normalized.append((doc, display_score))
 
     return normalized
 

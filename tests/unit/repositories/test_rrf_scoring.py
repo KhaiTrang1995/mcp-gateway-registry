@@ -223,7 +223,7 @@ class TestNormalizeScores:
         assert result[0][1] == 1.0
 
     def test_two_results(self):
-        """Two results: top gets 1.0, bottom is excluded (below floor)."""
+        """Two results: top gets 1.0, bottom is excluded (below 25% floor)."""
         result = _normalize_scores([
             (_make_doc("top"), 0.033),
             (_make_doc("bot"), 0.016),
