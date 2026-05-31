@@ -42,6 +42,31 @@ echo "eyJhbGciOi..." > .token
 
 Note: This is a short-lived token. If tests fail with 401 errors, generate a fresh one.
 
+### Generate Your Own Ground Truth
+
+The included `ground_truth.json` is specific to our development registry. If your registry has different assets, generate a ground truth file tailored to your deployment:
+
+```bash
+uv run python scripts/benchmark_search.py \
+    --url https://your-registry.example.com \
+    --token-file .token \
+    --generate-ground-truth
+```
+
+This pulls all servers, agents, and skills from your registry and auto-generates queries from:
+- Asset names (exact-name queries)
+- Tags (tag-based queries)
+- Description keywords (description-derived queries)
+
+The output is saved to `tests/fixtures/search_dataset/generated_ground_truth.json`. Run the benchmark with it:
+
+```bash
+uv run python scripts/benchmark_search.py \
+    --url https://your-registry.example.com \
+    --token-file .token \
+    --queries tests/fixtures/search_dataset/generated_ground_truth.json
+```
+
 ### Run
 
 ```bash

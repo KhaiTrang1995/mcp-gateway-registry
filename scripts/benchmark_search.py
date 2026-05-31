@@ -135,6 +135,239 @@ def _extract_summary(
     return summary
 
 
+def _fetch_all_assets(
+    base_url: str,
+    token: str | None = None,
+) -> dict:
+    """Fetch all servers, agents, and skills from the registry."""
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    assets = {"servers": [], "agents": [], "skills": []}
+
+    for endpoint, key in [
+        ("/api/servers", "servers"),
+        ("/api/agents", "agents"),
+        ("/api/skills", "skills"),
+    ]:
+        try:
+            response = requests.get(
+                f"{base_url}{endpoint}",
+                headers=headers,
+                params={"limit": 2000},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+            if isinstance(data, dict):
+                assets[key] = data.get(key, [])
+            elif isinstance(data, list):
+                assets[key] = data
+        except Exception as e:
+            logger.warning(f"Could not fetch {key}: {e}")
+
+    return assets
+
+
+def _generate_queries_from_assets(
+    assets: dict,
+) -> list[dict]:
+    """Generate ground truth queries from registry assets.
+
+    Strategies:
+    1. Exact name queries (should find the asset by name)
+    2. Tag-based queries (should find assets with those tags)
+    3. Description-derived queries (key phrases from descriptions)
+    4. Multi-word queries combining name + domain terms
+    """
+    ground_truth = []
+    seen_queries = set()
+
+    def _add_query(query, category, description, expected):
+        q_lower = query.lower().strip()
+        if not q_lower or q_lower in seen_queries or len(q_lower) < 3:
+            return
+        seen_queries.add(q_lower)
+        ground_truth.append({
+            "query": query,
+            "category": category,
+            "description": description,
+            "expected": expected,
+        })
+
+    # Strategy 1: Server names as queries
+    for server in assets.get("servers", []):
+        path = server.get("path", "")
+        name = server.get("server_name") or server.get("name", "")
+        if not name or not path:
+            continue
+        tags = server.get("tags", [])
+        if "stress-test" in tags or "security-pending" in tags:
+            continue
+
+        _add_query(
+            name,
+            "exact-name",
+            f"Server name: {name}",
+            [{"path": path, "grade": 3, "reason": f"Exact name match: {name}"}],
+        )
+
+    # Strategy 2: Agent names as queries
+    for agent in assets.get("agents", []):
+        path = agent.get("path", "")
+        name = agent.get("name", "")
+        if not name or not path:
+            continue
+        tags = agent.get("tags", [])
+        if "stress-test" in tags or "security-pending" in tags:
+            continue
+
+        _add_query(
+            name,
+            "exact-name",
+            f"Agent name: {name}",
+            [{"path": path, "grade": 3, "reason": f"Exact name match: {name}"}],
+        )
+
+    # Strategy 3: Skill names as queries
+    for skill in assets.get("skills", []):
+        path = skill.get("path", "")
+        name = skill.get("name", "")
+        if not name or not path:
+            continue
+        tags = skill.get("tags", [])
+        if "stress-test" in tags:
+            continue
+
+        _add_query(
+            name,
+            "exact-name",
+            f"Skill name: {name}",
+            [{"path": path, "grade": 3, "reason": f"Exact name match: {name}"}],
+        )
+
+    # Strategy 4: Tag-based queries (group assets by shared tags)
+    tag_to_assets: dict[str, list[dict]] = {}
+    for asset_type, key in [("mcp_server", "servers"), ("a2a_agent", "agents"), ("skill", "skills")]:
+        for asset in assets.get(key, []):
+            path = asset.get("path", "")
+            name = asset.get("server_name") or asset.get("name", "")
+            tags = asset.get("tags", [])
+            if "stress-test" in tags or "security-pending" in tags:
+                continue
+            for tag in tags:
+                if tag in ("stress-test", "security-pending", "security-pending-local"):
+                    continue
+                if tag not in tag_to_assets:
+                    tag_to_assets[tag] = []
+                tag_to_assets[tag].append({
+                    "path": path,
+                    "name": name,
+                    "entity_type": asset_type,
+                })
+
+    for tag, tag_assets in tag_to_assets.items():
+        if len(tag) < 3 or len(tag_assets) > 20:
+            continue
+        expected = [
+            {"path": a["path"], "grade": 2, "reason": f"Has tag: {tag}"}
+            for a in tag_assets[:5]
+        ]
+        _add_query(
+            tag,
+            "tag-based",
+            f"Tag query: assets tagged with '{tag}'",
+            expected,
+        )
+
+    # Strategy 5: Description keywords (first 3 meaningful words)
+    for asset_type, key in [("mcp_server", "servers"), ("a2a_agent", "agents"), ("skill", "skills")]:
+        for asset in assets.get(key, []):
+            path = asset.get("path", "")
+            name = asset.get("server_name") or asset.get("name", "")
+            desc = asset.get("description", "")
+            tags = asset.get("tags", [])
+            if "stress-test" in tags or "security-pending" in tags:
+                continue
+            if not desc or len(desc) < 20:
+                continue
+
+            import re
+            words = [
+                w.lower() for w in re.split(r"\W+", desc)
+                if len(w) > 3 and w.lower() not in (
+                    "this", "that", "with", "from", "your", "have", "will",
+                    "been", "they", "their", "about", "would", "could", "should",
+                    "into", "also", "tool", "server", "agent", "skill",
+                )
+            ][:4]
+            if len(words) >= 2:
+                query = " ".join(words[:3])
+                _add_query(
+                    query,
+                    "description-derived",
+                    f"Keywords from {name} description",
+                    [{"path": path, "grade": 3, "reason": f"Description contains these terms"}],
+                )
+
+    # Cap at 100 queries, balanced across categories
+    if len(ground_truth) > 100:
+        from collections import Counter
+        cat_counts = Counter(q["category"] for q in ground_truth)
+        max_per_cat = max(10, 100 // len(cat_counts))
+        filtered = []
+        cat_used: dict[str, int] = {}
+        for q in ground_truth:
+            cat = q["category"]
+            if cat_used.get(cat, 0) < max_per_cat:
+                filtered.append(q)
+                cat_used[cat] = cat_used.get(cat, 0) + 1
+        ground_truth = filtered[:100]
+
+    return ground_truth
+
+
+def _generate_ground_truth(
+    base_url: str,
+    token: str | None = None,
+) -> None:
+    """Generate ground truth file from a live registry's assets."""
+    logger.info(f"Fetching assets from {base_url}")
+    assets = _fetch_all_assets(base_url, token)
+
+    server_count = len(assets.get("servers", []))
+    agent_count = len(assets.get("agents", []))
+    skill_count = len(assets.get("skills", []))
+    logger.info(
+        f"Found {server_count} servers, {agent_count} agents, {skill_count} skills"
+    )
+
+    if server_count + agent_count + skill_count == 0:
+        logger.error("No assets found. Check URL and token.")
+        return
+
+    ground_truth = _generate_queries_from_assets(assets)
+    logger.info(f"Generated {len(ground_truth)} queries")
+
+    output_dir = Path(__file__).parent.parent / "tests/fixtures/search_dataset"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "generated_ground_truth.json"
+    with open(output_path, "w") as f:
+        json.dump(ground_truth, f, indent=2)
+
+    from collections import Counter
+    cats = Counter(q["category"] for q in ground_truth)
+    logger.info(f"Saved to {output_path}")
+    logger.info(f"Categories: {dict(cats)}")
+    print(f"\nGround truth generated: {output_path}")
+    print(f"  {len(ground_truth)} queries across {len(cats)} categories")
+    for cat, count in cats.most_common():
+        print(f"    {cat}: {count}")
+    print(f"\nTo run the benchmark with your generated ground truth:")
+    print(f"  uv run python scripts/benchmark_search.py --url {base_url} --token-file .token --queries {output_path}")
+
+
 def _fetch_registry_stats(
     base_url: str,
     token: str | None = None,
@@ -593,6 +826,11 @@ Example usage:
         metavar="RESULTS_FILE",
         help="Generate a markdown report from a results JSON file",
     )
+    parser.add_argument(
+        "--generate-ground-truth",
+        action="store_true",
+        help="Generate ground truth from your registry's assets (requires --url and --token-file)",
+    )
 
     args = parser.parse_args()
 
@@ -606,6 +844,17 @@ Example usage:
 
     if not args.url:
         parser.error("--url is required when not using --compare or --report")
+
+    if args.generate_ground_truth:
+        token = args.token
+        if not token and args.token_file:
+            token_path = Path(args.token_file)
+            if not token_path.exists():
+                parser.error(f"Token file not found: {token_path}")
+            raw = token_path.read_text().strip()
+            token = _extract_token(raw)
+        _generate_ground_truth(args.url, token)
+        return
 
     if not args.output:
         output_dir = Path(__file__).parent.parent / "tests/fixtures/search_dataset"

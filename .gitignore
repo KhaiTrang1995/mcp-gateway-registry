@@ -441,6 +441,7 @@ tests/stress/results/
 tests/fixtures/search_dataset/unified_dataset.json
 tests/fixtures/search_dataset/benchmark_results.json
 tests/fixtures/search_dataset/benchmark_results.md
+tests/fixtures/search_dataset/generated_ground_truth.json
 
 # Benchmark search results (generated, not committed)
 results*.json
