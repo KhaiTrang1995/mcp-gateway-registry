@@ -1258,6 +1258,164 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
         except Exception as e:
             logger.error(f"Failed to remove entity from search index: {e}", exc_info=True)
 
+    async def find_missing_embeddings(self) -> dict[str, Any]:
+        """Find documents in source collections that have no embedding indexed.
+
+        Compares _id values across mcp_servers, mcp_agents, and agent_skills
+        collections against the embeddings collection.
+
+        Returns:
+            Dictionary with missing list, counts, and summary.
+        """
+        db = await get_documentdb_client()
+
+        source_collections = [
+            (get_collection_name("mcp_servers"), "mcp_server"),
+            (get_collection_name("mcp_agents"), "a2a_agent"),
+            (get_collection_name("agent_skills"), "skill"),
+        ]
+
+        embeddings_collection = await self._get_collection()
+        indexed_cursor = embeddings_collection.find({}, {"_id": 1})
+        indexed_docs = await indexed_cursor.to_list(length=None)
+        indexed_ids = {doc["_id"] for doc in indexed_docs}
+
+        missing = []
+        total_source = 0
+
+        for col_name, entity_type in source_collections:
+            collection = db[col_name]
+            cursor = collection.find(
+                {},
+                {"_id": 1, "server_name": 1, "name": 1, "is_enabled": 1},
+            )
+            source_docs = await cursor.to_list(length=None)
+            total_source += len(source_docs)
+
+            for doc in source_docs:
+                doc_id = doc["_id"]
+                if doc_id not in indexed_ids:
+                    name = doc.get("server_name") or doc.get("name") or doc_id
+                    missing.append({
+                        "path": doc_id,
+                        "entity_type": entity_type,
+                        "name": name,
+                        "is_enabled": doc.get("is_enabled", True),
+                    })
+
+        missing.sort(key=lambda x: (x["entity_type"], x["path"]))
+
+        return {
+            "missing": missing,
+            "total_missing": len(missing),
+            "total_indexed": len(indexed_ids),
+            "total_source": total_source,
+        }
+
+    async def reindex_paths(
+        self,
+        paths: list[str],
+    ) -> dict[str, Any]:
+        """Re-index specific documents by reading from source and generating embeddings.
+
+        For each path, finds the source document in the appropriate collection
+        and calls the corresponding index method.
+
+        Args:
+            paths: List of document paths to re-index (max 100).
+
+        Returns:
+            Dictionary with success/failed counts and per-path details.
+        """
+        db = await get_documentdb_client()
+
+        servers_col = db[get_collection_name("mcp_servers")]
+        agents_col = db[get_collection_name("mcp_agents")]
+        skills_col = db[get_collection_name("agent_skills")]
+
+        details = []
+
+        for path in paths:
+            try:
+                server_doc = await servers_col.find_one({"_id": path})
+                if server_doc:
+                    await self.index_server(
+                        path,
+                        server_doc,
+                        is_enabled=server_doc.get("is_enabled", True),
+                    )
+                    details.append({
+                        "path": path,
+                        "entity_type": "mcp_server",
+                        "status": "success",
+                    })
+                    continue
+
+                agent_doc = await agents_col.find_one({"_id": path})
+                if agent_doc:
+                    agent_card = AgentCard(**agent_doc)
+                    await self.index_agent(
+                        path,
+                        agent_card,
+                        is_enabled=agent_doc.get("is_enabled", True),
+                    )
+                    details.append({
+                        "path": path,
+                        "entity_type": "a2a_agent",
+                        "status": "success",
+                    })
+                    continue
+
+                skill_doc = await skills_col.find_one({"_id": path})
+                if skill_doc:
+                    from ...schemas.skill_models import SkillCard
+
+                    skill_card = SkillCard(**skill_doc)
+                    await self.index_skill(
+                        path,
+                        skill_card,
+                        is_enabled=skill_doc.get("is_enabled", True),
+                    )
+                    details.append({
+                        "path": path,
+                        "entity_type": "skill",
+                        "status": "success",
+                    })
+                    continue
+
+                details.append({
+                    "path": path,
+                    "entity_type": "unknown",
+                    "status": "failed",
+                    "error": "Not found in any source collection",
+                })
+
+            except Exception as e:
+                logger.error(f"Failed to reindex '{path}': {e}", exc_info=True)
+                details.append({
+                    "path": path,
+                    "entity_type": "unknown",
+                    "status": "failed",
+                    "error": str(e),
+                })
+
+        success_count = sum(1 for d in details if d["status"] == "success")
+        failed_count = sum(1 for d in details if d["status"] == "failed")
+
+        logger.info(
+            "Reindex completed: %d success, %d failed out of %d paths",
+            success_count,
+            failed_count,
+            len(paths),
+        )
+
+        return {
+            "success": success_count,
+            "failed": failed_count,
+            "total": len(paths),
+            "details": details,
+        }
+
     async def _client_side_search(
         self,
         query: str,
