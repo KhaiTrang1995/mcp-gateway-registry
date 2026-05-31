@@ -29,22 +29,22 @@ Two ways to test search quality:
 
 ## Method 1: Test Against Your Deployed Registry (Recommended)
 
-This is the default approach. Provide the URL of your deployed AI Registry and a token file. The script runs the ground truth queries against the live `/api/search/semantic` endpoint and reports quality metrics.
+The standard workflow for benchmarking search quality on any registry deployment. The script generates a ground truth dataset from your registry's own assets, runs the queries, and produces a quality report.
 
-### Setup
+### Step 1: Get a Token
 
-Create a token file containing your JWT token. You can get a short-lived token from the "Get JWT Token" button in the top-left corner of the registry UI.
+Get a short-lived JWT token from the "Get JWT Token" button in the top-left corner of the registry UI. Save it to a file:
 
 ```bash
-# Paste the token from the registry UI into a file
+# Paste the full JSON response or just the token into a file
 echo "eyJhbGciOi..." > .token
 ```
 
 Note: This is a short-lived token. If tests fail with 401 errors, generate a fresh one.
 
-### Generate Your Own Ground Truth
+### Step 2: Generate Ground Truth From Your Registry
 
-The included `ground_truth.json` is specific to our development registry. If your registry has different assets, generate a ground truth file tailored to your deployment:
+This pulls all servers, agents, and skills from your registry and auto-generates test queries from asset names, tags, and descriptions:
 
 ```bash
 uv run python scripts/benchmark_search.py \
@@ -53,12 +53,14 @@ uv run python scripts/benchmark_search.py \
     --generate-ground-truth
 ```
 
-This pulls all servers, agents, and skills from your registry and auto-generates queries from:
-- Asset names (exact-name queries)
-- Tags (tag-based queries)
-- Description keywords (description-derived queries)
+Output: `tests/fixtures/search_dataset/generated_ground_truth.json`
 
-The output is saved to `tests/fixtures/search_dataset/generated_ground_truth.json`. Run the benchmark with it:
+The generated queries cover:
+- **exact-name:** Asset names as queries (should find the asset directly)
+- **tag-based:** Tag values as queries (should find all assets with that tag)
+- **description-derived:** Key phrases from descriptions (tests semantic matching)
+
+### Step 3: Run Benchmark
 
 ```bash
 uv run python scripts/benchmark_search.py \
@@ -67,44 +69,31 @@ uv run python scripts/benchmark_search.py \
     --queries tests/fixtures/search_dataset/generated_ground_truth.json
 ```
 
-### Run
-
-```bash
-# Run benchmark and generate report (output defaults to tests/fixtures/search_dataset/)
-uv run python scripts/benchmark_search.py \
-    --url https://your-registry.example.com \
-    --token-file .token
-```
-
-This generates two files:
+This runs all queries against the live API, evaluates results against your ground truth, and generates:
 - `tests/fixtures/search_dataset/benchmark_results.json` (raw data)
-- `tests/fixtures/search_dataset/benchmark_results.md` (markdown report with NDCG metrics)
+- `tests/fixtures/search_dataset/benchmark_results.md` (markdown report)
 
-Both files are gitignored.
+### What the Report Contains
+
+- **Quality Metrics:** NDCG@10, MRR, Recall@10 (evaluated against your ground truth)
+- **Quality by Category:** breakdown by query type
+- **Score Health:** saturation count, unique score values, score range
+- **Per-query results:** ranked results with scores, found/missing from expected
 
 ### Additional Options
 
 ```bash
-# Custom output path
+# Compare two runs (e.g., before and after upgrade)
 uv run python scripts/benchmark_search.py \
-    --url https://your-registry.example.com \
-    --token-file .token \
-    --output /path/to/results.json
+    --compare results_before.json results_after.json
 
 # Regenerate report from existing results
 uv run python scripts/benchmark_search.py --report tests/fixtures/search_dataset/benchmark_results.json
 
-# Compare two runs side by side (e.g., before and after upgrade)
+# Use our bundled ground truth (specific to development registry)
 uv run python scripts/benchmark_search.py \
-    --compare results_before.json results_after.json
+    --url http://localhost --token-file .token
 ```
-
-### What the Report Contains
-
-- **Quality Metrics:** NDCG@10, MRR, Recall@10 (evaluated against ground truth)
-- **Quality by Category:** breakdown across all 10 query categories
-- **Score Health:** saturation count, unique score values, score range
-- **Per-query results:** ranked results with scores, ground truth comparison (found/missing)
 
 ## Method 2: Standalone Offline Evaluation
 

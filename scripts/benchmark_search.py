@@ -345,7 +345,7 @@ def _generate_ground_truth(
 
     if server_count + agent_count + skill_count == 0:
         logger.error("No assets found. Check URL and token.")
-        return
+        raise SystemExit(1)
 
     ground_truth = _generate_queries_from_assets(assets)
     logger.info(f"Generated {len(ground_truth)} queries")
