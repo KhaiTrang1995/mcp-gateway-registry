@@ -259,25 +259,27 @@ def _reciprocal_rank_fusion(
     return results
 
 
-SCORE_DISPLAY_FLOOR: float = 0.25
+SCORE_DISPLAY_FLOOR: float = 0.10
 
 
 def _normalize_scores(
     scored_results: list[tuple[dict, float]],
+    max_results: int = 10,
 ) -> list[tuple[dict, float]]:
     """Normalize scores to [0, 1] and drop results below the display floor.
 
     Maps the highest score to 1.0 and scales others proportionally.
-    Results whose normalized score falls below SCORE_DISPLAY_FLOOR (20%)
-    are excluded entirely as they are too weakly related to display.
+    Results whose normalized score falls below SCORE_DISPLAY_FLOOR (10%)
+    are excluded, unless that would leave fewer results than max_results.
 
     For a single result, returns 1.0. For empty input, returns empty.
 
     Args:
         scored_results: List of (doc, score) tuples (any score range).
+        max_results: Don't drop results if we'd have fewer than this.
 
     Returns:
-        Filtered list with scores in [SCORE_DISPLAY_FLOOR, 1.0].
+        Filtered list with scores in [0, 1.0].
     """
     if not scored_results:
         return []
@@ -294,9 +296,14 @@ def _normalize_scores(
     for doc, score in scored_results:
         norm = (score - min_score) / (max_score - min_score)
         display_score = round(norm, 4)
-        if display_score < SCORE_DISPLAY_FLOOR:
-            continue
         normalized.append((doc, display_score))
+
+    above_floor = [item for item in normalized if item[1] >= SCORE_DISPLAY_FLOOR]
+
+    if len(above_floor) >= max_results:
+        return above_floor
+
+    return normalized
 
     return normalized
 
@@ -1597,7 +1604,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
             selected = _distribute_results(scored_tuples, max_results)
 
             if settings.search_fusion_method == "rrf":
-                selected = _normalize_scores(selected)
+                selected = _normalize_scores(selected, max_results)
 
             # Format results to match the API contract
             grouped_results: dict[str, list[dict[str, Any]]] = {
@@ -2246,7 +2253,7 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
             selected_results = _distribute_results(scored_results, max_results)
 
             if settings.search_fusion_method == "rrf":
-                selected_results = _normalize_scores(selected_results)
+                selected_results = _normalize_scores(selected_results, max_results)
 
             # Group selected results by entity type for the response
             grouped_results: dict[str, list[dict[str, Any]]] = {

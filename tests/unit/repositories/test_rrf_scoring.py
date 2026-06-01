@@ -223,13 +223,13 @@ class TestNormalizeScores:
         assert result[0][1] == 1.0
 
     def test_two_results(self):
-        """Two results: top gets 1.0, bottom is excluded (below 25% floor)."""
+        """Two results kept when fewer than max_results even if below floor."""
         result = _normalize_scores([
             (_make_doc("top"), 0.033),
             (_make_doc("bot"), 0.016),
-        ])
+        ], max_results=10)
         assert result[0][1] == 1.0
-        assert len(result) == 1
+        assert len(result) == 2
 
     def test_preserves_order(self):
         """Normalization preserves descending order."""
@@ -242,14 +242,23 @@ class TestNormalizeScores:
         scores = [s for _, s in result]
         assert scores == sorted(scores, reverse=True)
 
-    def test_filters_below_floor(self):
-        """Results below SCORE_DISPLAY_FLOOR are excluded."""
+    def test_filters_below_floor_when_enough_results(self):
+        """Results below floor are excluded when enough remain above it."""
         result = _normalize_scores([
-            (_make_doc(f"d{i}"), 0.03 - i * 0.002) for i in range(10)
-        ])
+            (_make_doc(f"d{i}"), 0.03 - i * 0.001) for i in range(20)
+        ], max_results=5)
         for _, score in result:
             assert SCORE_DISPLAY_FLOOR <= score <= 1.0
-        assert len(result) < 10
+        assert len(result) < 20
+
+    def test_keeps_below_floor_when_too_few(self):
+        """Results below floor are kept when dropping would leave fewer than max_results."""
+        result = _normalize_scores([
+            (_make_doc("top"), 0.033),
+            (_make_doc("mid"), 0.020),
+            (_make_doc("bot"), 0.016),
+        ], max_results=10)
+        assert len(result) == 3
 
     def test_equal_scores_all_get_one(self):
         """If all scores are equal, all get 1.0."""
