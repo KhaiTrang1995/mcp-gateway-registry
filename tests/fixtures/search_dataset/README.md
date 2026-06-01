@@ -1,5 +1,15 @@
 # Search Evaluation Test Harness
 
+## Quick Start with Claude Code
+
+If you use Claude Code, the entire pipeline (dataset creation, benchmarking, and reporting) is available as an interactive skill:
+
+```
+/search-benchmark https://your-registry-url .token
+```
+
+The [search-benchmark skill](../../.claude/skills/search-benchmark/SKILL.md) will guide you step by step through generating ground truth, running the benchmark, and interpreting results. Alternatively, follow the manual steps below.
+
 ## Dataset
 
 The evaluation dataset ([ground_truth.json](ground_truth.json)) contains 100 search queries with human-annotated expected results, tested against 378 indexed documents ([unified_dataset.json](unified_dataset.json)).
