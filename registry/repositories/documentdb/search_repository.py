@@ -2061,8 +2061,11 @@ class DocumentDBSearchRepository(SearchRepositoryBase):
 
             text_boost_stage = _build_text_boost_stage(token_regex)
 
-            search_types = entity_types or [
-                "mcp_server", "a2a_agent", "skill", "virtual_server"
+            search_types = [
+                t for t in (entity_types or [
+                    "mcp_server", "a2a_agent", "skill", "virtual_server"
+                ])
+                if t != "tool"
             ]
 
             results = []
