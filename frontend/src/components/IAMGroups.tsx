@@ -893,7 +893,7 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
             isLoading={agentsLoading}
             maxDescriptionWords={8}
             specialOptions={[
-              { value: '*', label: '* (All agents)', description: 'Grant access to all agents' },
+              { value: 'all', label: '* (All agents)', description: 'Grant access to all agents' },
             ]}
           />
         </div>
@@ -1211,7 +1211,7 @@ const IAMGroups: React.FC<IAMGroupsProps> = ({ onShowToast }) => {
                 isLoading={agentsLoading}
                 maxDescriptionWords={8}
                 specialOptions={[
-                  { value: '*', label: '* (All agents)', description: 'Grant access to all agents' },
+                  { value: 'all', label: '* (All agents)', description: 'Grant access to all agents' },
                 ]}
               />
             </div>
