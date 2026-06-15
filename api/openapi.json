@@ -3,7 +3,7 @@
   "info": {
     "title": "MCP Gateway Registry",
     "description": "A registry and management system for Model Context Protocol (MCP) servers",
-    "version": "1.24.3"
+    "version": "1.24.5"
   },
   "paths": {
     "/api/version": {
@@ -505,7 +505,7 @@
           "Server Management"
         ],
         "summary": "Get Servers Json",
-        "description": "Get servers data as JSON for React frontend and external API.\n\nUses lexical (substring) search, not hybrid/semantic. For vector-based\nsearch, use POST /api/search/semantic instead.",
+        "description": "Get servers data as JSON for React frontend and external API.\n\nUses lexical (substring) search, not hybrid/semantic. For vector-based\nsearch, use POST /api/search/semantic instead.\n\nWhen ``include_tools`` is False, the heavy per-server ``tool_list`` is\nomitted (empty list) and the per-user ``filter_tools_for_user()`` pass is\nskipped. ``num_tools`` falls back to the stored count on the server doc,\nwhich matches the filtered count for unrestricted users (the dashboard's\nprimary caller).",
         "operationId": "get_servers_json_api_servers_get",
         "parameters": [
           {
@@ -552,6 +552,18 @@
               "title": "Offset"
             },
             "description": "Number of servers to skip"
+          },
+          {
+            "name": "include_tools",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Include the per-server tool_list in the response. Set false to omit tool schemas and skip per-server tool filtering for a smaller, faster response (num_tools is still returned). Defaults to True for API compatibility.",
+              "default": true,
+              "title": "Include Tools"
+            },
+            "description": "Include the per-server tool_list in the response. Set false to omit tool schemas and skip per-server tool filtering for a smaller, faster response (num_tools is still returned). Defaults to True for API compatibility."
           }
         ],
         "responses": {
@@ -1205,6 +1217,52 @@
                 }
               ],
               "title": "Mcp Gateway Session"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/servers/{path}/server.json": {
+      "get": {
+        "tags": [
+          "Server Management"
+        ],
+        "summary": "Get Server Canonical",
+        "description": "Return a server projected into the canonical MCP Registry server.json shape.\n\nRead-only export. Storage stays bespoke; this endpoint projects the stored\ndocument into a doc conforming to the upstream server.schema.json (see\nissue #1187). Auth mirrors the bespoke server read: same access check, and\nin with-gateway mode the backend URLs are redacted for non-admin callers.",
+        "operationId": "get_server_canonical_api_servers__path__server_json_get",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
             }
           }
         ],
@@ -2662,6 +2720,146 @@
       }
     },
     "/api/servers/{path}": {
+      "put": {
+        "tags": [
+          "Server Management"
+        ],
+        "summary": "Update Server Endpoint",
+        "description": "Replace a registered server's mutable metadata.\n\nRegistrant-only fields (timestamps, identity anchors, deployment,\ncredential blobs) are preserved from storage even if a client sends\nthem. Auth/credential mutation goes through\nPATCH /api/servers/{path}/auth-credential.\n\nConcurrency: when ``If-Match`` is supplied the request is rejected\nwith 412 if the stored ``updated_at`` no longer matches.",
+        "operationId": "update_server_endpoint_api_servers__path__put",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServerUpdateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Server Management"
+        ],
+        "summary": "Patch Server Endpoint",
+        "description": "Apply an RFC 7396 JSON Merge Patch to a server's metadata.\n\nOnly fields explicitly supplied are changed. Registrant-only fields\nare rejected by the ServerCardPatch validator before this handler\nruns; this handler additionally re-pins them defensively.\n\nAuth/credential mutation goes through\nPATCH /api/servers/{path}/auth-credential.",
+        "operationId": "patch_server_endpoint_api_servers__path__patch",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServerCardPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
       "get": {
         "tags": [
           "Server Management"
@@ -3657,6 +3855,111 @@
         ]
       }
     },
+    "/api/agents/batch": {
+      "post": {
+        "tags": [
+          "Agent Management"
+        ],
+        "summary": "Submit Agent Batch",
+        "description": "Submit an asynchronous batch of agent register/patch/replace/delete ops.\n\nEach item is re-authorized and processed independently by the batch worker;\none failing item never aborts the job. Poll GET /api/agents/batch/{job_id}\nfor progress and per-item results.\n\nReturns:\n    202 with {job_id, status_url}.\n\nRaises:\n    HTTPException: 413 if the body or item count is too large, 429 if the\n        submitter already has the maximum number of active jobs.",
+        "operationId": "submit_agent_batch_api_agents_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Batch accepted (or idempotent replay).",
+            "headers": {
+              "X-Idempotent-Replay": {
+                "description": "Present and equal to 'true' when the returned job_id comes from a prior submission with the same idempotency_key. The new request body was not run.",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "413": {
+            "description": "Request body or item count exceeds configured limits."
+          },
+          "429": {
+            "description": "Submitter has too many concurrent batch jobs."
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/agents/batch/{job_id}": {
+      "get": {
+        "tags": [
+          "Agent Management"
+        ],
+        "summary": "Get Agent Batch Job",
+        "description": "Fetch the current state and per-item results of a batch job.\n\nCaller must be the submitter or an admin.\n\nRaises:\n    HTTPException: 403 if not the submitter/admin, 404 if unknown job_id.",
+        "operationId": "get_agent_batch_job_api_agents_batch__job_id__get",
+        "parameters": [
+          {
+            "name": "job_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Job Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
     "/api/agents/{path}": {
       "get": {
         "tags": [
@@ -3726,6 +4029,76 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/AgentRegistrationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "Agent Management"
+        ],
+        "summary": "Patch Agent",
+        "description": "Apply an RFC 7396 JSON Merge Patch to an agent card.\n\nOnly the fields explicitly supplied are changed; required fields stay\nrequired. Registrant-only fields are rejected by the AgentCardPatch\nvalidator before this handler runs.\n\nConcurrency: if `If-Match` is supplied the request is rejected with 412\nwhen the stored updated_at no longer matches. If absent, PATCH is\nlast-write-wins (same race window as PUT); clients that care must send\nIf-Match.\n\nReturns:\n    200 with the full updated card and a fresh ETag header.\n\nRaises:\n    HTTPException: 400 empty/malformed, 403 unauthorized/federated,\n        404 not found, 412 precondition failed, 422 validation.",
+        "operationId": "patch_agent_api_agents__path__patch",
+        "parameters": [
+          {
+            "name": "path",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Path"
+            }
+          },
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-Match"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AgentCardPatch"
               }
             }
           }
@@ -7104,6 +7477,713 @@
         ]
       }
     },
+    "/api/custom-types": {
+      "get": {
+        "tags": [
+          "custom-types",
+          "custom-types"
+        ],
+        "summary": "List all custom type descriptors",
+        "description": "Return all defined custom type descriptors.\n\nReadable by any authenticated user \u2014 the descriptors describe the schema,\nnot the records, so they carry no record-level visibility.",
+        "operationId": "list_custom_types_api_custom_types_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response List Custom Types Api Custom Types Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "custom-types",
+          "custom-types"
+        ],
+        "summary": "Define a new custom type (admin)",
+        "description": "Define a new custom entity type. Admin only.",
+        "operationId": "create_custom_type_api_custom_types_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomTypeDescriptor-Input"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomTypeDescriptor-Output"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/custom-types/{name}": {
+      "get": {
+        "tags": [
+          "custom-types",
+          "custom-types"
+        ],
+        "summary": "Get a custom type descriptor",
+        "description": "Return a single custom type descriptor by name.",
+        "operationId": "get_custom_type_api_custom_types__name__get",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomTypeDescriptor-Output"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "custom-types",
+          "custom-types"
+        ],
+        "summary": "Update a custom type's mutable metadata (admin)",
+        "description": "Update a custom type's display_name/description. Admin only.\n\nThe type name and field schema are IMMUTABLE; only the human-facing\ndisplay_name and description can change. Renaming a type or altering its\nfields is not supported (it would orphan existing records and embeddings);\ndelete and recreate the type for that.",
+        "operationId": "update_custom_type_api_custom_types__name__patch",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomTypeUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomTypeDescriptor-Output"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "custom-types",
+          "custom-types"
+        ],
+        "summary": "Delete a custom type (admin, cascading)",
+        "description": "Delete a custom type and (with force) cascade-delete its records. Admin only.",
+        "operationId": "delete_custom_type_api_custom_types__name__delete",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Cascade-delete all records of this type. Required when records exist.",
+              "default": false,
+              "title": "Force"
+            },
+            "description": "Cascade-delete all records of this type. Required when records exist."
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/custom/{type}": {
+      "get": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "List records of a custom type",
+        "description": "List records of a type, filtered to those the caller may see.",
+        "operationId": "list_custom_entities_api_custom__type__get",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "skip",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Number of records to skip",
+              "default": 0,
+              "title": "Skip"
+            },
+            "description": "Number of records to skip"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "description": "Max records to return",
+              "default": 100,
+              "title": "Limit"
+            },
+            "description": "Max records to return"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response List Custom Entities Api Custom  Type  Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Create a custom record",
+        "description": "Create a record of the given custom type.",
+        "operationId": "create_custom_entity_api_custom__type__post",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomEntityCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomEntityRecord"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/custom/{type}/{uuid}": {
+      "get": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Get a custom record",
+        "description": "Get a single record by type and uuid (404 if not viewable).",
+        "operationId": "get_custom_entity_api_custom__type___uuid__get",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomEntityRecord"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Update a custom record",
+        "description": "Update a record (owner or admin only; partial-update semantics).",
+        "operationId": "update_custom_entity_api_custom__type___uuid__put",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CustomEntityUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomEntityRecord"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Delete a custom record",
+        "description": "Delete a record (owner or admin only).",
+        "operationId": "delete_custom_entity_api_custom__type___uuid__delete",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/custom/{type}/{uuid}/rate": {
+      "post": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Rate a custom record",
+        "description": "Add or update the caller's 1-5 rating on a record they can view.",
+        "operationId": "rate_custom_entity_api_custom__type___uuid__rate_post",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/registry__api__custom_entity_routes__RatingRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Rate Custom Entity Api Custom  Type   Uuid  Rate Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/custom/{type}/{uuid}/rating": {
+      "get": {
+        "tags": [
+          "custom-entities",
+          "custom-entities"
+        ],
+        "summary": "Get a custom record's rating",
+        "description": "Return {num_stars, rating_details} for a record the caller can view.",
+        "operationId": "get_custom_entity_rating_api_custom__type___uuid__rating_get",
+        "parameters": [
+          {
+            "name": "type",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 64,
+              "pattern": "^[a-z0-9_-]+$",
+              "title": "Type"
+            }
+          },
+          {
+            "name": "uuid",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$",
+              "title": "Uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Custom Entity Rating Api Custom  Type   Uuid  Rating Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
     "/api/internal/sessions/client": {
       "post": {
         "summary": "Create Client Session",
@@ -9708,6 +10788,86 @@
         ]
       }
     },
+    "/api/export/custom-types": {
+      "get": {
+        "tags": [
+          "Data Export",
+          "Data Export"
+        ],
+        "summary": "Export Custom Types",
+        "description": "Export all custom entity type descriptors (the admin-defined schemas).\n\nReturns the raw descriptor documents from the mcp_custom_types collection.",
+        "operationId": "export_custom_types_api_export_custom_types_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Export Custom Types Api Export Custom Types Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/export/custom-entities": {
+      "get": {
+        "tags": [
+          "Data Export",
+          "Data Export"
+        ],
+        "summary": "Export Custom Entities",
+        "description": "Export all custom entity records across every custom type.\n\nReturns the raw record documents from the single mcp_custom_entities\ncollection (records of all types, discriminated by entity_type).",
+        "operationId": "export_custom_entities_api_export_custom_entities_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "type": "object",
+                  "title": "Response Export Custom Entities Api Export Custom Entities Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
     "/api/registry-management/telemetry/info": {
       "get": {
         "tags": [
@@ -9792,6 +10952,90 @@
             "content": {
               "application/json": {
                 "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/admin/embeddings/missing": {
+      "get": {
+        "tags": [
+          "Embeddings Admin"
+        ],
+        "summary": "Get Missing Embeddings",
+        "description": "Scan for documents missing from the search index.\n\nCompares source collections (servers, agents, skills) against the\nembeddings collection and returns documents that have no embedding.",
+        "operationId": "get_missing_embeddings_api_admin_embeddings_missing_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MissingEmbeddingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/admin/embeddings/reindex": {
+      "post": {
+        "tags": [
+          "Embeddings Admin"
+        ],
+        "summary": "Reindex Embeddings",
+        "description": "Re-index specific documents by generating embeddings from source data.\n\nReads each document from its source collection and runs it through\nthe embedding pipeline. Useful for fixing documents that failed\nembedding during initial registration.",
+        "operationId": "reindex_embeddings_api_admin_embeddings_reindex_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReindexRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReindexResponse"
+                }
               }
             }
           },
@@ -10471,6 +11715,350 @@
         ]
       }
     },
+    "/api/iam/user-groups": {
+      "post": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "Create User Group",
+        "description": "Register a new user-group fallback record (admin only).",
+        "operationId": "create_user_group_api_iam_user_groups_post",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdPUserGroupCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdPUserGroup"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "get": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "List User Groups",
+        "description": "List user-group fallback records (any authenticated user).",
+        "operationId": "list_user_groups_api_iam_user_groups_get",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Provider"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Substring filter on username/email",
+              "title": "Q"
+            },
+            "description": "Substring filter on username/email"
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "default": 500,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "skip",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Skip"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserGroupListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/iam/user-groups/{username}": {
+      "get": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "Get User Group",
+        "description": "Get a specific user-group record (any authenticated user).",
+        "operationId": "get_user_group_api_iam_user_groups__username__get",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdPUserGroup"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "patch": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "Patch User Group",
+        "description": "Update fields of an existing user-group record (admin only).",
+        "operationId": "patch_user_group_api_iam_user_groups__username__patch",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdPUserGroupPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdPUserGroup"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "Delete User Group",
+        "description": "Delete a user-group fallback record (admin only).",
+        "operationId": "delete_user_group_api_iam_user_groups__username__delete",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
+    "/api/iam/user-groups/{username}/pingfederate-user": {
+      "post": {
+        "tags": [
+          "IAM User Groups"
+        ],
+        "summary": "Create Pingfederate User",
+        "description": "Create or update a user inside PingFederate's Simple PCV (admin only).\n\nThe user-group fallback record for this username MUST already exist in the\nregistry (the UI flow creates it first via POST /api/iam/user-groups, then\ncalls this endpoint when the admin opts in to \"Also create in PingFederate\").\nThe password is sent straight through to PingFederate and is not stored in\nthe registry.",
+        "operationId": "create_pingfederate_user_api_iam_user_groups__username__pingfederate_user_post",
+        "parameters": [
+          {
+            "name": "username",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Username"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PingFederateUserCreateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Create Pingfederate User Api Iam User Groups  Username  Pingfederate User Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "Bearer": []
+          }
+        ]
+      }
+    },
     "/api/registry/v0.1/servers": {
       "get": {
         "tags": [
@@ -11081,6 +12669,293 @@
   },
   "components": {
     "schemas": {
+      "AgentBatchRequest": {
+        "properties": {
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "items": {
+            "items": {
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/_RegisterItem"
+                },
+                {
+                  "$ref": "#/components/schemas/_PatchItem"
+                },
+                {
+                  "$ref": "#/components/schemas/_ReplaceItem"
+                },
+                {
+                  "$ref": "#/components/schemas/_DeleteItem"
+                }
+              ],
+              "discriminator": {
+                "propertyName": "op",
+                "mapping": {
+                  "delete": "#/components/schemas/_DeleteItem",
+                  "patch": "#/components/schemas/_PatchItem",
+                  "register": "#/components/schemas/_RegisterItem",
+                  "replace": "#/components/schemas/_ReplaceItem"
+                }
+              }
+            },
+            "type": "array",
+            "minItems": 1,
+            "title": "Items"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "AgentBatchRequest",
+        "description": "Request body for POST /api/agents/batch."
+      },
+      "AgentCardPatch": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "protocolVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Protocolversion"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "skills": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skills"
+          },
+          "securitySchemes": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Securityschemes"
+          },
+          "capabilities": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Capabilities"
+          },
+          "security": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Security"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "allowedGroups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowedgroups"
+          },
+          "trustLevel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trustlevel"
+          },
+          "license": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "external_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Tags"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "AgentCardPatch",
+        "description": "RFC 7396 JSON Merge Patch body for an agent card.\n\nEvery field is optional. A field present here overrides the stored value;\na field that is absent is preserved. Registrant-only fields (timestamps,\nhealth, ratings, identity anchors) are rejected with a validation error if\nsupplied, so they can never be mutated through PATCH."
+      },
       "AgentDuplicateCheckRequest": {
         "properties": {
           "name": {
@@ -11135,6 +13010,27 @@
         ],
         "title": "AgentDuplicateCheckRequest",
         "description": "Request body for ``POST /api/agents/check-duplicates``."
+      },
+      "AgentProvider": {
+        "properties": {
+          "organization": {
+            "type": "string",
+            "title": "Organization",
+            "description": "Provider organization name"
+          },
+          "url": {
+            "type": "string",
+            "title": "Url",
+            "description": "Provider website or documentation URL"
+          }
+        },
+        "type": "object",
+        "required": [
+          "organization",
+          "url"
+        ],
+        "title": "AgentProvider",
+        "description": "A2A Agent Provider information.\n\nRepresents the service provider of an agent with organization name and website URL.\nPer A2A specification, if provider is present, both organization and url are required."
       },
       "AgentRegistrationRequest": {
         "properties": {
@@ -13227,6 +15123,601 @@
         "title": "CreateVirtualServerRequest",
         "description": "Request model for creating a virtual server."
       },
+      "CustomEntityCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility",
+            "default": "private"
+          },
+          "allowed_groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Groups"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 200,
+            "title": "Tags"
+          },
+          "attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "CustomEntityCreate",
+        "description": "Client payload for POST /api/custom/{type}. No owner/path/entity_type."
+      },
+      "CustomEntityRecord": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "Synthetic /{type}/{uuid}; becomes _id",
+            "default": ""
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type",
+            "description": "The custom type name (discriminator)"
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "title": "Name",
+            "description": "Display name (promoted out of attributes)"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "Optional free-text blurb; promoted to envelope"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility",
+            "default": "private"
+          },
+          "allowed_groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Allowed Groups"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled",
+            "default": true
+          },
+          "num_stars": {
+            "type": "number",
+            "maximum": 5.0,
+            "minimum": 0.0,
+            "title": "Num Stars",
+            "description": "Average user rating",
+            "default": 0.0
+          },
+          "rating_details": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Rating Details",
+            "description": "Per-user ratings ([{user, rating}], rotating buffer)"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "attributes": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Attributes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entity_type",
+          "name"
+        ],
+        "title": "CustomEntityRecord",
+        "description": "A record of a custom type. Stored in mcp_custom_entities (envelope + attributes).\n\n``extra=\"ignore\"`` so a raw Mongo doc (which carries an ``_id`` key) can be\nsplatted directly via ``CustomEntityRecord(**doc)`` without raising. The\nrepository ALSO pops ``_id`` before construction; both are kept for defense\nin depth."
+      },
+      "CustomEntitySearchResult": {
+        "properties": {
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Tags"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Owner"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled",
+            "default": false
+          },
+          "relevance_score": {
+            "type": "number",
+            "maximum": 1.0,
+            "minimum": 0.0,
+            "title": "Relevance Score"
+          },
+          "match_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "entity_type",
+          "path",
+          "name",
+          "relevance_score"
+        ],
+        "title": "CustomEntitySearchResult",
+        "description": "Search result for a custom entity record.\n\nCustom types have no fixed schema, so this carries the entity_type\ndiscriminator and the common envelope only; the schema-driven UI renders\nper-type attributes from the type descriptor."
+      },
+      "CustomEntityUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "allowed_groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Groups"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "attributes": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attributes"
+          }
+        },
+        "type": "object",
+        "title": "CustomEntityUpdate",
+        "description": "Client payload for PUT /api/custom/{type}/{uuid}.\n\nOnly these envelope fields are mutable; everything else is server-managed.\nAll fields optional (None = leave unchanged). The group-restricted invariant\nis checked against the MERGED state in the service layer, because a PUT may\nset only visibility or only allowed_groups, not both."
+      },
+      "CustomFieldDescriptor": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "title": "Name",
+            "description": "Field key stored inside the record's attributes bag"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label",
+            "description": "Optional display label; omit to fall back to humanized name"
+          },
+          "datatype": {
+            "$ref": "#/components/schemas/CustomFieldType"
+          },
+          "enum_values": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array",
+                "maxItems": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enum Values",
+            "description": "Allowed values; REQUIRED iff datatype == enum"
+          },
+          "required": {
+            "type": "boolean",
+            "title": "Required",
+            "default": false
+          },
+          "semantic": {
+            "type": "boolean",
+            "title": "Semantic",
+            "description": "Include this field's value in the search embedding text",
+            "default": false
+          },
+          "show_in_list": {
+            "type": "boolean",
+            "title": "Show In List",
+            "description": "Render this field on the list/card view",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "datatype"
+        ],
+        "title": "CustomFieldDescriptor",
+        "description": "One field in a custom type's schema."
+      },
+      "CustomFieldType": {
+        "type": "string",
+        "enum": [
+          "string",
+          "text",
+          "number",
+          "bool",
+          "enum",
+          "date",
+          "array<string>"
+        ],
+        "title": "CustomFieldType",
+        "description": "Allowed datatypes for a custom-type field (v1: scalars + scalar arrays)."
+      },
+      "CustomTypeDescriptor-Input": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "title": "Name",
+            "description": "URL-safe, IMMUTABLE type name; used as path prefix and entity_type"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "Optional human label for the tab"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldDescriptor"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Fields"
+          },
+          "schema_version": {
+            "type": "integer",
+            "title": "Schema Version",
+            "description": "Descriptor schema version for future compat",
+            "default": 1
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "fields"
+        ],
+        "title": "CustomTypeDescriptor",
+        "description": "Admin-authored schema for a custom entity type. Stored in mcp_custom_types.\n\n``extra=\"ignore\"``: the type repo splats raw Mongo docs\n(``CustomTypeDescriptor(**doc)``) which carry an ``_id`` key, so the\nmodel must tolerate the extra key."
+      },
+      "CustomTypeDescriptor-Output": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9_-]+$",
+            "title": "Name",
+            "description": "URL-safe, IMMUTABLE type name; used as path prefix and entity_type"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name",
+            "description": "Optional human label for the tab"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "fields": {
+            "items": {
+              "$ref": "#/components/schemas/CustomFieldDescriptor"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Fields"
+          },
+          "schema_version": {
+            "type": "integer",
+            "title": "Schema Version",
+            "description": "Descriptor schema version for future compat",
+            "default": 1
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "fields"
+        ],
+        "title": "CustomTypeDescriptor",
+        "description": "Admin-authored schema for a custom entity type. Stored in mcp_custom_types.\n\n``extra=\"ignore\"``: the type repo splats raw Mongo docs\n(``CustomTypeDescriptor(**doc)``) which carry an ``_id`` key, so the\nmodel must tolerate the extra key."
+      },
+      "CustomTypeUpdate": {
+        "properties": {
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "CustomTypeUpdate",
+        "description": "Partial update for a custom type's MUTABLE metadata only.\n\nThe type ``name`` (the URL-safe identifier, path prefix, and entity_type\ndiscriminator) and the ``fields`` schema are IMMUTABLE in v1 -- changing\nthem would orphan existing records and embeddings. Only the human-facing\n``display_name`` and ``description`` can be edited. A field left None is\nnot touched (no-op); an explicit value (including empty string) overwrites."
+      },
       "DiscoveryResponse": {
         "properties": {
           "skills": {
@@ -14180,6 +16671,169 @@
         "title": "IdPM2MClientUpdate",
         "description": "Payload for updating an IdP M2M client's group mappings (legacy)."
       },
+      "IdPUserGroup": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "title": "Username",
+            "description": "IdP username (sub, email, or login id)"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Groups",
+            "description": "Groups this user belongs to"
+          },
+          "enabled": {
+            "type": "boolean",
+            "title": "Enabled",
+            "description": "Whether the fallback record is active",
+            "default": true
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider",
+            "description": "Identity provider (pingfederate, okta, keycloak, entra, manual)"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email",
+            "description": "User email address (optional)"
+          },
+          "created_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created By",
+            "description": "Username of operator who registered this user-group record. Populated only for records with provider=manual."
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At",
+            "description": "When record was created"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At",
+            "description": "When record was last updated"
+          }
+        },
+        "type": "object",
+        "required": [
+          "username",
+          "provider"
+        ],
+        "title": "IdPUserGroup",
+        "description": "IdP user with fallback group mappings.\n\nStores information about human users and their group memberships for\nidentity providers that do not include groups in the JWT claims. This\ndata is used for authorization decisions when the JWT's groups claim is\nempty or missing for a fallback-enabled provider.",
+        "example": {
+          "email": "alice@example.com",
+          "enabled": true,
+          "groups": [
+            "registry-admins"
+          ],
+          "provider": "pingfederate",
+          "username": "alice@example.com"
+        }
+      },
+      "IdPUserGroupCreate": {
+        "properties": {
+          "username": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Username",
+            "description": "IdP username (sub, email, or login id)"
+          },
+          "groups": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Groups",
+            "description": "Groups this user belongs to (may be empty)"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email",
+            "description": "Optional user email address"
+          }
+        },
+        "type": "object",
+        "required": [
+          "username"
+        ],
+        "title": "IdPUserGroupCreate",
+        "description": "Request body for POST /api/iam/user-groups.\n\nCreates a new user-group fallback record with provider=manual. Does not\nrequire any IdP Admin API token."
+      },
+      "IdPUserGroupPatch": {
+        "properties": {
+          "groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Groups",
+            "description": "New groups list. Empty list clears groups."
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 512
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          }
+        },
+        "type": "object",
+        "title": "IdPUserGroupPatch",
+        "description": "Request body for PATCH /api/iam/user-groups/{username}.\n\nPatch semantics use Pydantic v2's `model_dump(exclude_unset=True)` in the\nservice, so fields not present in the request body are NOT written. Fields\nexplicitly present (including None or empty list) ARE written."
+      },
       "LinkANSRequest": {
         "properties": {
           "ans_agent_id": {
@@ -14447,6 +17101,67 @@
         ],
         "title": "MatchingToolResult",
         "description": "Tool matching result with optional schema for display."
+      },
+      "MissingEmbeddingEntry": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "is_enabled": {
+            "type": "boolean",
+            "title": "Is Enabled",
+            "default": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "entity_type",
+          "name"
+        ],
+        "title": "MissingEmbeddingEntry",
+        "description": "A document that exists in source but has no embedding."
+      },
+      "MissingEmbeddingsResponse": {
+        "properties": {
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/MissingEmbeddingEntry"
+            },
+            "type": "array",
+            "title": "Missing"
+          },
+          "total_missing": {
+            "type": "integer",
+            "title": "Total Missing"
+          },
+          "total_indexed": {
+            "type": "integer",
+            "title": "Total Indexed"
+          },
+          "total_source": {
+            "type": "integer",
+            "title": "Total Source"
+          }
+        },
+        "type": "object",
+        "required": [
+          "missing",
+          "total_missing",
+          "total_indexed",
+          "total_source"
+        ],
+        "title": "MissingEmbeddingsResponse",
+        "description": "Response for the missing embeddings scan."
       },
       "OktaM2MClient": {
         "properties": {
@@ -15039,6 +17754,23 @@
         "title": "PeerSyncSummary",
         "description": "Summary of resources shared with a peer."
       },
+      "PingFederateUserCreateRequest": {
+        "properties": {
+          "password": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 8,
+            "title": "Password",
+            "description": "Initial password for the PingFederate Simple PCV user."
+          }
+        },
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "title": "PingFederateUserCreateRequest",
+        "description": "Request body for POST /api/iam/user-groups/{username}/pingfederate-user.\n\nCarries the password an admin chose for the new PingFederate user. The\npassword is sent straight through to the PingFederate Simple Password\nCredential Validator (PCV) and is NOT stored in the registry."
+      },
       "RegistryAuthConfig": {
         "properties": {
           "schemes": {
@@ -15314,6 +18046,93 @@
         "title": "RegistryContact",
         "description": "Contact information for registry operators."
       },
+      "ReindexDetailEntry": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "entity_type": {
+            "type": "string",
+            "title": "Entity Type"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "entity_type",
+          "status"
+        ],
+        "title": "ReindexDetailEntry",
+        "description": "Per-path result of re-indexing."
+      },
+      "ReindexRequest": {
+        "properties": {
+          "paths": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Paths",
+            "description": "Paths to re-index (max 100)"
+          }
+        },
+        "type": "object",
+        "required": [
+          "paths"
+        ],
+        "title": "ReindexRequest",
+        "description": "Request body for re-indexing specific paths."
+      },
+      "ReindexResponse": {
+        "properties": {
+          "success": {
+            "type": "integer",
+            "title": "Success"
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "details": {
+            "items": {
+              "$ref": "#/components/schemas/ReindexDetailEntry"
+            },
+            "type": "array",
+            "title": "Details"
+          }
+        },
+        "type": "object",
+        "required": [
+          "success",
+          "failed",
+          "total",
+          "details"
+        ],
+        "title": "ReindexResponse",
+        "description": "Response for the re-index operation."
+      },
       "Repository": {
         "properties": {
           "url": {
@@ -15372,14 +18191,7 @@
             "anyOf": [
               {
                 "items": {
-                  "type": "string",
-                  "enum": [
-                    "mcp_server",
-                    "tool",
-                    "a2a_agent",
-                    "skill",
-                    "virtual_server"
-                  ]
+                  "type": "string"
                 },
                 "type": "array"
               },
@@ -15388,7 +18200,7 @@
               }
             ],
             "title": "Entity Types",
-            "description": "Optional entity filters"
+            "description": "Optional entity filters. The built-in types are mcp_server, tool, a2a_agent, skill, virtual_server; custom entity type names (e.g. prompt_template) are also accepted."
           },
           "tags": {
             "anyOf": [
@@ -15482,6 +18294,13 @@
             "type": "array",
             "title": "Virtual Servers"
           },
+          "custom": {
+            "items": {
+              "$ref": "#/components/schemas/CustomEntitySearchResult"
+            },
+            "type": "array",
+            "title": "Custom"
+          },
           "total_servers": {
             "type": "integer",
             "title": "Total Servers",
@@ -15506,6 +18325,11 @@
             "type": "integer",
             "title": "Total Virtual Servers",
             "default": 0
+          },
+          "total_custom": {
+            "type": "integer",
+            "title": "Total Custom",
+            "default": 0
           }
         },
         "type": "object",
@@ -15513,6 +18337,271 @@
           "query"
         ],
         "title": "SemanticSearchResponse"
+      },
+      "ServerCardPatch": {
+        "properties": {
+          "server_name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 256,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Name"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4096
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "proxy_pass_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Pass Url"
+          },
+          "mcp_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Endpoint"
+          },
+          "sse_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sse Endpoint"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          },
+          "supported_transports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Transports"
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers"
+          },
+          "auth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Provider"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "license": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "License"
+          },
+          "num_tools": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Tools"
+          },
+          "tool_list": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool List"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "visibility": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Visibility"
+          },
+          "allowed_groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Groups"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentProvider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Created At"
+          },
+          "source_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Updated At"
+          },
+          "external_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Tags"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ServerCardPatch",
+        "description": "RFC 7396 JSON Merge Patch body for PATCH /api/servers/{path}.\n\nEvery field is optional. Fields explicitly supplied override the\nstored value; fields absent are preserved. SERVER_REGISTRANT_ONLY_FIELDS\nare rejected with 422 if supplied.\n\nVisibility & access control:\n    `visibility` and `allowed_groups` are mutable. The handler's\n    ownership check ensures only the server's owner (or an admin)\n    can apply this patch, so this is not a privilege-escalation\n    path. See the LLD Threat Model section.\n\n    Self-lockout: a non-admin owner can narrow `allowed_groups` in\n    a way that removes their own access. This is not prevented;\n    the audit trail makes it recoverable by an admin.\n\nAuth/credential fields:\n    `auth_scheme`, `auth_credential`, `auth_header_name`,\n    `custom_headers`, `custom_header_names` are intentionally\n    absent and rejected by extra=\"forbid\" with 422. Use\n    PATCH /api/servers/{path}/auth-credential to mutate auth.\n\nLocal-deployment fields:\n    `deployment` and `local_runtime` are not patchable here. To\n    change a local server's launch recipe today, re-register with\n    overwrite=true. See LLD Non-Goals for rationale."
       },
       "ServerDetail": {
         "properties": {
@@ -15880,6 +18969,247 @@
           "relevance_score"
         ],
         "title": "ServerSearchResult"
+      },
+      "ServerUpdateRequest": {
+        "properties": {
+          "server_name": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Server Name"
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Description"
+          },
+          "proxy_pass_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proxy Pass Url"
+          },
+          "mcp_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mcp Endpoint"
+          },
+          "sse_endpoint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sse Endpoint"
+          },
+          "transport": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Transport"
+          },
+          "supported_transports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supported Transports"
+          },
+          "headers": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Headers"
+          },
+          "auth_provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auth Provider"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "title": "Tags"
+          },
+          "license": {
+            "type": "string",
+            "title": "License",
+            "default": "N/A"
+          },
+          "num_tools": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Num Tools"
+          },
+          "tool_list": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tool List"
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Metadata"
+          },
+          "visibility": {
+            "type": "string",
+            "title": "Visibility",
+            "default": "public"
+          },
+          "allowed_groups": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allowed Groups"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Status"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AgentProvider"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_created_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Created At"
+          },
+          "source_updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Updated At"
+          },
+          "external_tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "External Tags"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "server_name",
+          "description"
+        ],
+        "title": "ServerUpdateRequest",
+        "description": "Full-replacement body for PUT /api/servers/{path}.\n\nOnly mutable metadata fields are accepted. Identity anchors and\nserver-managed fields must not appear; supplying them is a 422.\n\nSize caps (from LLD Should-fix #3):\n    - server_name <= 256 chars\n    - description <= 4096 chars\n    - tags <= 50 entries, each <= 64 chars\n    - external_tags <= 50 entries, each <= 64 chars\n    - metadata <= 64 KB serialised JSON\n    These caps protect downstream code (DocumentDB document size,\n    embedding text budget, UI rendering). NOTE: POST /register\n    does not currently enforce these caps; a follow-up issue\n    will add them there for consistency.\n\nVisibility & access control:\n    `visibility` and `allowed_groups` are deliberately mutable. The\n    owner of a server can change these at any time (same authority\n    they have at registration time). The handler enforces an\n    ownership check before this body is applied, so non-owners\n    cannot mutate them via this endpoint. See the LLD Threat\n    Model section for the full reasoning.\n\nAuth/credential fields:\n    `auth_scheme`, `auth_credential`, `auth_header_name`,\n    `custom_headers`, and `custom_header_names` are intentionally\n    absent. Use PATCH /api/servers/{path}/auth-credential instead.\n\nLocal-deployment fields:\n    `deployment` and `local_runtime` are in\n    SERVER_REGISTRANT_ONLY_FIELDS and rejected with 422. To change\n    a local server's launch recipe today, re-register with\n    overwrite=true. A dedicated endpoint is planned for the future."
       },
       "SetDefaultVersion": {
         "properties": {
@@ -17683,6 +21013,41 @@
         "title": "UserDeleteResponse",
         "description": "Standard response returned when a Keycloak user is deleted."
       },
+      "UserGroupListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "Total number of matching records"
+          },
+          "limit": {
+            "type": "integer",
+            "title": "Limit",
+            "description": "Limit applied to this page"
+          },
+          "skip": {
+            "type": "integer",
+            "title": "Skip",
+            "description": "Offset applied to this page"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IdPUserGroup"
+            },
+            "type": "array",
+            "title": "Items",
+            "description": "Records on this page"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "limit",
+          "skip"
+        ],
+        "title": "UserGroupListResponse",
+        "description": "Paginated response envelope for GET /api/iam/user-groups."
+      },
       "UserListResponse": {
         "properties": {
           "users": {
@@ -18032,6 +21397,93 @@
         "title": "VisibilityEnum",
         "description": "Visibility options for skills."
       },
+      "_DeleteItem": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "delete",
+            "title": "Op",
+            "default": "delete"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "title": "_DeleteItem",
+        "description": "Batch item that deletes an existing agent."
+      },
+      "_PatchItem": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "patch",
+            "title": "Op",
+            "default": "patch"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "card": {
+            "$ref": "#/components/schemas/AgentCardPatch"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "card"
+        ],
+        "title": "_PatchItem",
+        "description": "Batch item that applies a JSON Merge Patch to an existing agent."
+      },
+      "_RegisterItem": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "register",
+            "title": "Op",
+            "default": "register"
+          },
+          "card": {
+            "$ref": "#/components/schemas/AgentRegistrationRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "card"
+        ],
+        "title": "_RegisterItem",
+        "description": "Batch item that registers a new agent card."
+      },
+      "_ReplaceItem": {
+        "properties": {
+          "op": {
+            "type": "string",
+            "const": "replace",
+            "title": "Op",
+            "default": "replace"
+          },
+          "path": {
+            "type": "string",
+            "title": "Path"
+          },
+          "card": {
+            "$ref": "#/components/schemas/AgentRegistrationRequest"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "card"
+        ],
+        "title": "_ReplaceItem",
+        "description": "Batch item that fully replaces an existing agent card (PUT semantics)."
+      },
       "registry__api__agent_routes__RatingRequest": {
         "properties": {
           "rating": {
@@ -18044,6 +21496,20 @@
           "rating"
         ],
         "title": "RatingRequest"
+      },
+      "registry__api__custom_entity_routes__RatingRequest": {
+        "properties": {
+          "rating": {
+            "type": "integer",
+            "title": "Rating"
+          }
+        },
+        "type": "object",
+        "required": [
+          "rating"
+        ],
+        "title": "RatingRequest",
+        "description": "Body for POST /api/custom/{type}/{uuid}/rate."
       },
       "registry__api__server_routes__RatingRequest": {
         "properties": {
