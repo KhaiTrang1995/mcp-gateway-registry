@@ -363,6 +363,132 @@ server {
 
 @pytest.mark.unit
 @pytest.mark.asyncio
+async def test_a2a_blocks_emitted_when_flag_enabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """A2A location blocks are rendered when the reverse-proxy flag is on."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = True
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_awaited_once()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_a2a_blocks_skipped_when_flag_disabled(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """No A2A blocks are generated when the reverse-proxy flag is off (default)."""
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+
+    with patch("registry.core.nginx_service.settings") as mock_settings:
+        mock_settings.nginx_updates_enabled = True
+        mock_settings.a2a_reverse_proxy_enabled = False
+        mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+        mock_settings.auth_server_url = "http://auth-server:8888"
+        with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+            with patch("builtins.open", mock_open(read_data=template_content)):
+                with patch("registry.health.service.health_service", mock_health_service):
+                    with patch.object(
+                        nginx_service, "get_additional_server_names", return_value=""
+                    ):
+                        with patch.object(nginx_service, "reload_nginx", return_value=True):
+                            with patch.object(
+                                nginx_service,
+                                "_generate_agent_location_blocks",
+                                new=AsyncMock(return_value="# A2A_BLOCK_SENTINEL"),
+                            ) as gen:
+                                result = await nginx_service.generate_config_async(sample_servers)
+
+    assert result is True
+    gen.assert_not_awaited()
+    written = mock_atomic_write.call_args_list[-1][0][1]
+    assert "# A2A_BLOCK_SENTINEL" not in written
+    assert "{{AGENT_LOCATION_BLOCKS}}" not in written
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_enabling_agent_changes_rendered_config_hash(
+    nginx_service, sample_servers, mock_health_service, mock_atomic_write
+):
+    """Enabling a healthy A2A agent changes the rendered config and its hash.
+
+    Exercises the real render-to-hash path: the agent generator is NOT mocked,
+    so the scheduler's hash-based change detection would see a new hash and
+    trigger an nginx reload once an agent becomes eligible for proxying.
+    """
+    import hashlib
+    from types import SimpleNamespace
+
+    template_content = "server {\n    listen 80;\n{{AGENT_LOCATION_BLOCKS}}\n}\n"
+    healthy_agent = SimpleNamespace(
+        path="/flight-booking-agent",
+        url="https://flight-booking.dev.example.com",
+        name="Flight Booking Agent",
+        supported_protocol="a2a",
+        health_status="healthy",
+    )
+
+    async def _render(enabled_paths, agent_info):
+        with patch("registry.core.nginx_service.settings") as mock_settings:
+            mock_settings.nginx_updates_enabled = True
+            mock_settings.a2a_reverse_proxy_enabled = True
+            mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
+            mock_settings.auth_server_url = "http://auth-server:8888"
+            with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
+                with patch("builtins.open", mock_open(read_data=template_content)):
+                    with patch("registry.health.service.health_service", mock_health_service):
+                        with patch.object(
+                            nginx_service, "get_additional_server_names", return_value=""
+                        ):
+                            with patch.object(nginx_service, "reload_nginx", return_value=True):
+                                with patch(
+                                    "registry.services.agent_service.agent_service"
+                                ) as mock_agent_svc:
+                                    mock_agent_svc.get_enabled_agents = AsyncMock(
+                                        return_value=enabled_paths
+                                    )
+                                    mock_agent_svc.get_agent_info = AsyncMock(
+                                        return_value=agent_info
+                                    )
+                                    await nginx_service.generate_config_async(sample_servers)
+        return mock_atomic_write.call_args_list[-1][0][1]
+
+    without_agent = await _render([], None)
+    with_agent = await _render(["/flight-booking-agent"], healthy_agent)
+
+    assert "/agent/flight-booking-agent/" not in without_agent
+    assert "/agent/flight-booking-agent/" in with_agent
+    assert (
+        hashlib.sha256(without_agent.encode()).hexdigest()
+        != hashlib.sha256(with_agent.encode()).hexdigest()
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
 async def test_generate_config_async_template_not_found(nginx_service, sample_servers):
     """Test configuration generation when template is not found."""
     with patch.object(nginx_service.nginx_template_path, "exists", return_value=False):

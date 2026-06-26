@@ -778,6 +778,14 @@ These have no `.env` equivalent because they describe the infrastructure, not th
 
 ---
 
+## Group 31 — A2A Reverse-Proxy Mode
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable reverse-proxy | `A2A_REVERSE_PROXY_ENABLED` | — | — | Opt-in. When `true`, each enabled agent gets nginx blocks that proxy its A2A traffic (agent card + JSON-RPC) through the gateway for centralized auth and metrics. Default `false` = registry-only discovery, no proxy blocks. Also gated by `with-gateway` deployment mode. See [A2A reverse-proxy mode](design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic). |
+
+---
+
 ## Checklist for new parameters
 
 When you add a new configuration parameter:

@@ -488,6 +488,19 @@ class Settings(BaseSettings):
     agent_security_add_pending_tag: bool = True
     a2a_scanner_llm_api_key: str = ""  # Optional Azure OpenAI API key for LLM-based analysis
 
+    # A2A reverse-proxy mode (opt-in)
+    a2a_reverse_proxy_enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable A2A agent reverse-proxy generation. When true, each enabled agent "
+            "gets nginx location blocks that proxy its A2A traffic (agent card + "
+            "JSON-RPC) through the gateway for centralized auth and metrics, instead of "
+            "clients connecting directly to the agent backend. When false (default), no "
+            "agent proxy blocks are emitted and /agent/* paths fall through to the "
+            "existing behavior."
+        ),
+    )
+
     # Skill security scanning settings (AI Agent Skills)
     skill_security_scan_enabled: bool = True
     skill_security_scan_on_registration: bool = True
