@@ -543,8 +543,8 @@ class TestOAuthProtectedResourceEndpoint:
             assert response.status_code == 200
             assert response.json()["resource"] == "http://localhost:7860"
 
-    def test_cache_control_header(self, mock_settings, fake_provider):
-        """RFC 9728 docs are cacheable for 5 minutes."""
+    def test_cache_control_header_is_no_store(self, mock_settings, fake_provider):
+        """PRM metadata must not be cached by shared/CDN caches (poisoning risk)."""
         mock_settings.registry_url = "https://gw.example.com"
         mock_settings.mcp_https_required = True
         mock_settings.mcp_resource_documentation_url = None
@@ -561,7 +561,10 @@ class TestOAuthProtectedResourceEndpoint:
             client = TestClient(app)
             response = client.get("/.well-known/oauth-protected-resource")
 
-            assert response.headers["cache-control"] == "public, max-age=300"
+            cache_control = response.headers["cache-control"]
+            assert cache_control == "no-store"
+            assert "public" not in cache_control
+            assert "max-age" not in cache_control
 
     def test_provider_not_implemented_returns_501(self, mock_settings):
         """A provider whose authorization_server_metadata() raises NotImplementedError surfaces as 501."""
@@ -634,8 +637,8 @@ class TestOAuthAuthorizationServerEndpoint:
             assert response.status_code == 200
             assert response.json() == fake_as_metadata
 
-    def test_cache_control_header(self, mock_settings, fake_provider):
-        """RFC 8414 docs are cacheable for 5 minutes."""
+    def test_cache_control_header_is_no_store(self, mock_settings, fake_provider):
+        """AS metadata must not be cached by shared/CDN caches (poisoning risk)."""
         with patch(
             "registry.api.wellknown_routes._get_active_auth_provider",
             return_value=fake_provider,
@@ -644,7 +647,10 @@ class TestOAuthAuthorizationServerEndpoint:
             client = TestClient(app)
             response = client.get("/.well-known/oauth-authorization-server")
 
-            assert response.headers["cache-control"] == "public, max-age=300"
+            cache_control = response.headers["cache-control"]
+            assert cache_control == "no-store"
+            assert "public" not in cache_control
+            assert "max-age" not in cache_control
 
     def test_provider_not_implemented_returns_501(self, mock_settings):
         """A stub provider returns 501 cleanly rather than 500."""

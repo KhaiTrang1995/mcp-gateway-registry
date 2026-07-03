@@ -182,6 +182,11 @@ OAUTH_PROVIDERS = _load_oauth_providers()
 # Global variables for callback handling
 authorization_code = None
 received_state = None
+# The CSRF state value the flow generated for this authorization request. The
+# callback handler compares the state echoed back by the browser against this
+# before performing any token exchange, so a forged/replayed callback fails
+# closed. Set by run_oauth_flow() when the state is minted.
+expected_state = None
 callback_received = False
 callback_error = None
 pkce_verifier = None
@@ -638,6 +643,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
             callback_received, \
             callback_error, \
             received_state, \
+            expected_state, \
             oauth_config_global
 
         parsed_path = urllib.parse.urlparse(self.path)
@@ -670,10 +676,30 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
 
         if "code" in params:
             authorization_code = params["code"][0]
-            if "state" in params:
-                received_state = params["state"][0]
+            received_state = params["state"][0] if "state" in params else None
+
+            # Validate the CSRF state BEFORE doing anything with the code. The
+            # token exchange happens inline in this handler, so the state check
+            # must gate it here rather than in the calling flow (which would run
+            # too late to prevent the exchange). Fail closed on any mismatch or
+            # missing state: an attacker-forged/replayed callback must never
+            # reach exchange_code_for_tokens.
+            if expected_state is None or received_state != expected_state:
+                callback_error = "state_mismatch"
+                callback_received = True
+                logger.error(
+                    "OAuth state mismatch on callback - rejecting to prevent CSRF. "
+                    "Ignoring the authorization code and aborting token exchange."
+                )
+                self._send_response(
+                    "Authorization failed: state validation error. "
+                    "Please restart the authorization flow.",
+                    status=400,
+                )
+                return
+
             callback_received = True
-            logger.info("Authorization code and state received successfully via callback.")
+            logger.info("Authorization code received and CSRF state verified via callback.")
 
             # Try immediate token exchange if config is available
             message = "Authorization successful! You can close this window now."
@@ -1161,6 +1187,7 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
         pkce_verifier, \
         authorization_code, \
         received_state, \
+        expected_state, \
         callback_received, \
         callback_error, \
         oauth_config_global
@@ -1168,6 +1195,7 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
     # Reset global variables
     authorization_code = None
     received_state = None
+    expected_state = None
     callback_received = False
     callback_error = None
     oauth_config_global = config  # Make config available to callback handler
@@ -1194,8 +1222,11 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
                 if config.refresh_access_token():
                     return True
 
-    # Generate state for CSRF protection
+    # Generate state for CSRF protection. Publish it to the module global so the
+    # callback handler can validate the state the browser echoes back before it
+    # performs the inline token exchange.
     state = secrets.token_urlsafe(16)
+    expected_state = state
 
     # Generate PKCE pair if required
     pkce_challenge = None
@@ -1237,13 +1268,18 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
             httpd.shutdown()
         return False
 
-    # Verify state to prevent CSRF attacks
+    # Verify state to prevent CSRF attacks. The callback handler already
+    # rejects a mismatched state before token exchange; this is a defense-in-
+    # depth backstop that fails closed rather than proceeding. Do NOT continue
+    # on mismatch - a mismatched or absent state means the callback cannot be
+    # trusted to belong to this authorization request.
     if received_state != state:
-        logger.warning(f"State mismatch! Expected: {state}, Received: {received_state}")
-        logger.warning("This might be from a previous authorization attempt. Continuing anyway...")
-        # Don't fail on state mismatch in case of VS Code port forwarding or browser refresh
-    else:
-        logger.info("CSRF state verified successfully")
+        logger.error("OAuth state mismatch - aborting flow to prevent CSRF (no token exchange)")
+        if httpd:
+            httpd.shutdown()
+        return False
+
+    logger.info("CSRF state verified successfully")
 
     # Check if token exchange already happened in the callback
     if config.access_token:
