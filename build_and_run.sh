@@ -342,11 +342,11 @@ fi
 if ! grep -q "SECRET_KEY=" .env || grep -q "SECRET_KEY=$" .env || grep -q "SECRET_KEY=\"\"" .env; then
     log "Generating SECRET_KEY..."
     SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate SECRET_KEY"
-    
+
     # Remove any existing empty SECRET_KEY line
     sed -i '/^SECRET_KEY=$/d' .env 2>/dev/null || true
     sed -i '/^SECRET_KEY=""$/d' .env 2>/dev/null || true
-    
+
     # Add new SECRET_KEY
     echo "SECRET_KEY=$SECRET_KEY" >> .env
     log "SECRET_KEY added to .env"
@@ -417,6 +417,45 @@ else
     log "WARNING: scripts/prepare-log-dirs.sh not found or not executable; skipping log-directory prep"
 fi
 
+# Reject known-weak default values for secrets that could reach a deployment.
+# Compose fails fast on unset required secrets via ${VAR:?...}, but a value
+# explicitly set to a historical default (e.g. DOCUMENTDB_PASSWORD=admin,
+# OPENBAO_TOKEN=dev-root-token) would pass that presence check while still
+# being a guessable credential. Fail closed here before starting anything.
+_validate_secret_defaults() {
+    local failed=0
+
+    # Format: VAR_NAME=weak_value pairs. A match (case-sensitive on the value)
+    # is rejected. Add new known-weak literals here as they are discovered.
+    if [ "${DOCUMENTDB_PASSWORD:-}" = "admin" ]; then
+        log "ERROR: DOCUMENTDB_PASSWORD is set to the known-weak default 'admin'."
+        log "       Set a strong random value in .env (e.g. openssl rand -hex 24)."
+        failed=1
+    fi
+
+    if [ "${OPENBAO_TOKEN:-}" = "dev-root-token" ]; then
+        log "ERROR: OPENBAO_TOKEN is set to the known-weak default 'dev-root-token'."
+        log "       Reaching the vault with this token grants root over every stored"
+        log "       egress credential. Set a strong random value in .env (openssl rand -hex 32)."
+        failed=1
+    fi
+
+    if [ "${KEYCLOAK_DB_PASSWORD:-}" = "keycloak" ]; then
+        log "ERROR: KEYCLOAK_DB_PASSWORD is set to the known-weak default 'keycloak'."
+        log "       Set a strong random value in .env."
+        failed=1
+    fi
+
+    if [ "${PF_ADMIN_PASS:-}" = "2FederateM0re" ]; then
+        log "ERROR: PF_ADMIN_PASS is set to the PingFederate vendor default '2FederateM0re'."
+        log "       The registry drives the PF admin API with this credential; set a"
+        log "       strong value in .env when the pingfederate profile is enabled."
+        failed=1
+    fi
+
+    return $failed
+}
+
 # Preflight validation for extra_env files (Issue #1000).
 # Source scripts/validate-extra-env.sh so the same collision logic is shared
 # with CI and pre-commit hooks.
@@ -429,6 +468,7 @@ validate_predeployment() {
     source "$script_dir/scripts/validate-extra-env.sh"
 
     validate_extra_env_all || exit 1
+    _validate_secret_defaults || exit 1
 
     log "Predeployment validations passed."
 }
