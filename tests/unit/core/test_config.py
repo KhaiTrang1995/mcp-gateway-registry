@@ -740,14 +740,24 @@ class TestSettingsSecretKey:
         assert settings.secret_key == custom
 
     def test_short_secret_key_rejected(self, monkeypatch, tmp_path) -> None:
-        """A SECRET_KEY shorter than 32 bytes is rejected (Security Finding 28).
-
-        A short key can be brute-forced offline from any captured HS256 token
-        and used to forge tokens or the derived internal service-token key.
-        """
+        """A secret_key shorter than 32 characters is rejected at startup."""
+        monkeypatch.delenv("SECRET_KEY", raising=False)
         monkeypatch.chdir(tmp_path)
-        with pytest.raises(RuntimeError, match="at least 32 bytes"):
-            Settings(secret_key="short-key")
+        with pytest.raises(RuntimeError, match="at least 32"):
+            Settings(secret_key="too-short-key")
+
+    def test_weak_default_secret_key_rejected(self, monkeypatch, tmp_path) -> None:
+        """The historical 'development-secret-key' literal is rejected."""
+        monkeypatch.delenv("SECRET_KEY", raising=False)
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(RuntimeError, match="well-known placeholder"):
+            Settings(secret_key="development-secret-key")
+
+    def test_valid_long_secret_key_accepted(self, monkeypatch) -> None:
+        """A random 32+ character key is accepted."""
+        custom = "a-sufficiently-long-random-secret-key-value"
+        settings = Settings(secret_key=custom)
+        assert settings.secret_key == custom
 
     def test_short_marker_secret_rejected(self, monkeypatch, tmp_path) -> None:
         """An AUTH_SERVER_NGINX_MARKER_SECRET shorter than 32 bytes is rejected."""

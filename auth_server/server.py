@@ -67,6 +67,7 @@ from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
 from registry.audit.service import AuditLogger
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
+from registry.common.secret_key import validate_secret_key
 from registry.core.config import settings
 from registry.repositories.factory import get_scope_repository
 
@@ -3599,13 +3600,9 @@ OAUTH2_CONFIG = load_oauth2_config()
 # Initialize SECRET_KEY and signer for session management.
 # Fail loud: a per-replica random key would silently break sessions across replicas
 # (auth_server signs with key A, registry verifies with key B → BadSignature on every request).
-SECRET_KEY = os.environ.get("SECRET_KEY")
-if not SECRET_KEY:
-    raise RuntimeError(
-        "SECRET_KEY environment variable is required. "
-        "Set it to a value at least 32 bytes long, identical across all auth_server "
-        "and registry replicas (see chart values.yaml: global.secretKey)."
-    )
+# A missing, short, or well-known key would let an attacker forge tokens, so the
+# shared validator rejects all three before the signer is constructed.
+SECRET_KEY = validate_secret_key(os.environ.get("SECRET_KEY"))
 
 signer = URLSafeTimedSerializer(SECRET_KEY)
 

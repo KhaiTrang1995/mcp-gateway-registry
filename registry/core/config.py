@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from registry.common.secret_key import validate_secret_key
+
 
 def _normalize_cors_origin(value: str) -> str | None:
     """Validate and normalize a single CORS origin string.
@@ -62,7 +64,6 @@ def _normalize_cors_origin(value: str) -> str | None:
     if port is not None:
         return f"{scheme}://{host}:{port}"
     return f"{scheme}://{host}"
-
 
 # Accepted values for STORAGE_BACKEND. Keep in sync with the Terraform allowlist
 # at terraform/aws-ecs/variables.tf (issue #955) so both layers reject the same
@@ -1530,20 +1531,11 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        if not self.secret_key:
-            raise RuntimeError(
-                "SECRET_KEY environment variable is required. "
-                "Set it to a value at least 32 bytes long, identical across all auth_server "
-                "and registry replicas (see chart values.yaml: global.secretKey)."
-            )
-        if len(self.secret_key.encode()) < 32:
-            raise RuntimeError(
-                "SECRET_KEY must be at least 32 bytes long. The current value is too short "
-                "to safely sign HS256 tokens and derive the internal service-token signing "
-                "key (a short key can be brute-forced offline from any captured token). "
-                "Set it to a strong random value at least 32 bytes long, identical across "
-                "all auth_server and registry replicas (see chart values.yaml: global.secretKey)."
-            )
+        # Reject a missing, too-short, or well-known SECRET_KEY at startup so the
+        # registry can never run with a forgeable signing key. Store the
+        # validated (whitespace-stripped) value so the registry and auth_server
+        # derive an identical signing key from the same environment variable.
+        self.secret_key = validate_secret_key(self.secret_key)
         if not self.auth_server_nginx_marker_secret:
             raise RuntimeError(
                 "AUTH_SERVER_NGINX_MARKER_SECRET environment variable is required. "
