@@ -297,10 +297,14 @@ def _save_egress_tokens(
             "usage_notes": f"This token is for EGRESS authentication to {provider} external services",
         }
 
-        with open(egress_path, "w") as f:
+        # Create atomically with owner-only (0600) permissions; the payload
+        # carries the egress access/refresh token and must never be briefly
+        # world/group-readable between create and chmod.
+        fd = os.open(str(egress_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(save_data, f, indent=2)
 
-        # Secure the file
+        # Enforce 0600 even if the file pre-existed
         egress_path.chmod(0o600)
         logger.info(f"📁 Saved egress tokens to: {egress_path}")
 

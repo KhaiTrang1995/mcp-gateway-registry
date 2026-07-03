@@ -430,10 +430,15 @@ class OAuthConfig:
                 "cloud_id": self.cloud_id,
             }
 
-            with open(token_path, "w") as f:
+            # Create atomically with owner-only (0600) permissions; the payload
+            # carries access and refresh tokens, so it must never be briefly
+            # world/group-readable between create and chmod (a plain open()
+            # honors the process umask, commonly 0644).
+            fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(essential_token_data, f, indent=2)
 
-            # Secure the file
+            # Enforce 0600 even if the file pre-existed
             token_path.chmod(0o600)
             logger.info(f"📁 Saved OAuth tokens to: {token_path}")
 
@@ -465,10 +470,13 @@ class OAuthConfig:
                 },
             }
 
-            with open(readable_token_path, "w") as f:
+            # Create atomically owner-only (0600); this payload also embeds the
+            # access and refresh tokens (and a Bearer curl example).
+            fd = os.open(str(readable_token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(readable_data, f, indent=2)
 
-            readable_token_path.chmod(0o600)
+            readable_token_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"📄 Saved readable token info to: {readable_token_path}")
 
             # Create VS Code MCP configuration file for supported providers
@@ -521,11 +529,13 @@ class OAuthConfig:
                     },
                 }
 
-            # Save the VS Code MCP configuration
-            with open(vscode_config_path, "w") as f:
+            # Save the VS Code MCP configuration atomically owner-only (0600);
+            # it embeds Bearer authorization headers.
+            fd = os.open(str(vscode_config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(mcp_config, f, indent=4)
 
-            vscode_config_path.chmod(0o600)
+            vscode_config_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"🔧 Created VS Code MCP configuration: {vscode_config_path}")
 
         except Exception as e:
@@ -575,11 +585,13 @@ class OAuthConfig:
                     "alwaysAllow": [],
                 }
 
-            # Save the Roocode MCP configuration
-            with open(roocode_config_path, "w") as f:
+            # Save the Roocode MCP configuration atomically owner-only (0600);
+            # it embeds Bearer authorization headers.
+            fd = os.open(str(roocode_config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(mcp_config, f, indent=2)
 
-            roocode_config_path.chmod(0o600)
+            roocode_config_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"🔧 Created Roocode MCP configuration: {roocode_config_path}")
 
         except Exception as e:

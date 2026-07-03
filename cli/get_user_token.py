@@ -161,11 +161,13 @@ def _save_token(token_data: dict, output_path: str) -> None:
     # Add metadata
     token_data["obtained_at"] = datetime.utcnow().isoformat()
 
-    with open(output_path, "w") as f:
+    # Create the file atomically with owner-only (0600) permissions. A plain
+    # open()-then-chmod leaves a window in which the token file is readable by
+    # other local users (it is created with the process umask, commonly 0644).
+    fd = os.open(output_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(token_data, f, indent=2)
-
-    # Set restrictive permissions
-    os.chmod(output_path, 0o600)
+    os.chmod(output_path, 0o600)  # enforce 0600 even if the file pre-existed
 
     logger.info(f"Token saved to {output_path}")
 
@@ -284,10 +286,14 @@ Environment Variables:
             if args.full:
                 _save_token(token_data, args.output)
             else:
-                # Save just the access token for compatibility with CLI tools
-                with open(args.output, "w") as f:
+                # Save just the access token for compatibility with CLI tools.
+                # Create the file atomically with owner-only (0600) permissions
+                # so the token is never briefly world/group-readable between
+                # create and chmod.
+                fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w") as f:
                     f.write(token_data["access_token"])
-                os.chmod(args.output, 0o600)
+                os.chmod(args.output, 0o600)  # enforce 0600 even if the file pre-existed
                 logger.info(f"Access token saved to {args.output}")
 
             print(f"\nToken saved to: {args.output}")
