@@ -78,11 +78,17 @@ class TestInternalTokenSeparation:
     """Separation invariants between internal and user tokens."""
 
     def test_internal_token_accepted(self) -> None:
-        """A token from generate_internal_token passes the gate and returns sub."""
+        """A token from generate_internal_token passes the gate and returns sub.
+
+        ``_validate_authorization_header`` returns a ``(caller, claims)`` tuple;
+        single-use enforcement (``jti``) happens in the async
+        ``validate_internal_auth`` gate that wraps this helper.
+        """
         with patch.dict(os.environ, {"SECRET_KEY": _SECRET_KEY}):
             token = generate_internal_token(subject="registry-service", purpose="test")
-            caller = _validate_authorization_header(f"Bearer {token}")
+            caller, claims = _validate_authorization_header(f"Bearer {token}")
         assert caller == "registry-service"
+        assert claims["jti"]
 
     def test_user_token_rejected_by_audience(self) -> None:
         """A user-shape token (aud=mcp-registry, raw-key signed) is rejected."""

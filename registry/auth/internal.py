@@ -11,9 +11,12 @@ import hmac
 import logging
 import os
 import time
+import uuid
 
 import jwt as pyjwt
 from fastapi import Header, HTTPException, Request, status
+
+from registry.auth.internal_replay_store import consume_jti
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +94,11 @@ def generate_internal_token(
         "purpose": purpose,
         "token_kind": _INTERNAL_TOKEN_KIND,
         "token_use": "access",
+        # Unique per-token id so the validator can enforce single-use and reject
+        # replays within the TTL window (see validate_internal_auth / the shared
+        # consumed-jti store). Every caller mints a fresh token per request, so
+        # single-use never breaks a legitimate retry.
+        "jti": uuid.uuid4().hex,
         "iat": now,
         "exp": now + _INTERNAL_JWT_TTL_SECONDS,
     }
@@ -146,6 +154,13 @@ async def validate_internal_auth(request: Request) -> str:
     the router-level gate on ``/internal/*`` routes in both the
     registry and auth-server FastAPI apps.
 
+    Enforces single-use: each internal token carries a unique ``jti`` claim,
+    recorded in a shared consumed-jti store on first validation. A replayed
+    token (same ``jti`` seen again within its TTL) is rejected 401 — this closes
+    the network-capture replay window on the internal cluster network. Fails
+    closed: a token with no ``jti``, or one whose ``jti`` cannot be recorded
+    (store unreachable), is rejected.
+
     Args:
         request: The FastAPI request object
 
@@ -155,14 +170,52 @@ async def validate_internal_auth(request: Request) -> str:
     Raises:
         HTTPException: 401 if authentication fails
     """
-    return _validate_authorization_header(request.headers.get("Authorization"))
+    caller, claims = _validate_authorization_header(request.headers.get("Authorization"))
+    await _enforce_single_use(claims)
+    return caller
 
 
-def _validate_authorization_header(authorization: str | None) -> str:
+async def _enforce_single_use(claims: dict) -> None:
+    """Reject the token if its ``jti`` has already been consumed.
+
+    Computes the token's remaining lifetime from ``exp``/``iat`` so the
+    consumed-jti record is retained at least as long as the token could be
+    presented, then atomically records the ``jti``. Fails closed: a missing
+    ``jti`` or an unreachable store yields a 401.
+
+    Args:
+        claims: The already-signature-verified JWT claims.
+
+    Raises:
+        HTTPException: 401 if the ``jti`` is missing or was already consumed.
+    """
+    jti = claims.get("jti")
+    # Retain the record for the full nominal TTL; consume_jti adds its own
+    # margin on top. Fall back to the nominal TTL if exp/iat are unusable.
+    ttl_seconds = _INTERNAL_JWT_TTL_SECONDS
+    exp = claims.get("exp")
+    iat = claims.get("iat")
+    if isinstance(exp, int) and isinstance(iat, int) and exp > iat:
+        ttl_seconds = exp - iat
+
+    accepted = await consume_jti(jti, ttl_seconds)
+    if not accepted:
+        logger.warning("Rejected internal request: token replay or missing/unrecordable jti")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+        )
+
+
+def _validate_authorization_header(authorization: str | None) -> tuple[str, dict]:
     """Implementation detail of :func:`validate_internal_auth`.
 
     Takes the raw ``Authorization`` header value so the public
     dependency can be a thin shim over ``request.headers.get(...)``.
+
+    Returns:
+        A ``(caller, claims)`` tuple: the caller identity and the verified JWT
+        claims (so the async gate can run the single-use check on ``jti``).
     """
     if not authorization:
         raise HTTPException(
@@ -180,8 +233,14 @@ def _validate_authorization_header(authorization: str | None) -> str:
     )
 
 
-def _validate_bearer_token(auth_header: str) -> str:
-    """Validate a Bearer JWT token signed with SECRET_KEY."""
+def _validate_bearer_token(auth_header: str) -> tuple[str, dict]:
+    """Validate a Bearer JWT token signed with SECRET_KEY.
+
+    Returns:
+        A ``(caller, claims)`` tuple. Signature/issuer/audience/expiry and the
+        ``token_use``/``token_kind`` guards are all checked here; single-use
+        (``jti``) enforcement happens in the async caller.
+    """
     token = auth_header.split(" ", 1)[1]
 
     secret_key = os.environ.get("SECRET_KEY")
@@ -229,7 +288,7 @@ def _validate_bearer_token(auth_header: str) -> str:
 
         caller = claims.get("sub", "service")
         logger.debug(f"Internal auth via JWT for: {caller}")
-        return caller
+        return caller, claims
 
     except pyjwt.ExpiredSignatureError:
         logger.warning("Expired JWT token for internal request")
