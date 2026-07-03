@@ -57,9 +57,7 @@ def _resolve_mcp_proxy_read_timeout_seconds() -> int:
         if value is not None:
             upstream = max(float(value), minimum_upstream)
     except (TypeError, ValueError) as e:
-        logger.debug(
-            f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}"
-        )
+        logger.debug(f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}")
         upstream = default_upstream
     return int(math.ceil(upstream)) + MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS
 
@@ -1344,6 +1342,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 block = f"""
     # Virtual MCP Server: {safe_name}
     location {{{{ROOT_PATH}}}}{safe_vs_path} {{
+        # Inbound rate limiting: this path fans out to the shared /validate auth
+        # subrequest, so bound it at the edge (zones declared at http scope in
+        # docker/nginx_rev_proxy_*.conf) to keep a flood from exhausting /validate.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         set $virtual_server_id "{safe_id}";
         auth_request /validate;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
@@ -1743,6 +1747,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Common proxy settings
         common_settings = f"""
+        # Inbound rate limiting: every MCP request fans out to the shared
+        # /validate auth subrequest, so bound it at the edge (zones + rationale
+        # are declared at http scope in docker/nginx_rev_proxy_*.conf). Keeps a
+        # flood on one server's /mcp-proxy/ path from exhausting /validate for
+        # all servers. burst+nodelay give bursty MCP clients headroom.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # DNS resolver for dynamic proxy_pass upstreams.
         # Default: 8.8.8.8 8.8.4.4 (public DNS).
         # Override with NGINX_DNS_RESOLVER env var for environments where

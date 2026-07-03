@@ -1668,9 +1668,9 @@ variable "github_api_base_url" {
 # =============================================================================
 
 variable "enable_waf" {
-  description = "Enable WAFv2 Web ACLs for ALBs. Requires wafv2:* IAM permissions. Set to false if IAM permissions are not available."
+  description = "Enable WAFv2 Web ACLs for ALBs (per-IP + global rate limiting, AWS managed rule sets). Requires wafv2:* IAM permissions. Defaults to true so ALB-fronted deployments get per-source rate limiting out of the box (nginx-layer limits collapse to a single bucket behind an ALB). Set to false only if wafv2:* IAM permissions are unavailable."
   type        = bool
-  default     = false
+  default     = true
 }
 
 # =============================================================================

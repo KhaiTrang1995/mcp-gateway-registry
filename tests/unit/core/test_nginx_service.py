@@ -1647,3 +1647,137 @@ async def test_scheduler_rejects_invalid_config_and_keeps_last_good(monkeypatch,
     assert scheduler._last_config_hash == ""
     reload_mock.assert_not_called()
     assert scheduler._dirty is True
+
+
+# =============================================================================
+# Inbound rate limiting (DoS protection for the shared /validate subrequest)
+# =============================================================================
+
+from pathlib import Path  # noqa: E402
+
+_DOCKER_DIR = Path(__file__).resolve().parents[3] / "docker"
+_HTTP_ONLY_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_only.conf"
+_HTTP_AND_HTTPS_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_and_https.conf"
+
+
+@pytest.mark.unit
+def test_generated_mcp_proxy_block_is_rate_limited(nginx_service):
+    """Generated /mcp-proxy/ location blocks must carry the inbound edge limits.
+
+    Every MCP request fans out to the shared /validate auth subrequest; without
+    an inbound limit_req/limit_conn a flood on one server's path exhausts
+    /validate for all servers.
+    """
+    for transport in ("streamable-http", "sse", "direct"):
+        block = nginx_service._create_location_block(
+            "/test", "http://localhost:8000/mcp", transport
+        )
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in block, transport
+        assert "limit_conn mcp_gateway_conn 100;" in block, transport
+        # The limit must sit inside the location, before auth_request (so the
+        # fan-out is bounded), never on the /validate subrequest itself.
+        assert block.index("limit_req") < block.index("auth_request /validate")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generated_virtual_server_block_is_rate_limited(nginx_service):
+    """Client-facing virtual-server blocks must also carry the inbound limits."""
+
+    class _VS:
+        path = "/virtual/dev-essentials"
+        server_name = "Dev Essentials"
+
+    repo = MagicMock()
+    repo.list_enabled = AsyncMock(return_value=[_VS()])
+    with patch(
+        "registry.repositories.factory.get_virtual_server_repository",
+        return_value=repo,
+    ):
+        blocks = await nginx_service._generate_virtual_server_blocks()
+
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in blocks
+    assert "limit_conn mcp_gateway_conn 100;" in blocks
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_declares_rate_limit_zones(conf_path):
+    """Both nginx conf templates must declare the rate-limit zones at http scope."""
+    text = conf_path.read_text()
+    assert "limit_req_zone $binary_remote_addr zone=mcp_gateway_edge:10m rate=50r/s;" in text
+    assert (
+        "limit_req_zone $mcp_gateway_register_key zone=mcp_gateway_register:10m rate=5r/s;" in text
+    )
+    assert "limit_conn_zone $binary_remote_addr zone=mcp_gateway_conn:10m;" in text
+    # Registration classifier map + fail-safe empty default (skip when non-register).
+    assert "map $uri $mcp_gateway_register_key {" in text
+    assert 'default                            "";' in text
+    # 429 status so clients back off.
+    assert "limit_req_status 429;" in text
+    assert "limit_conn_status 429;" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_applies_edge_limit_on_general_api_location(conf_path):
+    """The general /api/ location (covers registration) must carry both limits."""
+    text = conf_path.read_text()
+    # Locate the general /api/ location body and assert the limits are inside it.
+    marker = "location {{ROOT_PATH}}/api/ {"
+    assert marker in text
+    idx = text.index(marker)
+    body = text[idx : idx + 800]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+    # Registration endpoints (/api/register, /api/servers/register,
+    # /api/internal/register) fall through this location and get the tighter cap.
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in body
+    assert "limit_conn mcp_gateway_conn 100;" in body
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_rate_limits_exact_match_auth_me_location(conf_path):
+    """The exact-match /api/auth/me location fans out to /validate too.
+
+    Being an exact match it does NOT fall through to the rate-limited /api/
+    prefix, so every instance must carry its own edge limit.
+    """
+    text = conf_path.read_text()
+    marker = "location = {{ROOT_PATH}}/api/auth/me {"
+    assert marker in text
+    # Every occurrence must have the edge limit inside its body.
+    start = 0
+    occurrences = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx == -1:
+            break
+        occurrences += 1
+        body = text[idx : idx + 500]
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+        assert "limit_conn mcp_gateway_conn 100;" in body
+        start = idx + len(marker)
+    assert occurrences >= 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_does_not_rate_limit_validate_subrequest(conf_path):
+    """The internal /validate subrequest must NOT be rate-limited directly.
+
+    Limiting the fan-out target would throttle legitimate authenticated traffic;
+    the bound belongs on the inbound edge locations instead.
+    """
+    text = conf_path.read_text()
+    marker = "location = /validate {"
+    assert marker in text
+    idx = text.index(marker)
+    # /validate body ends at the next top-level 4-space-indented closing brace;
+    # grab a generous window and assert no limit_req/limit_conn inside it.
+    body = text[idx : idx + 1600]
+    # Trim at the block's closing to avoid spilling into the next location.
+    end = body.find("\n    }")
+    body = body[: end if end != -1 else len(body)]
+    assert "limit_req" not in body
+    assert "limit_conn" not in body
