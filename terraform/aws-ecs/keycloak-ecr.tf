@@ -2,8 +2,8 @@
 # Keycloak ECR Repository
 #
 
-#checkov:skip=CKV_AWS_51:Mutable tags required for latest tag workflow in CI/CD pipeline
 resource "aws_ecr_repository" "keycloak" {
+  #checkov:skip=CKV_AWS_51:Mutable tags required for latest tag workflow in CI/CD pipeline
   name                 = "keycloak"
   image_tag_mutability = "MUTABLE"
   force_delete         = true

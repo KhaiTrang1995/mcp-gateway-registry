@@ -20,8 +20,8 @@ data "aws_vpc" "existing" {
   id = var.existing_vpc_id
 }
 
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "vpc" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 6.0"
 

@@ -1,8 +1,8 @@
 # ECS Services for MCP Gateway Registry
 
 # ECS Service: Auth Server
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_auth" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -675,8 +675,8 @@ module "ecs_service_auth" {
 }
 
 # ECS Service: Registry (Main service with nginx, SSL, FAISS, models)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_registry" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -1803,8 +1803,8 @@ resource "aws_vpc_security_group_ingress_rule" "auth_to_mcpgw" {
 
 
 # ECS Service: CurrentTime MCP Server (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_currenttime" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -1930,8 +1930,8 @@ module "ecs_service_currenttime" {
 
 
 # ECS Service: MCPGW MCP Server
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_mcpgw" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -2186,8 +2186,8 @@ module "ecs_service_mcpgw" {
 
 
 # ECS Service: RealServerFakeTools MCP Server (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_realserverfaketools" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -2309,8 +2309,8 @@ module "ecs_service_realserverfaketools" {
 
 
 # ECS Service: Flight Booking A2A Agent (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_flight_booking_agent" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -2432,8 +2432,8 @@ module "ecs_service_flight_booking_agent" {
 
 
 # ECS Service: Travel Assistant A2A Agent (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_travel_assistant_agent" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
