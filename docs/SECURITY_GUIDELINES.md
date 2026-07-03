@@ -183,6 +183,57 @@ sanitizer that isn't called) is equivalent to no check.
   true`) and never grant privileged scopes to anonymous dynamic client
   registration.
 
+## Canonical helpers — use these, never reinvent or copy-paste
+
+There is exactly ONE blessed implementation per concern. Before writing a new
+outbound HTTP call, auth gate, redaction, or secret check, use the helper below.
+A hand-rolled or copy-pasted variant is how these vulnerabilities get reopened —
+the drift between copies is the hole.
+
+- **Outbound HTTP from any user/registry/federation-controlled URL →
+  `registry/utils/url_guard.py`.** Never construct a bare `httpx.Client` /
+  `httpx.AsyncClient` (or a third-party SDK client) for such fetches. Use
+  `guarded_client(profile=...)` / `guarded_async_client(profile=...)` — they
+  validate + pin the resolved public IP inside the transport (rebinding-safe,
+  re-validated per redirect). Pick the profile: `SKILL_PROFILE` (skill/doc
+  fetches) or `PROXY_PROFILE` (server/agent proxy targets). Validate at
+  registration with `validate_proxy_pass_url()` / `validate_agent_url()` /
+  `validate_server_path()`; reject nginx metacharacters with
+  `contains_nginx_metacharacters()`. Internal targets are opt-in via
+  `SSRF_ALLOWED_HOSTS` / `SSRF_ALLOWED_CIDRS`, default deny. (Legacy
+  `ard_net_guard.py` predates this — prefer `url_guard`; do not add new callers
+  to ad-hoc `_is_safe_url` variants.)
+- **State-changing endpoint CSRF → `registry/auth/csrf.py`.** Add
+  `Depends(verify_csrf_token_flexible)` (or `verify_csrf_token_header_only`) to
+  every mutating route. Don't invent per-router CSRF logic; match the dependency
+  every other router uses.
+- **Internal service-to-service auth → `registry/auth/internal.py`.**
+  `generate_internal_token()` to mint, `validate_internal_auth` /
+  `validate_internal_session_secret` as the route dependency. Internal tokens are
+  a distinct trust class from user tokens — do not hand-roll JWT checks that
+  accept both.
+- **Signing-secret validation → `registry/common/secret_key.py`**
+  (`validate_secret_key` / `validate_signing_secret`). Any new secret that signs
+  or seals must go through it (fail-closed: missing/weak/short). *(Arrives with
+  the secret-key-hardening change; until merged, that module lives on that
+  branch.)*
+- **Backend-URL / authz-config redaction on reads →
+  `registry/services/visibility.py`.** Use the shared access check
+  (`user_can_access_*_from_doc`) and the shared redaction decision + field
+  stripper for every read that serializes a server/agent entity — not a
+  per-endpoint reimplementation. *(The redaction helpers arrive with the
+  readonly-info-disclosure change; the access helpers are already on main.)*
+- **Frontend dynamic URLs → the shared `isSafeUrl` / `SafeLink`
+  (`frontend/src/utils/safeUrl.ts`, `frontend/src/components/SafeLink.tsx`).**
+  Never bind a server/federation-supplied value straight into `href` /
+  `window.open` / a markdown link. *(Arrives with the frontend-xss-hrefs change.)*
+- **Privileged outbound TLS →** trust private certs via an explicit CA-bundle env
+  var, never `verify=False`. `guarded_client`/`guarded_async_client` take
+  `verify=` and default it to `True`.
+
+When you add a NEW canonical helper, list it here so the next agent reaches for
+it instead of rebuilding it.
+
 ## Cross-cutting habit
 
 **When you fix a finding, grep for the same pattern repo-wide before closing.**

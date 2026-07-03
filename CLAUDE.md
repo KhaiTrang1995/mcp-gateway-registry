@@ -730,6 +730,14 @@ handling, config generation, or logging. Full detail, rationale, and examples
 are in [docs/SECURITY_GUIDELINES.md](docs/SECURITY_GUIDELINES.md) — read it before
 working in those areas.
 
+- **Use the canonical helper, never reinvent/copy-paste** (see the "Canonical
+  helpers" section in the guidelines doc): outbound HTTP from user/registry URLs →
+  `registry/utils/url_guard.py` `guarded_client`/`guarded_async_client` (never a
+  bare `httpx` client); CSRF → `registry/auth/csrf.py`; internal service auth →
+  `registry/auth/internal.py`; signing-secret validation →
+  `registry/common/secret_key.py`; read redaction → `registry/services/visibility.py`;
+  frontend hrefs → `frontend/src/utils/safeUrl.ts`. A copied snippet is how these
+  findings get reopened.
 - **Fail closed.** On error, missing config, or ambiguity, DENY. A check that can
   be silently skipped (optional param, truthiness on an emptyable value, a
   sanitizer that isn't called) is equivalent to no check.
