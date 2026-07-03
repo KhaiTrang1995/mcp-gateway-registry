@@ -113,6 +113,7 @@ resource "aws_vpc_endpoint" "s3" {
 
 # Security group for VPC endpoints
 resource "aws_security_group" "vpc_endpoints" {
+  #checkov:skip=CKV2_AWS_5:Attached to the STS interface VPC endpoint via security_group_ids; Checkov does not trace the count-indexed reference
   count = var.create_vpc_endpoints ? 1 : 0
 
   name        = "${var.name}-vpc-endpoints"

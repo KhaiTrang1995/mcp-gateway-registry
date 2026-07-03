@@ -259,6 +259,7 @@ resource "aws_vpc_security_group_egress_rule" "lambda_to_https" {
 #
 resource "aws_cloudwatch_log_group" "documentdb_rotation" {
   #checkov:skip=CKV_AWS_158:KMS encryption for CloudWatch logs not required in this deployment
+  #checkov:skip=CKV_AWS_338:Short retention is intentional for rotation Lambda logs - operational diagnostics
   count = local.is_aws_documentdb ? 1 : 0
 
   name              = "/aws/lambda/${var.name}-rotate-documentdb"
@@ -274,6 +275,7 @@ resource "aws_cloudwatch_log_group" "documentdb_rotation" {
 
 resource "aws_cloudwatch_log_group" "rds_rotation" {
   #checkov:skip=CKV_AWS_158:KMS encryption for CloudWatch logs not required in this deployment
+  #checkov:skip=CKV_AWS_338:Short retention is intentional for rotation Lambda logs - operational diagnostics
   name              = "/aws/lambda/${var.name}-rotate-rds"
   retention_in_days = 30
 

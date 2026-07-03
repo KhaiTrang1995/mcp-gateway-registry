@@ -37,6 +37,7 @@ locals {
 
 resource "aws_ecr_repository" "services" {
   #checkov:skip=CKV_AWS_51:Mutable tags required for latest tag workflow in CI/CD pipeline
+  #checkov:skip=CKV_AWS_136:AES256 default encryption is sufficient for these container images
   for_each = var.create_codebuild ? local.ecr_repositories : toset([])
 
   name                 = each.key

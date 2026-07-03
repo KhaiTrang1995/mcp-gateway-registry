@@ -131,6 +131,7 @@ resource "aws_ecs_cluster_capacity_providers" "keycloak" {
 # CloudWatch Log Group
 resource "aws_cloudwatch_log_group" "keycloak" {
   #checkov:skip=CKV_AWS_158:KMS encryption for CloudWatch logs not required in this deployment
+  #checkov:skip=CKV_AWS_338:Short retention is intentional for Keycloak container logs - cost-controlled
   name              = "/ecs/keycloak"
   retention_in_days = 7
 
