@@ -1,6 +1,100 @@
 import os
 from typing import Optional
 
+# Minimum accepted length (characters, on the stripped value) for the API-key
+# HMAC pepper. A short pepper is brute-forceable and defeats the point of
+# per-deployment domain separation.
+_MIN_PEPPER_LENGTH: int = 32
+
+# Known-weak / placeholder pepper values that must never be accepted even if an
+# operator explicitly sets them (e.g. a compose file passing ${VAR:-default}).
+# The historical hard-coded constant is included so an accidental copy is
+# rejected rather than silently reused.
+_WEAK_PEPPER_VALUES: frozenset[str] = frozenset(
+    {
+        "mcp-gateway-metrics-api-key-v1",
+        "changeme",
+        "change-me",
+        "changethis",
+        "change-this",
+        "development-secret-key",
+        "secret",
+        "password",
+        "placeholder",
+        "example",
+        "test",
+    }
+)
+
+# Case-insensitive prefixes that mark an obvious placeholder the operator was
+# meant to replace (e.g. the .env.example default). Rejected even though they
+# may satisfy the length check, so a copied-but-unedited example fails closed.
+_WEAK_PEPPER_PREFIXES: tuple[str, ...] = (
+    "change-me",
+    "changeme",
+    "change-this",
+    "changethis",
+    "your-",
+    "example-",
+    "placeholder",
+)
+
+
+def _validate_pepper(
+    raw_value: str | None,
+) -> str:
+    """Validate the API-key HMAC pepper, failing closed on missing/weak values.
+
+    The pepper provides per-deployment domain separation for stored API-key
+    hashes: it keeps hashes deterministic (so the UNIQUE ``key_hash`` lookup
+    still works) while defeating offline / cross-deployment brute force against
+    a leaked hash. Because it is a secret, it must be present and strong.
+
+    Args:
+        raw_value: The raw ``METRICS_KEY_PEPPER`` environment value, or None.
+
+    Returns:
+        The normalized (stripped) pepper string.
+
+    Raises:
+        ValueError: If the pepper is unset, empty/whitespace, a known-weak
+            literal, or shorter than the minimum length. Denies by default.
+    """
+    if raw_value is None:
+        raise ValueError(
+            "METRICS_KEY_PEPPER is required but not set. Set it to a unique, "
+            "high-entropy per-deployment secret (e.g. `openssl rand -hex 32`). "
+            "The metrics service will not start without it."
+        )
+
+    pepper = raw_value.strip()
+
+    if not pepper:
+        raise ValueError(
+            "METRICS_KEY_PEPPER is set but empty/whitespace. Set it to a "
+            "unique, high-entropy per-deployment secret (e.g. "
+            "`openssl rand -hex 32`)."
+        )
+
+    # Run the weak-value check BEFORE the length check so a known placeholder
+    # produces the most actionable error message.
+    normalized = pepper.lower()
+    if normalized in _WEAK_PEPPER_VALUES or normalized.startswith(_WEAK_PEPPER_PREFIXES):
+        raise ValueError(
+            "METRICS_KEY_PEPPER is set to a known-weak/placeholder value. Set "
+            "it to a unique, high-entropy per-deployment secret (e.g. "
+            "`openssl rand -hex 32`)."
+        )
+
+    if len(pepper) < _MIN_PEPPER_LENGTH:
+        raise ValueError(
+            f"METRICS_KEY_PEPPER must be at least {_MIN_PEPPER_LENGTH} "
+            f"characters (got {len(pepper)}). Use a high-entropy value such "
+            "as `openssl rand -hex 32`."
+        )
+
+    return pepper
+
 
 class Settings:
     # Database settings
@@ -27,6 +121,14 @@ class Settings:
     METRICS_RATE_LIMIT: int = int(os.getenv("METRICS_RATE_LIMIT", "1000"))
     API_KEY_HASH_ALGORITHM: str = os.getenv("API_KEY_HASH_ALGORITHM", "sha256")
 
+    # Per-caller-IP throttle for the unauthenticated /rate-limit lookup, which
+    # would otherwise be a key-validity oracle. Requests beyond this many per
+    # window from a single client IP are rejected uniformly.
+    RATE_LIMIT_ENDPOINT_MAX_REQUESTS: int = int(os.getenv("RATE_LIMIT_ENDPOINT_MAX_REQUESTS", "10"))
+    RATE_LIMIT_ENDPOINT_WINDOW_SECONDS: int = int(
+        os.getenv("RATE_LIMIT_ENDPOINT_WINDOW_SECONDS", "60")
+    )
+
     # Histogram bucket boundaries for duration metrics (seconds)
     HISTOGRAM_BUCKET_BOUNDARIES: list = [
         float(x)
@@ -40,6 +142,23 @@ class Settings:
     BATCH_SIZE: int = int(os.getenv("BATCH_SIZE", "100"))
     FLUSH_INTERVAL_SECONDS: int = int(os.getenv("FLUSH_INTERVAL_SECONDS", "30"))
     MAX_REQUEST_SIZE: str = os.getenv("MAX_REQUEST_SIZE", "10MB")
+
+    @staticmethod
+    def get_key_pepper() -> str:
+        """Return the validated API-key HMAC pepper, failing closed if unusable.
+
+        Read at hash time (not import time) so the fail-closed behavior applies
+        at every signing/verification entrypoint, and so importing this module
+        for unrelated purposes does not require the secret to be present.
+
+        Returns:
+            The normalized pepper string.
+
+        Raises:
+            ValueError: Propagated from :func:`_validate_pepper` when the pepper
+                is missing, empty, weak, or too short.
+        """
+        return _validate_pepper(os.getenv("METRICS_KEY_PEPPER"))
 
 
 settings = Settings()
