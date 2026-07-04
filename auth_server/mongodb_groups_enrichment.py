@@ -10,6 +10,7 @@ Works with both:
 """
 
 import logging
+from typing import Any
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
@@ -22,6 +23,35 @@ logger = logging.getLogger(__name__)
 
 
 _mongodb_database: AsyncIOMotorDatabase | None = None
+
+
+# A record whose `enabled` field is explicitly False has been disabled by an
+# operator (or synced as inactive from the upstream IdP) and MUST NOT
+# contribute groups/scopes to a token. Records that predate the `enabled`
+# field (field absent) are treated as active for backward compatibility, which
+# matches the registry service-layer read semantics
+# (``doc.get("enabled", True)``). Both registry create paths and the Okta/Auth0
+# sync paths write ``enabled`` explicitly, so an active record always carries
+# ``enabled: True`` and a revoked one carries ``enabled: False``.
+_ENABLED_FILTER: dict[str, Any] = {"enabled": {"$ne": False}}
+
+
+def _is_record_enabled(doc: dict[str, Any]) -> bool:
+    """Return whether an enrichment record is active (not operator-disabled).
+
+    A record is considered disabled only when its ``enabled`` field is
+    explicitly ``False``. A missing field is treated as active for backward
+    compatibility with records created before the flag existed, matching the
+    registry service-layer read semantics.
+
+    Args:
+        doc: The MongoDB document for an M2M client or user-group mapping.
+
+    Returns:
+        ``True`` if the record may contribute groups, ``False`` if it has been
+        disabled and must be ignored.
+    """
+    return doc.get("enabled", True) is not False
 
 
 async def _get_mongodb() -> AsyncIOMotorDatabase:
@@ -95,7 +125,15 @@ async def enrich_groups_from_mongodb(
         db = await _get_mongodb()
         collection = db["idp_m2m_clients"]
 
-        doc = await collection.find_one({"client_id": client_id})
+        # Exclude operator-disabled records at the query level so a revoked M2M
+        # client cannot regain groups/scopes via the enrichment fallback.
+        doc = await collection.find_one({"client_id": client_id, **_ENABLED_FILTER})
+
+        if doc and not _is_record_enabled(doc):
+            # Defense in depth: never trust groups from a disabled record even
+            # if the query filter is ever loosened.
+            logger.info(f"Client {client_id} record is disabled; skipping enrichment")
+            doc = None
 
         if doc:
             db_groups = doc.get("groups", [])
@@ -105,7 +143,7 @@ async def enrich_groups_from_mongodb(
             else:
                 logger.debug(f"Client {client_id} found in database but has no groups")
         else:
-            logger.debug(f"Client {client_id} not found in groups database")
+            logger.debug(f"Client {client_id} not found or disabled in groups database")
 
     except Exception as e:
         logger.warning(f"Failed to query database for groups enrichment: {e}")
@@ -164,28 +202,32 @@ async def enrich_user_groups_from_mongodb(
         logger.debug(f"User {username} has groups in token: {current_groups}")
         return current_groups
 
-    logger.info(
-        f"User {username} (provider={provider}) has no groups in token, querying database"
-    )
+    logger.info(f"User {username} (provider={provider}) has no groups in token, querying database")
 
     # Try to fetch groups from DocumentDB/MongoDB
     try:
         db = await _get_mongodb()
         collection = db["idp_user_groups"]
 
-        doc = await collection.find_one({"username": username})
+        # Exclude operator-disabled records at the query level so a revoked
+        # user-group mapping cannot keep granting access via the fallback.
+        doc = await collection.find_one({"username": username, **_ENABLED_FILTER})
+
+        if doc and not _is_record_enabled(doc):
+            # Defense in depth: never trust groups from a disabled record even
+            # if the query filter is ever loosened.
+            logger.info(f"User {username} record is disabled; skipping enrichment")
+            doc = None
 
         if doc:
             db_groups = doc.get("groups", [])
             if db_groups:
-                logger.info(
-                    f"Enriched groups for user {username} from database: {db_groups}"
-                )
+                logger.info(f"Enriched groups for user {username} from database: {db_groups}")
                 return db_groups
             else:
                 logger.debug(f"User {username} found in database but has no groups")
         else:
-            logger.debug(f"User {username} not found in idp_user_groups database")
+            logger.debug(f"User {username} not found or disabled in idp_user_groups database")
 
     except Exception as e:
         logger.warning(f"Failed to query database for user groups enrichment: {e}")
