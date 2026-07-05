@@ -267,6 +267,11 @@ module "ecs_service_metrics" {
           {
             name      = "METRICS_API_KEY_MCPGW"
             valueFrom = aws_secretsmanager_secret.metrics_api_key[0].arn
+          },
+          {
+            # Required: metrics-service refuses to start without a strong pepper.
+            name      = "METRICS_KEY_PEPPER"
+            valueFrom = aws_secretsmanager_secret.metrics_key_pepper[0].arn
           }
         ],
         var.otel_otlp_endpoint != "" ? [

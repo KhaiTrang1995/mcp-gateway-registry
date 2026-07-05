@@ -342,11 +342,11 @@ fi
 if ! grep -q "SECRET_KEY=" .env || grep -q "SECRET_KEY=$" .env || grep -q "SECRET_KEY=\"\"" .env; then
     log "Generating SECRET_KEY..."
     SECRET_KEY=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate SECRET_KEY"
-    
+
     # Remove any existing empty SECRET_KEY line
     sed -i '/^SECRET_KEY=$/d' .env 2>/dev/null || true
     sed -i '/^SECRET_KEY=""$/d' .env 2>/dev/null || true
-    
+
     # Add new SECRET_KEY
     echo "SECRET_KEY=$SECRET_KEY" >> .env
     log "SECRET_KEY added to .env"
@@ -393,6 +393,29 @@ if ! grep -q "^DOCUMENTDB_PASSWORD=" .env || grep -q "^DOCUMENTDB_PASSWORD=$" .e
     log "DOCUMENTDB_PASSWORD added to .env"
 else
     log "DOCUMENTDB_PASSWORD already exists in .env"
+fi
+
+# Generate a strong METRICS_KEY_PEPPER if not already set. The metrics-service
+# peppers stored API-key hashes with this value and refuses to start unless it
+# is present and high-entropy (>= 32 chars, not a known placeholder). Generated
+# unconditionally so it is available whenever the metrics-service is built from
+# source; the --prebuilt path has no metrics-service and simply ignores it.
+# NOTE: rotating this value invalidates all existing API-key hashes -- re-issue
+# metrics API keys after changing it. We only generate when missing/empty; an
+# operator-provided pepper is left untouched.
+if ! grep -q "^METRICS_KEY_PEPPER=" .env || grep -q "^METRICS_KEY_PEPPER=$" .env || grep -q "^METRICS_KEY_PEPPER=\"\"$" .env; then
+    log "Generating METRICS_KEY_PEPPER..."
+    METRICS_KEY_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate METRICS_KEY_PEPPER"
+
+    # Remove any existing empty METRICS_KEY_PEPPER line
+    sed -i '/^METRICS_KEY_PEPPER=$/d' .env 2>/dev/null || true
+    sed -i '/^METRICS_KEY_PEPPER=""$/d' .env 2>/dev/null || true
+
+    # Add new METRICS_KEY_PEPPER
+    echo "METRICS_KEY_PEPPER=$METRICS_KEY_PEPPER" >> .env
+    log "METRICS_KEY_PEPPER added to .env"
+else
+    log "METRICS_KEY_PEPPER already exists in .env"
 fi
 
 # Validate required environment variables

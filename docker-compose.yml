@@ -479,6 +479,10 @@ services:
       - METRICS_API_KEY_AUTH=${METRICS_API_KEY_AUTH_SERVER}
       - METRICS_API_KEY_REGISTRY=${METRICS_API_KEY_REGISTRY}
       - METRICS_API_KEY_MCPGW=${METRICS_API_KEY_MCPGW_SERVER}
+      # Per-deployment pepper for API-key hashing. Required: the metrics-service
+      # refuses to start without a strong value. Generated into .env by
+      # build_and_run.sh; rotating it invalidates existing API-key hashes.
+      - METRICS_KEY_PEPPER=${METRICS_KEY_PEPPER}
       - OTEL_SERVICE_NAME=mcp-metrics-service
       - OTEL_PROMETHEUS_ENABLED=true
       - OTEL_PROMETHEUS_PORT=9465
