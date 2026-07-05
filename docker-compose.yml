@@ -15,7 +15,9 @@ services:
   # requires for replica-set internal authentication when --auth is enabled.
   # Runs once before mongodb starts; idempotent (skips if the keyfile exists).
   mongodb-keyfile-init:
-    image: alpine:latest
+    # Pinned (not :latest) so rebuilds are reproducible and cannot silently
+    # drift to an untested image; matches the prebuilt/podman variants.
+    image: alpine:3.21
     container_name: mcp-mongodb-keyfile-init
     volumes:
       - mongodb-keyfile:/keyfile
@@ -38,6 +40,8 @@ services:
   # Vector search is implemented in application code (see search_repository.py)
   # Authentication is enabled (--auth): the root user is created on first boot
   # from DOCUMENTDB_USERNAME/DOCUMENTDB_PASSWORD, which must be set (no default).
+  # The published port is bound to loopback (see HOST_BIND_IP below) so the
+  # database is not reachable from other machines on the network by default.
   mongodb:
     image: mongo:8.2
     container_name: mcp-mongodb
@@ -119,8 +123,13 @@ services:
     command: ["server", "-dev"]
     environment:
       # Dev mode auto-mounts KV v2 at secret/ and auto-unseals with this token.
-      - BAO_DEV_ROOT_TOKEN_ID=${OPENBAO_TOKEN:-dev-root-token}
+      # OPENBAO_TOKEN is required (no default): reaching :8200 with a known token
+      # grants root access to every stored egress credential, so we fail fast
+      # rather than ship a guessable "dev-root-token" default.
+      - BAO_DEV_ROOT_TOKEN_ID=${OPENBAO_TOKEN:?Set OPENBAO_TOKEN in .env (a strong random value; do not reuse the old dev-root-token default)}
       - BAO_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    # Published on loopback only: the dev vault is auto-unsealed and must never
+    # be reachable from other hosts on the network.
     ports:
       # Loopback-only: reaching the vault means root access to every stored egress
       # credential, so it must never be exposed beyond the host. Override with
@@ -197,7 +206,7 @@ services:
       - OPENBAO_ROLE=${OPENBAO_ROLE:-}
       # Static token for OPENBAO_AUTH_METHOD=token; matches the dev OpenBao root
       # token. Required for token auth (kubernetes auth is EKS-only).
-      - OPENBAO_TOKEN=${OPENBAO_TOKEN:-dev-root-token}
+      - OPENBAO_TOKEN=${OPENBAO_TOKEN:?Set OPENBAO_TOKEN in .env (a strong random value; do not reuse the old dev-root-token default)}
       - AUTH_SERVER_URL=${AUTH_SERVER_URL}
       - AUTH_SERVER_EXTERNAL_URL=${AUTH_SERVER_EXTERNAL_URL}
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
@@ -211,6 +220,10 @@ services:
       - COGNITO_USER_POOL_ID=${COGNITO_USER_POOL_ID}
       - COGNITO_ENABLED=${COGNITO_ENABLED:-false}
       - AWS_REGION=${AWS_REGION:-us-east-1}
+      # Point the AWS SDK at the opt-in single credentials file when the operator
+      # mounts one (see volumes below). Unset -> /dev/null (no host creds), so
+      # the SDK falls through to an IAM role or explicit AWS_* env vars.
+      - AWS_SHARED_CREDENTIALS_FILE=${AWS_SHARED_CREDENTIALS_FILE:-/dev/null}
       - HEALTH_CHECK_INTERVAL_SECONDS=${HEALTH_CHECK_INTERVAL_SECONDS:-30}
       - SRE_GATEWAY_AUTH_TOKEN=${SRE_GATEWAY_AUTH_TOKEN}
       - ATLASSIAN_AUTH_TOKEN=${ATLASSIAN_AUTH_TOKEN}
@@ -291,10 +304,13 @@ services:
       - PINGFEDERATE_APPLICATION_ID_URI=${PINGFEDERATE_APPLICATION_ID_URI:-}
       - PINGFEDERATE_GROUPS_CLAIM=${PINGFEDERATE_GROUPS_CLAIM:-groups}
       - PINGFEDERATE_ENABLED=${PINGFEDERATE_ENABLED:-false}
-      # PingFederate Admin API (registry only)
+      # PingFederate Admin API (registry only). PF_ADMIN_PASS has no default:
+      # the registry drives the PF admin API with it, so a shipped vendor
+      # default would be a usable credential. Set it in .env when the
+      # pingfederate profile is enabled; leave empty otherwise.
       - PF_ADMIN_URL=${PF_ADMIN_URL:-https://pingfederate:9999}
       - PF_ADMIN_USER=${PF_ADMIN_USER:-administrator}
-      - PF_ADMIN_PASS=${PF_ADMIN_PASS:-2FederateM0re}
+      - PF_ADMIN_PASS=${PF_ADMIN_PASS:-}
       # External Registry Configuration
       - EXTERNAL_REGISTRY_TAGS=${EXTERNAL_REGISTRY_TAGS:-anthropic-registry,workday-asor}
       - ASOR_ACCESS_TOKEN=${ASOR_ACCESS_TOKEN}
@@ -447,7 +463,14 @@ services:
       - ${HOME}/mcp-gateway/models:/app/registry/models
       - ${HOME}/mcp-gateway/federation.json:/app/config/federation.json
       - ${HOME}/mcp-gateway/ssl:/etc/ssl:ro
-      - ${HOME}/.aws:/root/.aws:ro
+      # AWS credentials are OPT-IN. Mounting the whole ~/.aws directory into an
+      # internet-facing container exposes every profile/key to any RCE/SSRF in
+      # the gateway. Prefer an IAM role or scoped AWS_* env vars. If you must
+      # use a shared credentials file (e.g. Bedrock embeddings locally), set
+      # AWS_SHARED_CREDENTIALS_FILE to a single file on the host and it is
+      # mounted read-only at the same in-container path. Default (unset) mounts
+      # /dev/null, so no host credentials are exposed.
+      - ${AWS_SHARED_CREDENTIALS_FILE:-/dev/null}:${AWS_SHARED_CREDENTIALS_FILE:-/dev/null}:ro
       # Application log files (bind mount to host for Splunk ingestion, Issue #987)
       - /var/log/containers/ai-registry:/var/log/containers/ai-registry
       # Audit logs + security scans (named volumes, unchanged)
@@ -491,6 +514,8 @@ services:
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
       - OTEL_OTLP_EXPORT_INTERVAL_MS=${OTEL_OTLP_EXPORT_INTERVAL_MS:-30000}
       - OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=${OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE:-cumulative}
+    # Internal service: reachable in-cluster via service DNS (metrics-service:8890).
+    # Published on loopback only for local debugging.
     ports:
       # Loopback-only API port (build_and_run.sh health-checks it from the host).
       - "${HOST_BIND_IP:-127.0.0.1}:8890:8890"
@@ -656,6 +681,9 @@ services:
       - TOOL_FILTER_AUDIT_LOG_LEVEL=${TOOL_FILTER_AUDIT_LOG_LEVEL:-INFO}
       - INTERNAL_TOKEN_TTL_SECONDS=${INTERNAL_TOKEN_TTL_SECONDS:-30}
       - INTERNAL_TOKEN_LEEWAY_SECONDS=${INTERNAL_TOKEN_LEEWAY_SECONDS:-5}
+    # The auth server is fronted by nginx (the registry container). Publish on
+    # loopback only so callers cannot bypass the nginx front door from the
+    # network; in-cluster services reach it via service DNS (auth-server:8888).
     ports:
       # Loopback-only: normal traffic reaches auth-server through the nginx front
       # door; this direct port is for host health checks / tests only.
@@ -691,6 +719,9 @@ services:
       - HOST=0.0.0.0
       - PORT=8000
       - MCP_TRANSPORT=streamable-http
+    # Backend MCP server: reached through the nginx/auth front door in-cluster.
+    # Published on loopback only so it cannot be called directly from the
+    # network (which would bypass authentication).
     ports:
       # Loopback-only: reached through the nginx front door in normal use; direct
       # port is for host testing only.
@@ -734,6 +765,8 @@ services:
       - ${HOME}/mcp-gateway/models:/app/registry/models
       # Application log file (bind mount to host for Splunk ingestion, Issue #987)
       - /var/log/containers/ai-registry:/var/log/containers/ai-registry
+    # Backend MCP server: reached through the nginx/auth front door in-cluster.
+    # Published on loopback only (direct network calls would bypass auth).
     ports:
       # Loopback-only: reached through the nginx front door in normal use; direct
       # port is for host testing only.
@@ -752,6 +785,8 @@ services:
         BUILD_VERSION: ${BUILD_VERSION:-1.0.0}
     environment:
       - PORT=8002
+    # Backend MCP server: reached through the nginx/auth front door in-cluster.
+    # Published on loopback only (direct network calls would bypass auth).
     ports:
       # Loopback-only: reached through the nginx front door in normal use; direct
       # port is for host testing only.
@@ -791,6 +826,8 @@ services:
     command: ["--config=/etc/otelcol-contrib/config.yaml"]
     volumes:
       - ./config/otel/collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    # Services push OTLP over the docker network via service DNS
+    # (otel-collector:4317). Published on loopback only for local inspection.
     ports:
       # Loopback-only OTLP receivers so a locally-run (non-compose) service can
       # still push to the collector via localhost. Compose services push over the
@@ -816,6 +853,7 @@ services:
   # Prometheus for metrics collection
   prometheus:
     image: prom/prometheus:v3.11.3
+    # Operator dashboard: published on loopback only (no auth on Prometheus).
     ports:
       # Loopback-only: Prometheus UI is a local-dev convenience, not a public surface.
       - "${HOST_BIND_IP:-127.0.0.1}:9090:9090"
@@ -838,6 +876,8 @@ services:
   # Grafana for metrics visualization
   grafana:
     image: grafana/grafana:12.3.1
+    # Operator dashboard: published on loopback only. Reach it via an SSH
+    # tunnel for remote access rather than exposing it to the network.
     ports:
       # Loopback-only: Grafana UI is a local-dev convenience, not a public surface.
       - "${HOST_BIND_IP:-127.0.0.1}:3000:3000"
@@ -863,7 +903,10 @@ services:
     environment:
       POSTGRES_DB: keycloak
       POSTGRES_USER: keycloak
-      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak}
+      # No default: the Keycloak realm lives in this database, so a shipped
+      # "keycloak" password would be a usable credential on any host that
+      # exposes 5432. Set KEYCLOAK_DB_PASSWORD in .env.
+      POSTGRES_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD in .env}
     volumes:
       - keycloak_db_data:/var/lib/postgresql/data
     restart: unless-stopped
@@ -882,11 +925,13 @@ services:
       KC_DB: postgres
       KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
       KC_DB_USERNAME: keycloak
-      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:-keycloak}
+      KC_DB_PASSWORD: ${KEYCLOAK_DB_PASSWORD:?Set KEYCLOAK_DB_PASSWORD in .env}
 
-      # Admin credentials
+      # Admin credentials. No default password: this bootstraps the Keycloak
+      # master-realm admin, so an empty/guessable value would be a full
+      # takeover of the IdP. Set KEYCLOAK_ADMIN_PASSWORD in .env.
       KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN:-admin}
-      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in .env}
 
       # HTTP configuration
       KC_HTTP_ENABLED: 'true'
@@ -904,6 +949,11 @@ services:
       # Logging
       KC_LOG_LEVEL: INFO
 
+    # start-dev serves plain HTTP with a bootstrap admin account, so the
+    # published port is bound to loopback: the browser reaches it via
+    # http://localhost:8080 on the same host, and in-cluster services use the
+    # keycloak:8080 service DNS name. For network-exposed Keycloak, front it
+    # with nginx/TLS (KEYCLOAK_EXTERNAL_URL) and switch to `start`.
     ports:
       # Loopback-only: Keycloak is reached through the nginx front door in normal
       # use; direct admin/console access stays on the host.
@@ -928,7 +978,9 @@ services:
       start_period: 60s
 
   pingfederate:
-    image: pingidentity/pingfederate:latest
+    # Pinned to a specific version rather than :latest so the image is
+    # reproducible and cannot silently drift to an untested/incompatible build.
+    image: pingidentity/pingfederate:13.0.2
     container_name: pingfederate
     profiles: ["pingfederate"]
     environment:
@@ -937,6 +989,8 @@ services:
       - PING_IDENTITY_DEVOPS_KEY=${PING_IDENTITY_DEVOPS_KEY}
       - SERVER_PROFILE_URL=https://github.com/pingidentity/pingidentity-server-profiles.git
       - SERVER_PROFILE_PATH=baseline/pingfederate
+    # Runtime (9031/9032) and admin (9999) published on loopback only. The
+    # admin console in particular must never be reachable from the network.
     ports:
       # Loopback-only: PingFederate runtime + admin console stay on the host.
       - "${HOST_BIND_IP:-127.0.0.1}:9031:9031"
