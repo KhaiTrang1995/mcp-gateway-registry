@@ -63,10 +63,12 @@ class TestPepperValidation:
     def test_strong_pepper_accepted_and_stripped(self):
         assert _validate_pepper(f"  {_STRONG_PEPPER}  ") == _STRONG_PEPPER
 
-    def test_env_example_placeholder_rejected(self):
-        # The .env.example default must fail closed even though it is long
-        # enough to pass the length check, so a copied-but-unedited file does
-        # not silently seed a predictable pepper.
+    def test_former_env_example_placeholder_rejected(self):
+        # .env.example ships METRICS_KEY_PEPPER unset (no default value) so there
+        # is nothing to copy-paste-and-forget. This former placeholder must stay
+        # rejected regardless, in case an operator copied it from an older
+        # checkout: it is long enough to pass the length check but must still
+        # fail closed rather than silently seed a predictable pepper.
         with pytest.raises(ValueError, match="known-weak"):
             _validate_pepper("CHANGE-ME-generate-with-openssl-rand-hex-32")
 
