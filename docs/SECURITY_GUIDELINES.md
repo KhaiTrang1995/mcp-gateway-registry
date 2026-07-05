@@ -307,6 +307,24 @@ sanitizer that isn't called) is equivalent to no check.
 - **Pin image tags; never `:latest`.** And raise dependency floors above known
   CVEs even when a lockfile currently mitigates — off-lock installs are exposed;
   prefer consolidating on one library over carrying a redundant vulnerable one.
+- **Sweep EVERY manifest for a floor, not just the one in the finding.** The same
+  dependency is often declared in the root project, each sub-project, and the
+  Lambda/ops `requirements.txt` — a floor patched in one can stay vulnerable in
+  another (e.g. `aiohttp>=3.14.0` in auth_server while the root still says
+  `>=3.8.0`). Grep the dependency name across all manifests and raise every
+  occurrence. Floor to the *first patched release* that clears the CVE, not the
+  newest version — a floor bump is a security minimum, not a version chase.
+- **A removed vulnerable dependency needs a regression guard that covers every
+  manifest AND lockfile.** A test that only asserts absence in one sub-project
+  lets the library reappear via the root or another sub-project uncaught.
+  Parametrize the guard over all `pyproject.toml`/`requirements.txt` and all
+  `uv.lock` files, and scan every source tree for the import.
+- **Regenerate lockfiles with the project's own tooling, not a bare `uv lock`.**
+  This repo uses `make uv-update-locks`, which stamps the `[options] exclude-newer`
+  quarantine header on every lock; a raw `uv lock` drops that header (and bumps
+  the revision format), producing an inconsistent, non-reproducible lockfile. Do
+  not run `uv run` between relock and commit — it re-resolves the root lock against
+  the older committed cutoff and silently strips the freshly-written header.
 - **A dangerous operational toggle** (disabling TLS, wiping data) must require an
   explicit acknowledgement flag AND a fail-closed environment guard (e.g.
   localhost-only). Setup scripts must force credential rotation (`temporary:
