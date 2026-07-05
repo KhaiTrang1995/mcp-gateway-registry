@@ -19,29 +19,54 @@ def repo_root() -> Path:
     return Path(__file__).parent.parent.parent
 
 
-def test_python_jose_not_declared_in_auth_server(repo_root: Path):
-    """auth_server must not declare python-jose as a dependency."""
-    content = (repo_root / "auth_server" / "pyproject.toml").read_text()
+# Every manifest that could reintroduce python-jose. Reintroduction via the root
+# project (or any sub-project) must be caught, not just auth_server.
+_MANIFESTS = (
+    "auth_server/pyproject.toml",
+    "pyproject.toml",
+    "agents/a2a/pyproject.toml",
+)
+
+# Every lockfile that would resolve python-jose / its transitive ecdsa.
+_LOCKFILES = (
+    "auth_server/uv.lock",
+    "uv.lock",
+    "agents/a2a/uv.lock",
+    "metrics-service/uv.lock",
+)
+
+
+@pytest.mark.parametrize("manifest", _MANIFESTS)
+def test_python_jose_not_declared(repo_root: Path, manifest: str):
+    """No manifest may declare python-jose as a dependency."""
+    path = repo_root / manifest
+    if not path.exists():
+        pytest.skip(f"{manifest} not present")
+    content = path.read_text()
     assert "python-jose" not in content, (
-        "auth_server/pyproject.toml declares python-jose; use pyjwt instead (SA-13)."
+        f"{manifest} declares python-jose; use pyjwt instead (SA-13)."
     )
 
 
-def test_python_jose_absent_from_auth_server_lock(repo_root: Path):
-    """The resolved auth_server lock must not contain python-jose or ecdsa."""
-    lock = (repo_root / "auth_server" / "uv.lock").read_text()
+@pytest.mark.parametrize("lockfile", _LOCKFILES)
+def test_python_jose_absent_from_lock(repo_root: Path, lockfile: str):
+    """No resolved lockfile may contain python-jose or ecdsa."""
+    path = repo_root / lockfile
+    if not path.exists():
+        pytest.skip(f"{lockfile} not present")
+    lock = path.read_text()
     assert 'name = "python-jose"' not in lock, (
-        "auth_server/uv.lock resolves python-jose; re-run `uv lock` after removing it (SA-13)."
+        f"{lockfile} resolves python-jose; re-run `uv lock` after removing it (SA-13)."
     )
     assert 'name = "ecdsa"' not in lock, (
-        "auth_server/uv.lock resolves ecdsa (pulled by python-jose); it has an unfixed CVE (SA-13)."
+        f"{lockfile} resolves ecdsa (pulled by python-jose); it has an unfixed CVE (SA-13)."
     )
 
 
 def test_no_jose_imports_in_source(repo_root: Path):
     """No source file should import python-jose (the `jose` package)."""
     offenders: list[str] = []
-    for base in ("auth_server", "registry", "cli"):
+    for base in ("auth_server", "registry", "cli", "servers", "agents", "metrics-service", "scripts"):
         base_dir = repo_root / base
         if not base_dir.is_dir():
             continue
