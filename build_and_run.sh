@@ -354,6 +354,92 @@ else
     log "SECRET_KEY already exists in .env"
 fi
 
+# Generate a random AUTH_SERVER_NGINX_MARKER_SECRET if not already in .env.
+# Required by both auth_server and registry: it guards all mcp-proxy token
+# minting (a direct :8888 /validate with a forged X-Resolved-Upstream cannot
+# obtain a token without it). Must be identical across both services.
+if ! grep -q "AUTH_SERVER_NGINX_MARKER_SECRET=" .env || grep -q "AUTH_SERVER_NGINX_MARKER_SECRET=$" .env || grep -q "AUTH_SERVER_NGINX_MARKER_SECRET=\"\"" .env; then
+    log "Generating AUTH_SERVER_NGINX_MARKER_SECRET..."
+    MARKER_SECRET=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate AUTH_SERVER_NGINX_MARKER_SECRET"
+
+    # Remove any existing empty marker line
+    sed -i '/^AUTH_SERVER_NGINX_MARKER_SECRET=$/d' .env 2>/dev/null || true
+    sed -i '/^AUTH_SERVER_NGINX_MARKER_SECRET=""$/d' .env 2>/dev/null || true
+
+    # Add new marker secret
+    echo "AUTH_SERVER_NGINX_MARKER_SECRET=$MARKER_SECRET" >> .env
+    log "AUTH_SERVER_NGINX_MARKER_SECRET added to .env"
+else
+    log "AUTH_SERVER_NGINX_MARKER_SECRET already exists in .env"
+fi
+
+# Generate a strong DOCUMENTDB_PASSWORD if not already set. The local MongoDB
+# container runs with --auth and creates its root user from this value on first
+# boot, so it must never be a weak default like "admin". We only generate when
+# the value is missing/empty; an operator-provided password is left untouched.
+# NOTE: this only helps a first-time install. If MongoDB was already initialized
+# with a different password (existing data volume), set DOCUMENTDB_PASSWORD to
+# that value or recreate the mongodb-data volume.
+if ! grep -q "^DOCUMENTDB_PASSWORD=" .env || grep -q "^DOCUMENTDB_PASSWORD=$" .env || grep -q "^DOCUMENTDB_PASSWORD=\"\"$" .env; then
+    log "Generating DOCUMENTDB_PASSWORD..."
+    DOCUMENTDB_PASSWORD=$(python3 -c 'import secrets; print(secrets.token_hex(24))') || handle_error "Failed to generate DOCUMENTDB_PASSWORD"
+
+    # Remove any existing empty DOCUMENTDB_PASSWORD line
+    sed -i '/^DOCUMENTDB_PASSWORD=$/d' .env 2>/dev/null || true
+    sed -i '/^DOCUMENTDB_PASSWORD=""$/d' .env 2>/dev/null || true
+
+    # Add new DOCUMENTDB_PASSWORD
+    echo "DOCUMENTDB_PASSWORD=$DOCUMENTDB_PASSWORD" >> .env
+    log "DOCUMENTDB_PASSWORD added to .env"
+else
+    log "DOCUMENTDB_PASSWORD already exists in .env"
+fi
+
+# Generate a strong METRICS_KEY_PEPPER if not already set. The metrics-service
+# peppers stored API-key hashes with this value and refuses to start unless it
+# is present and high-entropy (>= 32 chars, not a known placeholder). Generated
+# unconditionally so it is available whenever the metrics-service is built from
+# source; the --prebuilt path has no metrics-service and simply ignores it.
+# NOTE: rotating this value invalidates all existing API-key hashes -- re-issue
+# metrics API keys after changing it. We only generate when missing/empty; an
+# operator-provided pepper is left untouched.
+if ! grep -q "^METRICS_KEY_PEPPER=" .env || grep -q "^METRICS_KEY_PEPPER=$" .env || grep -q "^METRICS_KEY_PEPPER=\"\"$" .env; then
+    log "Generating METRICS_KEY_PEPPER..."
+    METRICS_KEY_PEPPER=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate METRICS_KEY_PEPPER"
+
+    # Remove any existing empty METRICS_KEY_PEPPER line
+    sed -i '/^METRICS_KEY_PEPPER=$/d' .env 2>/dev/null || true
+    sed -i '/^METRICS_KEY_PEPPER=""$/d' .env 2>/dev/null || true
+
+    # Add new METRICS_KEY_PEPPER
+    echo "METRICS_KEY_PEPPER=$METRICS_KEY_PEPPER" >> .env
+    log "METRICS_KEY_PEPPER added to .env"
+else
+    log "METRICS_KEY_PEPPER already exists in .env"
+fi
+
+# Generate a strong OPENBAO_TOKEN if not already set. The dev OpenBao container
+# is auto-unsealed with this root token and the registry authenticates to it
+# with the same value, so the compose stack requires it (${OPENBAO_TOKEN:?}) and
+# refuses to start without one -- reaching :8200 with a known token grants root
+# access to every stored egress credential. Generate a strong value rather than
+# ship the old guessable "dev-root-token" default. We only generate when the
+# value is missing/empty; an operator-provided token is left untouched.
+if ! grep -q "^OPENBAO_TOKEN=" .env || grep -q "^OPENBAO_TOKEN=$" .env || grep -q "^OPENBAO_TOKEN=\"\"$" .env; then
+    log "Generating OPENBAO_TOKEN..."
+    OPENBAO_TOKEN=$(python3 -c 'import secrets; print(secrets.token_hex(32))') || handle_error "Failed to generate OPENBAO_TOKEN"
+
+    # Remove any existing empty OPENBAO_TOKEN line
+    sed -i '/^OPENBAO_TOKEN=$/d' .env 2>/dev/null || true
+    sed -i '/^OPENBAO_TOKEN=""$/d' .env 2>/dev/null || true
+
+    # Add new OPENBAO_TOKEN
+    echo "OPENBAO_TOKEN=$OPENBAO_TOKEN" >> .env
+    log "OPENBAO_TOKEN added to .env"
+else
+    log "OPENBAO_TOKEN already exists in .env"
+fi
+
 # Validate required environment variables
 log "Validating required environment variables..."
 source .env
