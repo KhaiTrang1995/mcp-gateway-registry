@@ -103,10 +103,17 @@ sanitizer that isn't called) is equivalent to no check.
   fetch time. The authorize URL is a browser redirect — bound it too, but the
   token URL is where credential exfiltration happens.
 - **A stricter security context must not inherit a looser guard's allowlist
-  bypass.** A URL guard shared with a lower-risk path may have a trusted-domain
-  allowlist that skips the IP check; on a credentialed egress path (e.g.
-  federation sync attaching a bearer token) that bypass is a hole. Layer a strict
-  "resolves only to public IPs" check on top for the sensitive path.
+  bypass — and the fix belongs on the transport, not in a pre-check.** A URL
+  guard shared with a lower-risk path may have a trusted-domain allowlist that
+  skips the IP check; on a credentialed egress path (e.g. federation sync
+  attaching a bearer token) that bypass is a hole. Give the sensitive path its
+  own **dedicated profile with an empty allowlist** and build its client from the
+  **pinned guarded transport** with that profile. A pre-fetch "resolves only to
+  public IPs" check layered on top of a plain client is NOT enough: the plain
+  client re-resolves at connect time, so a host that passed the check can still
+  rebind to a private/metadata address before the credential-bearing socket
+  opens. Write-time and fetch-time must share one allowlist (both empty for the
+  credential path) so a validated-then-rebound endpoint cannot slip through.
 - **Keep TLS verification ON by default for privileged outbound calls.** Never
   ship `verify=False` on an admin-API client. Trust a private/self-signed cert
   via an explicit CA bundle env var (fail closed if the configured bundle is
