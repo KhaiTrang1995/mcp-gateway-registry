@@ -1713,7 +1713,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiofiles", specifier = ">=24.1.0" },
-    { name = "aiohttp", specifier = ">=3.8.0" },
+    { name = "aiohttp", specifier = ">=3.11.12" },
     { name = "awscli", specifier = ">=1.36.0" },
     { name = "bandit", specifier = ">=1.8.3" },
     { name = "boto3", specifier = ">=1.42.87" },
