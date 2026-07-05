@@ -88,7 +88,7 @@ router = APIRouter(
 async def list_peers(
     enabled: bool | None = None,
     user_context: dict = Depends(nginx_proxied_auth),
-) -> list[PeerRegistryConfig]:
+) -> list[PeerRegistryConfigResponse]:
     """
     List all peer registries with optional filtering by enabled status.
 
@@ -111,14 +111,14 @@ async def list_peers(
     peers = await service.list_peers(enabled=enabled)
 
     logger.info(f"Returning {len(peers)} peer configs")
-    return peers
+    return [PeerRegistryConfigResponse.from_config(peer) for peer in peers]
 
 
 @router.post("", response_model=PeerRegistryConfigResponse, status_code=status.HTTP_201_CREATED)
 async def create_peer(
     config: PeerRegistryConfig,
     user_context: dict = Depends(nginx_proxied_auth),
-) -> PeerRegistryConfig:
+) -> PeerRegistryConfigResponse:
     """
     Create a new peer registry configuration.
 
@@ -152,7 +152,7 @@ async def create_peer(
     try:
         created_peer = await service.add_peer(config)
         logger.info(f"Successfully created peer '{config.peer_id}'")
-        return created_peer
+        return PeerRegistryConfigResponse.from_config(created_peer)
     except ValueError as e:
         error_msg = str(e)
         if "already exists" in error_msg:
@@ -290,7 +290,7 @@ async def get_shared_resources(
 async def get_peer(
     peer_id: str,
     user_context: dict = Depends(nginx_proxied_auth),
-) -> PeerRegistryConfig:
+) -> PeerRegistryConfigResponse:
     """
     Get a specific peer by ID.
 
@@ -314,7 +314,7 @@ async def get_peer(
 
     try:
         peer = await service.get_peer(peer_id)
-        return peer
+        return PeerRegistryConfigResponse.from_config(peer)
     except ValueError as e:
         logger.error(f"Peer not found: {peer_id}")
         raise HTTPException(
@@ -328,7 +328,7 @@ async def update_peer(
     peer_id: str,
     updates: dict[str, Any] = Body(...),
     user_context: dict = Depends(nginx_proxied_auth),
-) -> PeerRegistryConfig:
+) -> PeerRegistryConfigResponse:
     """
     Update an existing peer configuration.
 
@@ -352,8 +352,10 @@ async def update_peer(
         }
     """
     _check_peer_management_scope(user_context)
+    # Never log the raw updates dict: it may carry the plaintext federation_token.
     logger.info(
-        f"User '{user_context.get('username')}' updating peer '{peer_id}' with updates: {updates}"
+        f"User '{user_context.get('username')}' updating peer '{peer_id}' "
+        f"(fields: {sorted(updates.keys())})"
     )
 
     service = get_peer_federation_service()
@@ -361,7 +363,7 @@ async def update_peer(
     try:
         updated_peer = await service.update_peer(peer_id, updates)
         logger.info(f"Successfully updated peer '{peer_id}'")
-        return updated_peer
+        return PeerRegistryConfigResponse.from_config(updated_peer)
     except ValueError as e:
         error_msg = str(e)
         if "not found" in error_msg:
@@ -583,7 +585,7 @@ async def get_peer_status(
 async def enable_peer(
     peer_id: str,
     user_context: dict = Depends(nginx_proxied_auth),
-) -> PeerRegistryConfig:
+) -> PeerRegistryConfigResponse:
     """
     Enable a peer registry.
 
@@ -608,7 +610,7 @@ async def enable_peer(
     try:
         updated_peer = await service.update_peer(peer_id, {"enabled": True})
         logger.info(f"Successfully enabled peer '{peer_id}'")
-        return updated_peer
+        return PeerRegistryConfigResponse.from_config(updated_peer)
     except ValueError as e:
         logger.error(f"Failed to enable peer '{peer_id}': {e}")
         raise HTTPException(
@@ -621,7 +623,7 @@ async def enable_peer(
 async def disable_peer(
     peer_id: str,
     user_context: dict = Depends(nginx_proxied_auth),
-) -> PeerRegistryConfig:
+) -> PeerRegistryConfigResponse:
     """
     Disable a peer registry.
 
@@ -646,7 +648,7 @@ async def disable_peer(
     try:
         updated_peer = await service.update_peer(peer_id, {"enabled": False})
         logger.info(f"Successfully disabled peer '{peer_id}'")
-        return updated_peer
+        return PeerRegistryConfigResponse.from_config(updated_peer)
     except ValueError as e:
         logger.error(f"Failed to disable peer '{peer_id}': {e}")
         raise HTTPException(
