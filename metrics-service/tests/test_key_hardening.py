@@ -74,6 +74,15 @@ class TestPepperValidation:
         with pytest.raises(ValueError, match="known-weak"):
             _validate_pepper("ChAnGe-Me-this-is-still-a-placeholder-value")
 
+    def test_embedded_placeholder_marker_rejected(self):
+        # An operator who prepended to or embedded the example text (rather than
+        # leaving it as a prefix) must still be rejected -- a start-only check
+        # would let this through even though it is clearly the unedited example.
+        with pytest.raises(ValueError, match="known-weak"):
+            _validate_pepper("internal-CHANGE-ME-and-this-is-long-enough-xxxx")
+        with pytest.raises(ValueError, match="known-weak"):
+            _validate_pepper("prod-generate-with-openssl-rand-hex-32-placeholder")
+
 
 class TestHashApiKeyFailsClosed:
     """hash_api_key must fail closed when the pepper is not usable."""

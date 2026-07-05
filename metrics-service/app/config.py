@@ -39,6 +39,22 @@ _WEAK_PEPPER_PREFIXES: tuple[str, ...] = (
     "placeholder",
 )
 
+# Case-insensitive markers that indicate a placeholder even when it does NOT sit
+# at the start of the value -- an operator who prepended or embedded the example
+# text (e.g. "internal-change-me-generate-...") would slip past the prefix check
+# above. Matched as substrings anywhere in the normalized value. Kept narrow to
+# avoid false-positives on genuinely random high-entropy keys.
+_WEAK_PEPPER_MARKERS: tuple[str, ...] = (
+    "change-me",
+    "changeme",
+    "change-this",
+    "changethis",
+    "replace-me",
+    "replace_me",
+    "replaceme",
+    "generate-with-openssl",
+)
+
 
 def _validate_pepper(
     raw_value: str | None,
@@ -77,9 +93,16 @@ def _validate_pepper(
         )
 
     # Run the weak-value check BEFORE the length check so a known placeholder
-    # produces the most actionable error message.
+    # produces the most actionable error message. Reject exact known-weak
+    # literals, known placeholder prefixes, and placeholder markers appearing
+    # anywhere in the value (so editing the middle of the example does not slip
+    # past a start-only check).
     normalized = pepper.lower()
-    if normalized in _WEAK_PEPPER_VALUES or normalized.startswith(_WEAK_PEPPER_PREFIXES):
+    if (
+        normalized in _WEAK_PEPPER_VALUES
+        or normalized.startswith(_WEAK_PEPPER_PREFIXES)
+        or any(marker in normalized for marker in _WEAK_PEPPER_MARKERS)
+    ):
         raise ValueError(
             "METRICS_KEY_PEPPER is set to a known-weak/placeholder value. Set "
             "it to a unique, high-entropy per-deployment secret (e.g. "
