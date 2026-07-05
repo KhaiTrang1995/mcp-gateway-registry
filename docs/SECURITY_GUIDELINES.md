@@ -281,8 +281,24 @@ sanitizer that isn't called) is equivalent to no check.
   only the intended front door (nginx 80/443) listens on all interfaces.
 - **Never ship a working default for a required secret.** Use `${VAR:?message}`
   so the stack fails fast, and reject known-weak literals in a preflight
-  validator. An active `PASSWORD=admin` in `.env.example` (vs a commented
+  validator. An active `PASSWORD=admin` in `.env.example` (vs a blank/commented
   placeholder) seeds real deployments with the weak value.
+- **Harden a shared secret on EVERY reference, not just the container that owns
+  it.** A vault's root token and every client that authenticates with the same
+  token must both be `${VAR:?}` — if the owning service fails fast but a client
+  env still says `${VAR:-dev-root-token}`, the weak literal is back (and the
+  client silently can't reach the strong-token service). Grep every occurrence of
+  the variable across all compose files when you harden one.
+- **A fail-fast `${VAR:?}` needs a matching generator, or the standard entrypoint
+  dead-ends.** If `build_and_run.sh` (or equivalent) doesn't auto-generate the
+  now-required secret into `.env`, a fresh run aborts at compose-up. Add a
+  generator block (idempotent: only when missing/empty; never clobber an
+  operator value) for every secret you make required.
+- **A non-empty `.env.example` placeholder passes `${VAR:?}` presence but is still
+  a known credential.** Either ship the placeholder BLANK (so `:?` catches the
+  copy-verbatim deploy) or add the exact placeholder string to the preflight
+  denylist. Match the denylist CASE-INSENSITIVELY — an exact-match check is
+  trivially dodged by a case-mutated copy (`Change-Me-...`).
 - **No secrets as Docker build `ARG`s** — they persist in image history. Inject at
   runtime.
 - **Don't bind-mount broad credential dirs** (e.g. `~/.aws`) into a
