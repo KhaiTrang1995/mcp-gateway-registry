@@ -220,6 +220,15 @@ sanitizer that isn't called) is equivalent to no check.
   emit a distinct audit event on any admin-tier grant. Derive "who is admin" from
   the SAME privileged-scope rule the request-time check uses, not a separate
   notion.
+- **A config/secrets export must be deny-by-default for sensitive values.** An
+  admin "export configuration" endpoint that can emit secrets (SECRET_KEY, IdP
+  client secrets, DB passwords, API keys) concentrates the whole system's
+  credentials into one response — a single over-broad export is a full compromise.
+  One `include_sensitive` flag is not enough: it is easily set by habit, a copied
+  script, or a CSRF/confused-deputy request. Gate the sensitive payload behind a
+  SEPARATE explicit acknowledgement (e.g. `confirm_sensitive_export`) in addition
+  to `include_sensitive`, reject (fail closed) when the acknowledgement is absent,
+  and redact the sensitive values otherwise. Audit every sensitive export.
 - **Honor the disabled/inactive flag everywhere access is derived, on EVERY
   request.** A user/group/client marked disabled must contribute no
   groups/scopes and be denied — enforce it at the group→scope enrichment / session

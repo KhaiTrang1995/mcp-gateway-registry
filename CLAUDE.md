@@ -775,7 +775,9 @@ working in those areas.
   enforce audience against a config allowlist, fail closed. Never auto-grant
   groups/admin from a code-shipped mapping (config-driven, fail closed).
 - **Admin ops:** refuse self-delete + last-admin removal/demotion (fail closed if
-  the admin population can't be counted); audit admin-tier grants.
+  the admin population can't be counted); audit admin-tier grants. A config/secrets
+  export must deny sensitive values by default — gate them behind a SEPARATE
+  explicit acknowledgement (not just `include_sensitive`) and fail closed.
 - **Never put a secret on subprocess argv** (world-readable via `ps`) — pass via
   `env=`/stdin. **Trust forwarded metadata only from the proxy hop:** rightmost/
   trusted XFF (not leftmost), allowlist `Host` before building a redirect_uri.
