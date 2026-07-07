@@ -40,7 +40,36 @@ SENSITIVE_HEADER_NAMES: frozenset[str] = frozenset(
         "x-federation-token",
         "x-secret",
         "x-session-token",
+        "x-auth-credential",
     }
+)
+
+# Substrings that, when present in a header NAME (case-insensitive), force
+# redaction even if the exact name is not enumerated above. Header names use
+# hyphens, so this list is hyphen-oriented. Substring matching keeps the helper
+# fail-closed: a variant credential header (e.g. ``X-Custom-Auth-Token``) is
+# redacted by default rather than leaking because it was not listed.
+#
+# KEEP IN SYNC with ``auth_server.server._SENSITIVE_HEADER_SUBSTRINGS`` -- the
+# auth server is a separate deployable and cannot import this module, so the
+# set is duplicated there. ``test_header_substrings_match_shared_redactor``
+# (tests/auth_server/unit/test_server.py) fails if the two drift. This differs
+# from the audit query-param list (registry.audit.models) on purpose: header
+# names carry ``cookie``/``jwt``/``bearer``/``session``, query keys do not.
+SENSITIVE_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "authorization",
+    "cookie",
+    "token",
+    "secret",
+    "credential",
+    "password",
+    "api-key",
+    "apikey",
+    "auth",
+    "jwt",
+    "bearer",
+    "session",
+    "key",
 )
 
 # Substrings that, when present in a mapping key (case-insensitive), mark the
@@ -75,14 +104,34 @@ def _is_sensitive_key(key: str) -> bool:
     return any(marker in key_lower for marker in SENSITIVE_KEY_SUBSTRINGS)
 
 
+def _is_sensitive_header_name(name: str) -> bool:
+    """Return True when a header name carries credential material.
+
+    Matches the exact-name allowlist first, then falls back to case-insensitive
+    substring matching so variant credential headers redact by default (fail
+    closed).
+
+    Args:
+        name: The header name to test.
+
+    Returns:
+        True if the header value must be redacted before logging.
+    """
+    lowered = name.lower()
+    if lowered in SENSITIVE_HEADER_NAMES:
+        return True
+    return any(marker in lowered for marker in SENSITIVE_HEADER_SUBSTRINGS)
+
+
 def redact_headers(headers: Any) -> dict[str, str]:
     """Return a copy of an HTTP header mapping with credential values masked.
 
-    Authorization, Cookie, and API-key headers are replaced with a fixed
-    ``[REDACTED]`` marker so the token/cookie value never reaches the log,
-    while non-sensitive headers are preserved for diagnostics. The full value
-    is dropped (not truncated) because even a prefix of a bearer token or
-    session cookie is sensitive.
+    Authorization, Cookie, API-key, and any other credential-bearing header
+    (matched by exact name or a credential substring in the name) are replaced
+    with a fixed ``[REDACTED]`` marker so the token/cookie value never reaches
+    the log, while non-sensitive headers are preserved for diagnostics. The
+    full value is dropped (not truncated) because even a prefix of a bearer
+    token or session cookie is sensitive.
 
     Args:
         headers: Any object that exposes ``.items()`` yielding
@@ -93,7 +142,7 @@ def redact_headers(headers: Any) -> dict[str, str]:
     """
     redacted: dict[str, str] = {}
     for name, value in headers.items():
-        if name.lower() in SENSITIVE_HEADER_NAMES:
+        if _is_sensitive_header_name(name):
             redacted[name] = REDACTED
         else:
             redacted[name] = value

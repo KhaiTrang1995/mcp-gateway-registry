@@ -545,9 +545,7 @@ async def _resolve_context_from_groups(
     they were authenticated (guards #933).
     """
     scopes = await map_cognito_groups_to_scopes(groups)
-    logger.info(
-        f"User {username} with {len(groups)} groups mapped to {len(scopes)} scopes"
-    )
+    logger.info(f"User {username} with {len(groups)} groups mapped to {len(scopes)} scopes")
     if not groups:
         logger.warning(
             f"User {username} has no groups! This user may not have proper group assignments."
@@ -700,8 +698,10 @@ async def nginx_proxied_auth(
     )
 
     # Log ALL headers for complete diagnostic, with sensitive values redacted.
-    # cookie/authorization carry the session and bearer token; even at DEBUG we
-    # never emit the value (not even a prefix). Uses the shared redaction helper.
+    # cookie/authorization carry the session and bearer token, and other headers
+    # (e.g. X-Auth-Credential, X-Api-Key) can carry credentials; even at DEBUG we
+    # never emit any of them (not even a prefix). Uses the shared redaction
+    # helper, which redacts by exact name and by credential substring.
     logger.debug(f"[NGINX_AUTH_DEBUG] ALL REQUEST HEADERS: {redact_headers(request.headers)}")
 
     # Signed-token path. The auth_server's /validate mints an HS256 token

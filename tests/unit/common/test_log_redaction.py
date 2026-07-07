@@ -68,6 +68,45 @@ class TestRedactHeaders:
         assert result["authorization"] == REDACTED
         assert result["accept"] == "*/*"
 
+    def test_masks_skill_parse_credential_header(self):
+        """The X-Auth-Credential header used by parse-skill-md is masked."""
+        result = redact_headers({"X-Auth-Credential": "super-secret-token"})
+        assert result["X-Auth-Credential"] == REDACTED
+        assert "super-secret-token" not in str(result)
+
+    def test_masks_variant_credential_headers_by_substring(self):
+        """Variant credential header names not on the exact list still redact.
+
+        Substring matching is the fail-closed layer: a header whose name is not
+        enumerated but contains a credential marker (token/secret/auth/...) is
+        redacted by default rather than leaking.
+        """
+        headers = {
+            "X-Access-Token": "t1",
+            "X-Client-Secret": "s1",
+            "X-User-Password": "pw1",
+            "X-Custom-Auth": "a1",
+            "X-Some-Credential": "c1",
+            # Exotic credential names with no auth/token/secret substring must
+            # still redact (fail-closed): a JWT, bearer, session id, or key.
+            "X-Jwt": "eyJhbGci.payload.sig",
+            "X-Bearer": "opaque-value",
+            "X-Session": "sess-abc",
+            "X-Signing-Key": "kkkk",
+        }
+        result = redact_headers(headers)
+        for name in headers:
+            assert result[name] == REDACTED, name
+
+    def test_leaves_nonsensitive_headers_intact(self):
+        headers = {
+            "User-Agent": "curl/8",
+            "Accept": "application/json",
+            "X-Forwarded-For": "10.0.0.1",
+            "Content-Length": "42",
+        }
+        assert redact_headers(headers) == headers
+
 
 @pytest.mark.unit
 class TestRedactMapping:

@@ -57,7 +57,7 @@ class TestMaskingFunctions:
         assert "..." in result
 
     def test_mask_token(self):
-        """Test masking JWT tokens showing first 4 characters."""
+        """mask_token emits no part of the value, not even a prefix."""
         from auth_server.server import mask_token
 
         # Arrange
@@ -66,10 +66,56 @@ class TestMaskingFunctions:
         # Act
         result = mask_token(token)
 
-        # Assert
-        assert result.startswith("eyJh")
-        assert result.endswith("...")
-        assert len(result) < len(token)
+        # Assert: no substring of the token leaks (a prefix is still sensitive
+        # for opaque tokens / API keys); only a fixed marker is returned.
+        assert result == "***MASKED***"
+        assert "eyJh" not in result
+        assert token[:4] not in result
+
+    def test_mask_headers_masks_auth_credential_and_variants(self):
+        """mask_headers redacts credential-bearing headers via substring match."""
+        from auth_server.server import mask_headers
+
+        headers = {
+            "X-Auth-Credential": "super-secret-token",
+            "Authorization": "Bearer eyJabc.def.ghi",
+            "Cookie": "mcp_gateway_session=abc",
+            "X-Api-Key": "k123456",
+            "X-Access-Token": "t123456",
+            "Accept": "application/json",
+        }
+
+        masked = mask_headers(headers)
+
+        # The plaintext credential never appears in the masked output.
+        assert masked["X-Auth-Credential"] == "***MASKED***"
+        assert masked["Cookie"] == "***MASKED***"
+        assert masked["X-Api-Key"] == "***MASKED***"
+        assert masked["X-Access-Token"] == "***MASKED***"
+        assert masked["Authorization"].startswith("Bearer ")
+        assert "eyJabc.def.ghi" not in masked["Authorization"]
+        # Non-sensitive headers pass through untouched.
+        assert masked["Accept"] == "application/json"
+        assert "super-secret-token" not in str(masked)
+
+    def test_header_substrings_match_shared_redactor(self):
+        """auth-server and registry header-substring sets must stay identical.
+
+        The credential-bearing substring list is duplicated across two
+        deployables (the auth server and the registry cannot import each
+        other), so nothing at runtime catches the two drifting apart. If one
+        gains a marker the other lacks, a credential header masked in one
+        service would leak in the other. Pin them equal here so any edit to
+        one copy without the other fails this test.
+        """
+        from auth_server.server import _SENSITIVE_HEADER_SUBSTRINGS
+        from registry.common.log_redaction import SENSITIVE_HEADER_SUBSTRINGS
+
+        assert set(_SENSITIVE_HEADER_SUBSTRINGS) == set(SENSITIVE_HEADER_SUBSTRINGS), (
+            "auth_server._SENSITIVE_HEADER_SUBSTRINGS has drifted from "
+            "registry.common.log_redaction.SENSITIVE_HEADER_SUBSTRINGS; keep them "
+            "identical so a credential header is masked consistently in both services"
+        )
 
     def test_anonymize_ip_ipv4(self):
         """Test IPv4 anonymization."""
@@ -3308,6 +3354,7 @@ class TestMcpProxyEndpointHeaderPassthrough:
             )
 
         assert response.status_code == 403
+
     def test_egress_consent_emits_iserror_baseline_with_connect_url(self):
         """DEFAULT consent delivery: when egress is on and the user has no token,
         a tools/call gets a SUCCESSFUL JSON-RPC result with isError=true whose
@@ -3930,6 +3977,8 @@ class TestAuthorizeForwardedMcpBody:
                     ["read:servers"],
                 )
         assert exc_info.value.status_code == 403
+
+
 class TestSessionCookieSecureDefault:
     """Verify the session cookie Secure flag resolves fail-closed.
 
@@ -3959,6 +4008,7 @@ class TestSessionCookieSecureDefault:
         """Even secure-by-default must not emit Secure over plain HTTP."""
         assert self._resolve_cookie_secure({}, is_https=False) is False
         assert self._resolve_cookie_secure({"secure": True}, is_https=False) is False
+
 
 class TestForwardHeadersIngressStrip:
     """Egress ingress-auth policy (issue #1266): client auth headers are ingress

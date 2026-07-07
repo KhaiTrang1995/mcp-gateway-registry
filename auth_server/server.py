@@ -775,11 +775,15 @@ def anonymize_ip(ip_address: str) -> str:
 
 
 def mask_token(token: str) -> str:
-    """Mask JWT token showing only first 4 characters followed by ellipsis."""
+    """Mask a token/credential for logging, emitting no part of the value.
+
+    Even a short prefix is credential material: for opaque tokens (API keys,
+    PATs, session ids) the leading characters are real key-space, so nothing
+    from the value is ever emitted -- only a fixed marker. Distinguishing an
+    empty value aids diagnostics without disclosing anything.
+    """
     if not token:
         return "***EMPTY***"
-    if len(token) > 8:
-        return f"{token[:4]}..."
     return "***MASKED***"
 
 
@@ -891,12 +895,50 @@ def _mask_sensitive_dict(
     return masked
 
 
+# Substrings that mark a header name (case-insensitive) as credential-bearing.
+# Matching is fail-closed: any header whose name contains one of these markers
+# has its value masked, so a new credential header (e.g. ``X-Auth-Credential``,
+# ``X-Api-Key``) forwarded on the auth subrequest is never logged in plaintext.
+#
+# KEEP IN SYNC with ``registry.common.log_redaction.SENSITIVE_HEADER_SUBSTRINGS``
+# -- this is a duplicate because the auth server is a separate deployable and
+# cannot import the registry package. ``test_header_substrings_match_shared_redactor``
+# (tests/auth_server/unit/test_server.py) fails if the two lists drift apart.
+_SENSITIVE_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "authorization",
+    "cookie",
+    "token",
+    "secret",
+    "credential",
+    "password",
+    "api-key",
+    "apikey",
+    "auth",
+    "jwt",
+    "bearer",
+    "session",
+    "key",
+)
+
+
+def _is_sensitive_header_name(name: str) -> bool:
+    """Return True when a header name should be masked before logging."""
+    lowered = name.lower()
+    return any(marker in lowered for marker in _SENSITIVE_HEADER_SUBSTRINGS)
+
+
 def mask_headers(headers: dict) -> dict:
-    """Mask sensitive headers for logging compliance."""
+    """Mask sensitive headers for logging compliance.
+
+    Uses fail-closed substring matching so any credential-bearing header is
+    masked, not just a fixed allowlist a new header name could slip past.
+    """
     masked = {}
     for key, value in headers.items():
         key_lower = key.lower()
-        if key_lower in ["x-authorization", "authorization", "cookie"]:
+        if key_lower in ["x-user-pool-id", "x-client-id"]:
+            masked[key] = mask_sensitive_id(value)
+        elif _is_sensitive_header_name(key):
             if "bearer" in str(value).lower():
                 # Extract token part and mask it
                 parts = str(value).split(" ", 1)
@@ -906,8 +948,6 @@ def mask_headers(headers: dict) -> dict:
                     masked[key] = mask_token(value)
             else:
                 masked[key] = "***MASKED***"
-        elif key_lower in ["x-user-pool-id", "x-client-id"]:
-            masked[key] = mask_sensitive_id(value)
         else:
             masked[key] = value
     return masked
