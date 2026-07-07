@@ -1,8 +1,8 @@
 # ECS Services for MCP Gateway Registry
 
 # ECS Service: Auth Server
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_auth" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -220,6 +220,14 @@ module "ecs_service_auth" {
           value = var.okta_auth_server_id
         },
         {
+          name  = "OKTA_M2M_ALLOWED_AUDIENCES"
+          value = var.okta_m2m_allowed_audiences
+        },
+        {
+          name  = "OKTA_M2M_CLIENT_GROUPS"
+          value = var.okta_m2m_client_groups
+        },
+        {
           name  = "AUTH0_DOMAIN"
           value = var.auth0_domain
         },
@@ -238,6 +246,10 @@ module "ecs_service_auth" {
         {
           name  = "AUTH0_M2M_CLIENT_ID"
           value = var.auth0_m2m_client_id
+        },
+        {
+          name  = "AUTH0_M2M_CLIENT_GROUPS"
+          value = var.auth0_m2m_client_groups
         },
         {
           name  = "AUTH0_MANAGEMENT_API_TOKEN"
@@ -275,6 +287,10 @@ module "ecs_service_auth" {
         {
           name  = "PINGFEDERATE_GROUPS_CLAIM"
           value = var.pingfederate_groups_claim
+        },
+        {
+          name  = "PINGFEDERATE_M2M_ALLOWED_AUDIENCES"
+          value = var.pingfederate_m2m_allowed_audiences
         },
         {
           name  = "SESSION_COOKIE_SECURE"
@@ -675,8 +691,8 @@ module "ecs_service_auth" {
 }
 
 # ECS Service: Registry (Main service with nginx, SSL, FAISS, models)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_registry" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -910,6 +926,14 @@ module "ecs_service_registry" {
           value = var.okta_auth_server_id
         },
         {
+          name  = "OKTA_M2M_ALLOWED_AUDIENCES"
+          value = var.okta_m2m_allowed_audiences
+        },
+        {
+          name  = "OKTA_M2M_CLIENT_GROUPS"
+          value = var.okta_m2m_client_groups
+        },
+        {
           name  = "AUTH0_ENABLED"
           value = tostring(var.auth0_enabled)
         },
@@ -932,6 +956,10 @@ module "ecs_service_registry" {
         {
           name  = "AUTH0_M2M_CLIENT_ID"
           value = var.auth0_m2m_client_id
+        },
+        {
+          name  = "AUTH0_M2M_CLIENT_GROUPS"
+          value = var.auth0_m2m_client_groups
         },
         {
           name  = "AUTH0_MANAGEMENT_API_TOKEN"
@@ -965,6 +993,10 @@ module "ecs_service_registry" {
         {
           name  = "PINGFEDERATE_GROUPS_CLAIM"
           value = var.pingfederate_groups_claim
+        },
+        {
+          name  = "PINGFEDERATE_M2M_ALLOWED_AUDIENCES"
+          value = var.pingfederate_m2m_allowed_audiences
         },
         # PingFederate Admin API (registry only; PF_ADMIN_PASS via Secrets Manager below)
         {
@@ -1753,6 +1785,20 @@ module "ecs_service_registry" {
       ip_protocol                  = "tcp"
       referenced_security_group_id = module.ecs_service_mcpgw.security_group_id
     }
+    # Egress credential vault: the auth-server mcp_proxy calls the registry's
+    # internal egress-token vend endpoint (auth -> registry:8080 ->
+    # /_egress_internal/egress-token) to fetch a user's vaulted upstream token
+    # before proxying an MCP call. Without this the vend hop times out
+    # ("egress vend: registry unreachable"), no token is injected, and the
+    # upstream 3rd-party server 401s (surfacing in the client as
+    # "Protected resource ... does not match").
+    auth_internal = {
+      description                  = "HTTP from auth-server for the egress-token vend hop (non-root nginx)"
+      from_port                    = 8080
+      to_port                      = 8080
+      ip_protocol                  = "tcp"
+      referenced_security_group_id = module.ecs_service_auth.security_group_id
+    }
   }
   security_group_egress_rules = {
     all = {
@@ -1803,8 +1849,8 @@ resource "aws_vpc_security_group_ingress_rule" "auth_to_mcpgw" {
 
 
 # ECS Service: CurrentTime MCP Server (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_currenttime" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -1930,8 +1976,8 @@ module "ecs_service_currenttime" {
 
 
 # ECS Service: MCPGW MCP Server
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_mcpgw" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
 
@@ -2186,8 +2232,8 @@ module "ecs_service_mcpgw" {
 
 
 # ECS Service: RealServerFakeTools MCP Server (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_realserverfaketools" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -2309,8 +2355,8 @@ module "ecs_service_realserverfaketools" {
 
 
 # ECS Service: Flight Booking A2A Agent (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_flight_booking_agent" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0
@@ -2432,8 +2478,8 @@ module "ecs_service_flight_booking_agent" {
 
 
 # ECS Service: Travel Assistant A2A Agent (demo, opt-in via enable_demo_servers)
-#checkov:skip=CKV_TF_1:Module version is pinned via version constraint
 module "ecs_service_travel_assistant_agent" {
+  #checkov:skip=CKV_TF_1:Module version is pinned via version constraint
   source  = "terraform-aws-modules/ecs/aws//modules/service"
   version = "~> 6.0"
   count   = var.enable_demo_servers ? 1 : 0

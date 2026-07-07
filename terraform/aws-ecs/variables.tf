@@ -146,6 +146,11 @@ variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
+
+  validation {
+    condition     = !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+  }
 }
 
 variable "keycloak_database_min_acu" {
@@ -175,19 +180,19 @@ variable "keycloak_log_level" {
 variable "registry_image_uri" {
   description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/registry:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.26.0"
 }
 
 variable "auth_server_image_uri" {
   description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.26.0"
 }
 
 variable "mcpgw_image_uri" {
   description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.26.0"
 }
 
 variable "keycloak_image_uri" {
@@ -383,6 +388,11 @@ variable "documentdb_admin_password" {
   type        = string
   sensitive   = true
   default     = ""
+
+  validation {
+    condition     = var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+  }
 }
 
 variable "documentdb_shard_capacity" {
@@ -717,6 +727,18 @@ variable "okta_auth_server_id" {
   default     = ""
 }
 
+variable "okta_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted Okta M2M token audiences (e.g. api://ai-registry). Empty accepts only the configured client ids (fail closed)."
+  type        = string
+  default     = ""
+}
+
+variable "okta_m2m_client_groups" {
+  description = "JSON object mapping Okta M2M client_id to a list of group names for RBAC sync, e.g. {\"0oaEXAMPLECLIENTID\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # AUTH0 CONFIGURATION
 # =============================================================================
@@ -769,6 +791,12 @@ variable "auth0_m2m_client_secret" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "auth0_m2m_client_groups" {
+  description = "JSON object mapping Auth0 M2M client_id to a list of group names for RBAC sync, e.g. {\"abc123clientid\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
 }
 
 variable "auth0_management_api_token" {
@@ -836,6 +864,12 @@ variable "pingfederate_groups_claim" {
   description = "JWT claim name carrying group memberships (default: groups)"
   type        = string
   default     = "groups"
+}
+
+variable "pingfederate_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted PingFederate M2M token audiences. Empty accepts only the configured client ids / application id URI (fail closed)."
+  type        = string
+  default     = ""
 }
 
 # =============================================================================
