@@ -261,10 +261,14 @@ session_cookie_domain = ""
 # raise this to match the number of trusted proxies. Default 1.
 # trusted_proxy_hops = 2
 
-# Comma-separated hostnames (optionally host:port) trusted in the inbound Host
-# header when building OAuth external URLs. Empty derives the allowlist from the
-# registry domain; a Host not on the allowlist falls back to the configured host.
-# trusted_external_hosts = "registry.example.com,registry.example.com:443"
+# ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+# when building OAuth external URLs. Your primary domain is ALREADY covered — the
+# allowlist always includes the registry domain — so leave this empty for a normal
+# single-domain deployment. Set it only if the app is ALSO reached at a hostname
+# that differs from the registry domain: most commonly an ECS deployment fronted by
+# BOTH a custom domain and the CloudFront domain (REGISTRY_URL names only one, so
+# list the other here). A Host not on the allowlist falls back to the configured host.
+# trusted_external_hosts = "dxxxx.cloudfront.net"
 
 # Control whether OAuth provider tokens are stored in session cookies
 # ============================================================================

@@ -414,7 +414,7 @@ variable "trusted_proxy_hops" {
 }
 
 variable "trusted_external_hosts" {
-  description = "Comma-separated hostnames (optionally host:port) trusted in the inbound Host header when building OAuth external URLs. Empty derives the allowlist from the registry URL; a Host not on the allowlist falls back to the configured host (prevents host-header injection / open redirect)."
+  description = "ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header when building OAuth external URLs. The primary domain is already covered automatically (the allowlist always includes the registry URL host), so leave empty for a single-domain deployment. Only list extra hostnames the app is also reached at but that differ from the registry URL host (e.g. a CloudFront domain alongside a custom domain). A Host not on the allowlist falls back to the configured host (prevents host-header injection / open redirect)."
   type        = string
   default     = ""
 }

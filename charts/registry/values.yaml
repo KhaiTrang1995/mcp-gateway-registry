@@ -70,10 +70,13 @@ app:
   # client-controlled left-most one. Default 1 (the bundled nginx). Raise it when
   # additional trusted proxies (e.g. ALB + CloudFront) sit in front.
   trustedProxyHops: 1
-  # Comma-separated hostnames (optionally host:port) trusted in the inbound Host
-  # header when building OAuth external URLs. Empty derives the allowlist from the
-  # registry URL; a Host not on the allowlist falls back to the configured host
-  # (prevents host-header injection / open redirect).
+  # ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+  # when building OAuth external URLs. Your primary domain is ALREADY covered — the
+  # allowlist always includes the host from the registry URL — so leave this empty
+  # for a normal single-domain deployment. Only list EXTRA hostnames the app is
+  # also reached at but that differ from the registry URL host (e.g. a CloudFront
+  # domain alongside a custom domain). A Host not on the allowlist falls back to
+  # the configured host (prevents host-header injection / open redirect).
   trustedExternalHosts: ""
   # Federation configuration
   federationStaticTokenAuthEnabled: false #If not provided, defaults to false
