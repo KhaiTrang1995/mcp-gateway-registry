@@ -118,22 +118,18 @@ def _run_generic_oauth_flow_for_config(
     if not all([client_id, client_secret, redirect_uri]):
         raise ValueError(f"Missing required OAuth configuration for set {config_num}")
 
-    # Build command with configuration-specific parameters
+    # Build command with configuration-specific parameters. The client secret is
+    # NOT passed on argv (it would be world-readable via `ps` / /proc for the
+    # child's lifetime); it is handed to the child through its environment under
+    # the name generic_oauth_flow.py already resolves (EGRESS_OAUTH_CLIENT_SECRET).
+    # client_id and redirect_uri are non-secret, but we route them the same way so
+    # the command line carries no per-config credentials at all.
     cmd = [
         "python",
         str(Path(__file__).parent / "generic_oauth_flow.py"),
         "--provider",
         provider,
-        "--client-id",
-        client_id,
-        "--client-secret",
-        client_secret,
-        "--redirect-uri",
-        redirect_uri,
     ]
-
-    if scope:
-        cmd.extend(["--scope", scope])
 
     if force_new:
         cmd.append("--force")
@@ -141,16 +137,26 @@ def _run_generic_oauth_flow_for_config(
     if verbose:
         cmd.append("--verbose")
 
+    # Map the config-set-specific values onto the unsuffixed env vars the child
+    # reads, without mutating this process's own environment.
+    flow_env = os.environ.copy()
+    flow_env["EGRESS_OAUTH_CLIENT_ID"] = client_id
+    flow_env["EGRESS_OAUTH_CLIENT_SECRET"] = client_secret
+    flow_env["EGRESS_OAUTH_REDIRECT_URI"] = redirect_uri
+    if scope:
+        flow_env["EGRESS_OAUTH_SCOPE"] = scope
+
     logger.info(f"Running OAuth flow for provider: {provider} (config set {config_num})")
-    logger.debug(f"Command: {cmd[0]} {cmd[1]} --provider {provider} [credentials redacted]")
+    logger.debug(f"Command: {cmd[0]} {cmd[1]} --provider {provider} [credentials via env]")
 
     try:
-        # Run the generic OAuth flow
-        result = subprocess.run(  # nosec B603 - internal script path, args from validated env vars
+        # Run the generic OAuth flow. Secrets travel via flow_env, never argv.
+        result = subprocess.run(  # nosec B603 - internal script path; secrets passed via env, not argv
             cmd,
             capture_output=True,
             text=True,
             timeout=300,  # 5 minute timeout
+            env=flow_env,
         )
 
         if result.returncode != 0:
@@ -298,10 +304,14 @@ def _save_egress_tokens(
             "usage_notes": f"This token is for EGRESS authentication to {provider} external services",
         }
 
-        with open(egress_path, "w") as f:
+        # Create atomically with owner-only (0600) permissions; the payload
+        # carries the egress access/refresh token and must never be briefly
+        # world/group-readable between create and chmod.
+        fd = os.open(str(egress_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(save_data, f, indent=2)
 
-        # Secure the file
+        # Enforce 0600 even if the file pre-existed
         egress_path.chmod(0o600)
         logger.info(f"📁 Saved egress tokens to: {egress_path}")
 
