@@ -1763,7 +1763,15 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
         proxy_set_header Host {host_header};
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY: this location proxies directly to a registrant-controlled
+        # (not fully trusted) A2A agent backend. Never relay the caller's
+        # registry credential here -- clearing Authorization AND Cookie prevents
+        # a malicious registered agent from capturing and replaying the caller's
+        # gateway bearer token or registry session cookie against the registry
+        # API. The agent authenticates the gateway via its own mechanism, not by
+        # forwarding the caller's credential.
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
         # Rewrite the card's endpoint URLs from the backend to this gateway so
         # clients send JSON-RPC back through the proxy. Body size changes, so
         # Content-Length must be cleared before the rewrite runs.
@@ -1802,14 +1810,23 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Original-URL $scheme://$host$request_uri;
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY: this location proxies directly to a registrant-controlled
+        # (not fully trusted) A2A agent backend. Never relay the caller's
+        # registry credential here -- clearing Authorization AND Cookie prevents
+        # a malicious registered agent from capturing and replaying the caller's
+        # gateway bearer token or registry session cookie against the registry
+        # API. The agent authenticates the gateway via the validated identity
+        # context below (X-User / X-Scopes), not the caller's credential. Cookie
+        # must be cleared explicitly because nginx forwards client request
+        # headers (including the session cookie) to the backend by default.
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
 
         # Forward validated auth context to the agent backend
         proxy_set_header X-User $auth_user;
         proxy_set_header X-Username $auth_username;
         proxy_set_header X-Scopes $auth_scopes;
         proxy_set_header X-Auth-Method $auth_method;
-        proxy_pass_request_headers on;
 
         # message/stream uses SSE; disable buffering for incremental delivery
         proxy_buffering off;

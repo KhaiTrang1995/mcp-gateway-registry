@@ -415,3 +415,25 @@ class TestCreateAgentLocationBlock:
         )
 
         assert "{{ROOT_PATH}}/agent/lob1/travel/" in block
+
+    def test_does_not_relay_caller_credential_to_agent_backend(self):
+        """The agent backend is registrant-controlled and not fully trusted.
+
+        Both the card and JSON-RPC blocks must clear the caller's Authorization
+        and Cookie so a malicious registered agent cannot capture and replay the
+        caller's gateway bearer token or registry session cookie. This mirrors
+        the MCP-side fix in #1391 for the parallel A2A route.
+        """
+        service = NginxConfigService()
+
+        block = service._create_agent_location_block(
+            "flight-booking-agent",
+            "https://flight-booking.dev.example.com",
+            "Flight Booking Agent",
+        )
+
+        # The caller credential must never be forwarded to the agent backend.
+        assert "proxy_set_header Authorization $http_authorization;" not in block
+        # Both credential headers are explicitly cleared (card + JSON-RPC blocks).
+        assert block.count('proxy_set_header Authorization "";') == 2
+        assert block.count('proxy_set_header Cookie "";') == 2
