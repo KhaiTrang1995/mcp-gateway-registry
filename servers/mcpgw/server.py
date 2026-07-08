@@ -168,8 +168,16 @@ if _auth_provider:
 
     @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
     async def _redirect_protected_resource(_):  # noqa: ANN001
-        """Redirect root well-known to the MCP-prefixed path (FastMCP path-prefix workaround)."""
-        return RedirectResponse(url="/.well-known/oauth-protected-resource/mcp", status_code=302)
+        """Redirect root well-known to the MCP-prefixed path (FastMCP path-prefix workaround).
+
+        Sends ``Cache-Control: no-store`` so a shared/CDN cache cannot retain the
+        redirect that steers clients toward the OAuth metadata document.
+        """
+        return RedirectResponse(
+            url="/.well-known/oauth-protected-resource/mcp",
+            status_code=302,
+            headers={"Cache-Control": "no-store"},
+        )
 
 
 def _validate_top_n(top_n: int) -> int:

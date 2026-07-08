@@ -19,8 +19,15 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# OAuth discovery metadata (RFC 8414 authorization-server and RFC 9728
+# protected-resource documents) points clients at the authorization server and
+# token endpoint. It must never be served from a shared/intermediary/CDN cache:
+# a poisoned cached copy would redirect every client to an attacker-controlled
+# authorization server for the cache lifetime. Force "no-store" so only the
+# origin ever answers these endpoints (no public/CDN caching, no revalidation
+# window).
 OAUTH_DISCOVERY_CACHE_HEADERS: dict[str, str] = {
-    "Cache-Control": "public, max-age=300",
+    "Cache-Control": "no-store",
     "Content-Type": "application/json",
 }
 

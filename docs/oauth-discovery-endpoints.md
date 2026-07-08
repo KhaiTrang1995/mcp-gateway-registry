@@ -17,8 +17,13 @@ several IETF specifications:
 
 | URL | Spec | Cache-Control | Purpose |
 | --- | --- | --- | --- |
-| `<gateway>/.well-known/oauth-protected-resource` | RFC 9728 | `public, max-age=300` | Tells clients which authorization server protects the gateway and which scopes the gateway recognizes. |
-| `<gateway>/.well-known/oauth-authorization-server` | RFC 8414 | `public, max-age=300` | Thin passthrough/normalization of the configured IdP's metadata. Smooths over provider-specific quirks (e.g. Cognito's split host). |
+| `<gateway>/.well-known/oauth-protected-resource` | RFC 9728 | `no-store` | Tells clients which authorization server protects the gateway and which scopes the gateway recognizes. |
+| `<gateway>/.well-known/oauth-authorization-server` | RFC 8414 | `no-store` | Thin passthrough/normalization of the configured IdP's metadata. Smooths over provider-specific quirks (e.g. Cognito's split host). |
+
+Both documents point clients at the authorization server and token endpoint, so
+they are served with `Cache-Control: no-store`. This keeps shared/intermediary/
+CDN caches from holding (and an attacker from poisoning) a copy that would
+redirect clients to a malicious authorization server for the cache lifetime.
 
 Both endpoints are public (no authentication required). They are served by
 the registry FastAPI app and routed through nginx's existing `/.well-known/*`
