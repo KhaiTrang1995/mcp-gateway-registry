@@ -328,7 +328,7 @@ prefix; the AS facade is mounted at root and registered only when
 
 | Method | Path | Auth | Purpose |
 |--------|------|------|---------|
-| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs). |
+| `POST` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Configure egress OAuth on a server (provider, client_id, write-only encrypted client_secret, scopes, custom URLs, optional RFC 8707 `custom_resource`). |
 | `GET` | `/api/servers/{server_path}/egress-auth` | proxied auth + admin | Read the non-secret egress config (secret stripped). |
 
 ### End-user
@@ -508,6 +508,34 @@ For a custom OIDC provider:
   "scopes": ["openid", "profile"],
   "custom_authorize_url": "https://idp.example.com/oauth/authorize",
   "custom_token_url": "https://idp.example.com/oauth/token"
+}
+```
+
+- `custom_scope_separator` (default `" "`) and `custom_token_auth_style`
+  (`post_body` default, or `basic_header`) tune the wire format for providers
+  that deviate from the common case.
+- `custom_resource` (optional) is an [RFC 8707](https://www.rfc-editor.org/rfc/rfc8707)
+  **resource indicator** — an absolute `https` URI (no fragment). When set, the
+  gateway sends it as the `resource` parameter on the authorize request **and**
+  both token grants (code exchange + refresh), binding the minted token to that
+  one protected resource. This is required by resource servers that issue
+  per-resource tokens: for example **Atlassian's Rovo MCP**
+  (`https://mcp.atlassian.com/v1/mcp/authv2`) rejects the authorize flow with
+  *"Invalid context provided"* if the indicator is absent, and rejects a token
+  whose audience is the generic `api.atlassian.com` REST API rather than the MCP
+  resource. Built-in providers never emit `resource`, so their flows are
+  unchanged. Example (Atlassian Rovo MCP via `custom`):
+
+```jsonc
+{
+  "egress_auth_mode": "oauth_user",
+  "egress_provider": "custom",
+  "client_id": "<atlassian-app-client-id>",
+  "client_secret": "<atlassian-app-secret>",
+  "scopes": ["read:jira-work", "read:jira-user", "write:jira-work", "offline_access"],
+  "custom_authorize_url": "https://auth.atlassian.com/authorize",
+  "custom_token_url": "https://auth.atlassian.com/oauth/token",
+  "custom_resource": "https://mcp.atlassian.com/v1/mcp/authv2"
 }
 ```
 
