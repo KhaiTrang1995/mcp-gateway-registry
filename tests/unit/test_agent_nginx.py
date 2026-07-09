@@ -14,13 +14,15 @@ def _agent(
     name="Flight Booking Agent",
     supported_protocol="a2a",
     health_status="healthy",
+    proxy_pass_url=None,
 ):
     """Build a lightweight agent-card stand-in for the generator.
 
-    The generator reads ``path``, ``url``, ``name``, ``supported_protocol``
-    and ``health_status``, so a namespace avoids coupling the test to the full
-    AgentCard pydantic model. Defaults describe a healthy A2A agent (the case
-    that produces a proxy block).
+    The generator reads ``path``, ``url``, ``name``, ``supported_protocol``,
+    ``health_status`` and ``proxy_pass_url``, so a namespace avoids coupling the
+    test to the full AgentCard pydantic model. Defaults describe a healthy A2A
+    agent (the case that produces a proxy block). ``proxy_pass_url`` defaults to
+    None (the flag-off / legacy case where ``url`` is the backend).
     """
     return SimpleNamespace(
         path=path,
@@ -28,6 +30,7 @@ def _agent(
         name=name,
         supported_protocol=supported_protocol,
         health_status=health_status,
+        proxy_pass_url=proxy_pass_url,
     )
 
 
@@ -98,7 +101,7 @@ class TestGenerateAgentLocationBlocks:
 
     @pytest.mark.asyncio
     async def test_proxies_to_backend_url(self, patched_agent_service):
-        """The block proxies to the agent backend url."""
+        """The block proxies to the agent backend url (legacy: proxy_pass_url unset)."""
         patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
         patched_agent_service.get_agent_info = AsyncMock(return_value=_agent())
         service = NginxConfigService()
@@ -106,6 +109,24 @@ class TestGenerateAgentLocationBlocks:
         result = await service._generate_agent_location_blocks()
 
         assert "proxy_pass https://flight-booking.dev.example.com/;" in result
+
+    @pytest.mark.asyncio
+    async def test_proxies_to_proxy_pass_url_when_set(self, patched_agent_service):
+        """In reverse-proxy mode the advertised url is the gateway address, so the
+        block must proxy to proxy_pass_url (the real backend), not url."""
+        agent = _agent(
+            url="https://gateway.example.com/agent/flight-booking-agent/",
+            proxy_pass_url="http://flight-booking-agent:9000",
+        )
+        patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
+        patched_agent_service.get_agent_info = AsyncMock(return_value=agent)
+        service = NginxConfigService()
+
+        result = await service._generate_agent_location_blocks()
+
+        # Proxies to the real backend, never to the advertised gateway url.
+        assert "proxy_pass http://flight-booking-agent:9000/" in result
+        assert "proxy_pass https://gateway.example.com/agent/" not in result
 
     @pytest.mark.asyncio
     async def test_skips_agent_without_url(self, patched_agent_service):

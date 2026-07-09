@@ -509,6 +509,29 @@ def _normalize_path(
     return path
 
 
+def _gateway_agent_url(
+    agent_path: str,
+) -> str:
+    """Build the gateway-facing A2A URL that clients use to reach an agent.
+
+    When A2A reverse-proxy mode is on, the registry advertises this URL as the
+    agent's ``url`` (and keeps the registrant's real backend in
+    ``proxy_pass_url``) so discovery routes callers through the gateway. Mirrors
+    the nginx location route ``{ROOT_PATH}/agent/<path>/`` with a trailing slash
+    so it matches the JSON-RPC prefix location.
+
+    Args:
+        agent_path: Normalized agent path with a leading slash (e.g. "/travel").
+
+    Returns:
+        Absolute gateway URL, e.g. "https://gateway.example.com/agent/travel/".
+    """
+    from ..core.nginx_service import AGENT_ROUTE_PREFIX
+
+    base = settings.registry_url.rstrip("/")
+    return f"{base}{AGENT_ROUTE_PREFIX}/{agent_path.strip('/')}/"
+
+
 def _weak_etag_for(agent_card: AgentCard) -> str:
     """Weak ETag derived from updated_at epoch milliseconds.
 
@@ -907,6 +930,21 @@ async def register_agent(
                 },
             )
 
+        # A2A reverse-proxy mode: advertise the gateway-facing URL and keep the
+        # registrant's real backend in proxy_pass_url. Done AFTER validation so
+        # the endpoint health check above still probes the real backend, not the
+        # gateway. Mirrors the MCP-server url/proxy_pass_url split; proxy_pass_url
+        # is redacted from non-admin reads (registry/services/visibility.py) and
+        # the nginx generator proxies to it. When the flag is off, the card is
+        # stored exactly as registered (no proxy_pass_url) -- backwards compatible.
+        if settings.a2a_reverse_proxy_enabled and (agent_card.supported_protocol or "").lower() == "a2a":
+            agent_card.proxy_pass_url = agent_card.url
+            agent_card.url = _gateway_agent_url(path)
+            logger.info(
+                f"A2A reverse-proxy: agent '{path}' advertised url set to gateway "
+                f"({agent_card.url}); backend preserved in proxy_pass_url."
+            )
+
     except ValueError as e:
         logger.error(f"Invalid agent card data: {e}")
         raise HTTPException(
@@ -1241,7 +1279,11 @@ async def check_agent_health(
             detail="Cannot perform health check on a disabled agent",
         )
 
-    base_url = str(agent_card.url).rstrip("/")
+    # Probe the real backend. In A2A reverse-proxy mode the advertised url is the
+    # gateway address, so the registrant's backend lives in proxy_pass_url; fall
+    # back to url for agents registered before the flag was on.
+    backend_url = getattr(agent_card, "proxy_pass_url", None) or agent_card.url
+    base_url = str(backend_url).rstrip("/")
     health_urls = _build_agent_health_urls(base_url)
     timeout_seconds = max(1, settings.health_check_timeout_seconds)
 
@@ -2003,7 +2045,17 @@ async def get_agent(
         )
 
     response.headers["ETag"] = _weak_etag_for(agent_card)
-    return agent_card.model_dump()
+    agent_dict = agent_card.model_dump()
+    # Hide the internal backend (proxy_pass_url) from non-admins in with-gateway
+    # mode; admins and registry-only mode see it. Mirrors MCP-server redaction.
+    from ..services.visibility import (
+        redact_agent_backend_fields,
+        should_redact_backend_urls,
+    )
+
+    if should_redact_backend_urls(user_context):
+        redact_agent_backend_fields(agent_dict)
+    return agent_dict
 
 
 @router.put("/agents/{path:path}")
@@ -2580,6 +2632,11 @@ async def discover_agents_semantic(
 
     logger.info(f"User {user_context['username']} semantic search for agents: {query}")
 
+    from ..services.visibility import (
+        redact_agent_backend_fields,
+        should_redact_backend_urls,
+    )
+
     try:
         search_results = await search_repo.search(
             query=query,
@@ -2593,6 +2650,11 @@ async def discover_agents_semantic(
         all_agents = await agent_service.get_all_agents()
         agent_map = {agent.path: agent for agent in all_agents}
 
+        # Non-admins get the gateway-facing url only; the internal backend
+        # (proxy_pass_url) is stripped so discovery never leaks it. Mirrors the
+        # MCP-server semantic-search redaction.
+        redact_backend = should_redact_backend_urls(user_context)
+
         accessible_results = []
         for result in results:
             agent_card = agent_map.get(result.get("path"))
@@ -2604,6 +2666,8 @@ async def discover_agents_semantic(
 
             # Return full agent card with relevance score
             agent_data = agent_card.model_dump()
+            if redact_backend:
+                redact_agent_backend_fields(agent_data)
             agent_data["relevance_score"] = result.get("relevance_score", 0.0)
 
             accessible_results.append(agent_data)

@@ -1659,9 +1659,15 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                     logger.warning(f"Enabled agent '{path}' has no card; skipping nginx block")
                     continue
 
-                backend_url = (agent.url or "").rstrip("/")
+                # Proxy to the real backend. In reverse-proxy mode the advertised
+                # url is the gateway-facing address, so the registrant's backend
+                # lives in proxy_pass_url; fall back to url for agents registered
+                # before the flag was on (proxy_pass_url unset).
+                backend_url = (
+                    getattr(agent, "proxy_pass_url", None) or agent.url or ""
+                ).rstrip("/")
                 if not backend_url:
-                    logger.warning(f"Agent '{path}' has no url; skipping nginx block")
+                    logger.warning(f"Agent '{path}' has no backend url; skipping nginx block")
                     continue
 
                 # Only proxy true A2A agents. A non-A2A agent that happens to
