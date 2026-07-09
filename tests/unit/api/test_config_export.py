@@ -78,3 +78,67 @@ class TestConfigExport:
         assert "effective_ui_title" in deployment_group
         assert deployment_group["effective_ui_title"]
         assert deployment_group["effective_ui_title"] != "None"
+
+
+# ---------------------------------------------------------------------------
+# Endpoint-level tests: deny-by-default sensitive export (blast radius)
+# ---------------------------------------------------------------------------
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture
+def _admin_ctx() -> dict:
+    return {
+        "username": "admin",
+        "is_admin": True,
+        "auth_method": "session",
+        "groups": ["mcp-registry-admin"],
+        "scopes": [],
+    }
+
+
+@pytest.fixture
+def export_client(mock_settings, _admin_ctx):
+    """Admin-authenticated client for the /api/config/export endpoint."""
+    from registry.api.config_routes import _check_rate_limit, _rate_limit_cache
+    from registry.auth.dependencies import enhanced_auth
+    from registry.main import app
+
+    app.dependency_overrides[enhanced_auth] = lambda: _admin_ctx
+    _rate_limit_cache.clear()
+    _ = _check_rate_limit  # keep import used
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+    _rate_limit_cache.clear()
+
+
+class TestSensitiveExportDenyByDefault:
+    """The bulk sensitive export must be deny-by-default (SA-31 config prong)."""
+
+    def test_include_sensitive_without_confirm_is_rejected(self, export_client):
+        """include_sensitive=true alone no longer dumps secrets — it 400s."""
+        resp = export_client.get("/api/config/export?format=env&include_sensitive=true")
+        assert resp.status_code == 400
+        assert "confirm" in resp.text.lower()
+
+    def test_masked_export_is_default(self, export_client):
+        """Default export masks sensitive values (no confirmation needed)."""
+        resp = export_client.get("/api/config/export?format=env")
+        assert resp.status_code == 200
+        assert "SENSITIVE_VALUE_MASKED" in resp.text
+
+    def test_include_sensitive_with_confirm_returns_unmasked(self, export_client):
+        """Explicit double opt-in returns the unmasked export."""
+        resp = export_client.get(
+            "/api/config/export?format=env&include_sensitive=true&confirm_sensitive_export=true"
+        )
+        assert resp.status_code == 200
+        assert "SENSITIVE_VALUE_MASKED" not in resp.text
+
+    def test_confirm_without_include_sensitive_stays_masked(self, export_client):
+        """confirm alone does not leak; masking still applies."""
+        resp = export_client.get("/api/config/export?format=env&confirm_sensitive_export=true")
+        assert resp.status_code == 200
+        assert "SENSITIVE_VALUE_MASKED" in resp.text

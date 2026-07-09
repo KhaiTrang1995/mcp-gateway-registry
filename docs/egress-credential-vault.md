@@ -144,7 +144,7 @@ sequenceDiagram
     participant TP as Third-party provider
 
     Note over C,K: First call — no stored connection yet
-    C->>N: MCP request to /<server>
+    C->>N: MCP request to /[server]
     N->>A: auth_request /validate (+ X-Validate-Source-Secret marker)
     A-->>N: mints mcp-proxy token (upstream_url, canonical auth_method)
     N->>P: forward with X-Internal-Token
@@ -158,7 +158,7 @@ sequenceDiagram
 
     Note over C,TP: User consents (browser)
     C->>B: open connect_url
-    B->>F: GET /oauth2/egress/connect?server=<path>
+    B->>F: GET /oauth2/egress/connect?server=[path]
     alt no gateway session
         F-->>B: 302 /oauth2/login/keycloak (then back)
     end
@@ -273,6 +273,30 @@ usernames contain spaces/accents, `server_path` contains `/`). Every backend
 builds keys through `registry/secrets/keys.py`, which applies **one** canonical
 encoding: NFC-normalize, then **base64url (unpadded)**, so each segment contains
 only `[A-Za-z0-9_-]` — never `/`, `|`, `%`, or `=`.
+
+### The canonical `user_id` (OIDC `sub`)
+
+`user_id` is the caller's **OIDC `sub`**, not their display username. The `sub`
+is present in both id_tokens and access_tokens for every OIDC provider and is
+stable per `(user, gateway app)`. Keying on the display name instead would break
+on Entra, whose **access** tokens omit `preferred_username`: a DCR client's
+bearer token would key on `sub` while the browser-consent leg keyed on the
+email, so the token would be written and read under different ids and every vend
+would miss.
+
+The canonical id is derived once in the auth-server (`_canonical_egress_user`:
+`sub` → persisted session `subject` → `username` fallback) and carried to the
+registry as an `egress_user` claim on the internal tokens. So that the browser
+consent-write path (which reaches the registry through the cookie session, not
+an internal token) resolves the same value, the auth-server persists the
+id_token `sub` into the session record at login and both the auth-server and
+registry session stores return it. All four identity points — vend, consent
+initiate, the OAuth callback's account-swap guard, and list/disconnect — key on
+this one value.
+
+Non-OIDC callers with no `sub` fall back to the username and are unaffected.
+`auth_method` still canonicalizes across IdP methods (see below), so the full
+key is stable regardless of how the same human authenticated.
 
 ```
 per-principal prefix:   {prefix}/enc(auth_method)/enc(user_id)
@@ -535,8 +559,10 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
   merely signed) so the PKCE verifier never appears in a URL, `Referer`, or log.
   The service enforces TTL, single-use (replay guard), and an account-swap guard.
 - **Per-user isolation.** Tokens are namespaced by `(auth_method, user_id,
-  provider, server_path)`; a `network-trusted`/static caller named "alice"
-  cannot read OAuth user "alice"'s tokens (distinct `auth_method` buckets).
+  provider, server_path)`, where `user_id` is the caller's OIDC `sub` (see
+  [Vault key scheme](#vault-key-scheme)); a `network-trusted`/static caller named
+  "alice" cannot read OAuth user "alice"'s tokens (distinct `auth_method`
+  buckets), and two humans never collide because the `sub` is unique per user.
 - **Secret-at-rest.** OAuth app client secrets are Fernet-encrypted with
   `SECRET_KEY`. Per-user tokens live only in the vault backend (OpenBao /
   Secrets Manager), never in the app database.
@@ -551,12 +577,15 @@ Users can review and revoke their connections in the UI at **Connected Accounts*
 | Startup fails: "requires EGRESS_OAUTH_CALLBACK_BASE_URL" | Set the public callback base URL. |
 | Client never gets a consent prompt | The MCP client must support `elicitation/create` (url mode). Check the server's `egress_auth_mode` is `oauth_user`. |
 | Consent loops (re-asked every call) | Usually an `auth_method` mismatch between consent-write and vend-read — confirm the IdP method canonicalizes to `oauth2`. Or the stored refresh token is dead (provider revoked it) → re-consent. |
+| Connected once, but tools still show empty / vend logs "has no token" | The consent-write and vend paths keyed the vault on different `user_id`s. Since keying moved to the OIDC `sub` (see [Vault key scheme](#vault-key-scheme)), an existing connection created under the old display-name key is invisible to the new `sub`-keyed lookup. Fix: **disconnect and reconnect once** (from Connected Accounts), which re-writes the entry under the `sub`. On Entra this reconnect must follow a fresh gateway login so the session carries the persisted `subject`. |
+| "Connection failed" on the consent callback; registry logs `state user mismatch` | The account-swap guard saw the consent-initiate principal differ from the callback's live-session principal. Almost always the session predates the `sub`-persisting login — **log out and back in**, then reconnect, so the cookie session carries the `subject` the initiate leg bound the state to. |
 | Vend returns 401 from auth-server | Marker secret mismatch. Ensure `AUTH_SERVER_NGINX_MARKER_SECRET` matches on registry + auth-server, and nginx sets it on `/validate`. |
 | OpenBao reads fail with permission denied | The role token lapsed. The store re-authenticates and retries once; persistent failure means a real policy/role gap — verify the `mcp-egress` policy and the role binding to the registry ServiceAccount. |
 | `decrypt` errors on client secret | `SECRET_KEY` was rotated after the server's egress config was saved. Re-save the egress config with the client secret. |
 
 ### Related documentation
 
+- [Same-IdP OBO Token Exchange (`obo_exchange`)](obo-token-exchange.md) — the stateless same-IdP sibling egress mode that shares this injection seam.
 - [Unified Parameter Reference](unified-parameter-reference.md) — per-surface variable names.
 - [Token Refresh Service](token-refresh-service.md) — the inbound token refresher (distinct from egress refresh).
 - [OAuth Discovery Endpoints](oauth-discovery-endpoints.md) — inbound RFC 9728/8414 discovery.

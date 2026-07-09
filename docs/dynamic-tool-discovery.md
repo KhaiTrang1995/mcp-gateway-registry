@@ -35,7 +35,6 @@ The dynamic tool discovery process follows these steps:
 4. **Relevance Ranking**: Returns tools ranked by semantic similarity to the query
 5. **Tool Invocation**: Agent uses the discovered tool information to invoke the appropriate MCP tool
 
-![Dynamic Tool Discovery Flow](img/dynamic-tool-discovery-demo.gif)
 
 ## Discovery Receipts and Context Budgets
 

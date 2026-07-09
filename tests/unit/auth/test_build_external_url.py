@@ -1,13 +1,42 @@
 """Tests for _build_external_url helper in auth routes.
 
 Verifies that OAuth2 redirect URIs include ROOT_PATH when path-based
-routing is enabled (issue #500).
+routing is enabled (issue #500), and that the inbound Host header is
+validated against a trusted allowlist before it feeds the redirect URI
+(Host-header trust hardening).
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
+
+import pytest
 
 from registry.auth import routes
 from registry.auth.routes import _build_external_url
+from registry.core.config import Settings
+
+
+@pytest.fixture(autouse=True)
+def _trust_test_hosts():
+    """Trust the hostnames used by the behavioral tests below.
+
+    The security allowlist derives from registry_url by default; these
+    behavioral tests use example.com / custom ports, so we widen the allowlist
+    for them. The dedicated Host-allowlist tests below override this to assert
+    the fail-closed rejection path.
+    """
+    trusted = {
+        "example.com",
+        "localhost",
+        "localhost:3000",
+        "localhost:7860",
+    }
+    with patch.object(
+        Settings,
+        "trusted_external_hosts_set",
+        new_callable=PropertyMock,
+        return_value=trusted,
+    ):
+        yield
 
 
 def _make_request(
@@ -170,3 +199,68 @@ class TestBuildExternalUrlPathNormalization:
         request = _make_request()
         result = _build_external_url(request, "/logout")
         assert result == "https://example.com/logout"
+
+
+class TestBuildExternalUrlHostAllowlist:
+    """Host-header trust: an untrusted Host must not feed the redirect URI."""
+
+    def setup_method(self):
+        self._original = routes._ROOT_PATH
+        routes._ROOT_PATH = ""
+
+    def teardown_method(self):
+        routes._ROOT_PATH = self._original
+
+    def test_trusted_host_is_used(self):
+        with patch.object(
+            Settings,
+            "trusted_external_hosts_set",
+            new_callable=PropertyMock,
+            return_value={"app.example.com"},
+        ):
+            request = _make_request(host="app.example.com")
+            result = _build_external_url(request, "/logout")
+            assert result == "https://app.example.com/logout"
+
+    def test_untrusted_host_falls_back_to_registry_host(self):
+        """A spoofed Host is rejected; the URL uses the configured registry host."""
+        with (
+            patch.object(
+                Settings,
+                "trusted_external_hosts_set",
+                new_callable=PropertyMock,
+                return_value={"app.example.com"},
+            ),
+            patch.object(routes.settings, "registry_url", "https://real.example.com"),
+        ):
+            request = _make_request(host="evil.attacker.example")
+            result = _build_external_url(request, "/logout")
+            assert "evil.attacker.example" not in result
+            assert result == "https://real.example.com/logout"
+
+    def test_missing_host_falls_back(self):
+        with (
+            patch.object(
+                Settings,
+                "trusted_external_hosts_set",
+                new_callable=PropertyMock,
+                return_value={"app.example.com"},
+            ),
+            patch.object(routes.settings, "registry_url", "https://real.example.com"),
+        ):
+            request = _make_request(host="")
+            result = _build_external_url(request, "/logout")
+            assert result == "https://real.example.com/logout"
+
+    def test_host_match_is_case_insensitive(self):
+        with patch.object(
+            Settings,
+            "trusted_external_hosts_set",
+            new_callable=PropertyMock,
+            return_value={"app.example.com"},
+        ):
+            request = _make_request(host="APP.Example.COM")
+            result = _build_external_url(request, "/logout")
+            # Host is echoed as-supplied but only because it matched the
+            # allowlist case-insensitively.
+            assert result == "https://APP.Example.COM/logout"

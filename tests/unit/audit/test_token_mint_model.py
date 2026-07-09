@@ -53,6 +53,15 @@ class TestDefaults:
     def test_requested_scopes_defaults_empty_list(self):
         assert _minimal().requested_scopes == []
 
+    def test_username_defaults_anonymous(self):
+        # The raw human-readable field is optional (back-compat with callers that
+        # only set username_hash); it defaults to "anonymous", never blank.
+        assert _minimal().username == "anonymous"
+
+    def test_username_stores_raw_email(self):
+        r = _minimal(username="alice@example.com")
+        assert r.username == "alice@example.com"
+
 
 class TestRequiredFields:
     @pytest.mark.parametrize(

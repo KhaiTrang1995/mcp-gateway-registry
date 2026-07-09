@@ -8,6 +8,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..audit.context import set_audit_action
+from ..auth.csrf import verify_csrf_token_flexible
 from ..auth.dependencies import nginx_proxied_auth
 from ..core.metrics import M2M_ORPHAN_CLEANUPS_TOTAL
 from ..repositories.documentdb.client import get_documentdb_client
@@ -26,7 +27,8 @@ from ..schemas.management import (
     UserListResponse,
     UserSummary,
 )
-from ..services import scope_service
+from ..services import admin_safety, scope_service
+from ..services.admin_safety import AdminSafetyError
 from ..utils.iam_errors import IdPForbiddenError, IdPNotFoundError
 from ..utils.iam_manager import get_iam_manager
 
@@ -49,12 +51,16 @@ def _translate_iam_error(exc: Exception) -> HTTPException:
     Returns:
         HTTPException with appropriate status code
     """
-    detail = str(exc)
-    lowered = detail.lower()
+    # Classify on the raw message but do NOT reflect it back: IdP (Keycloak/Entra)
+    # error strings can carry internal URLs, config, and stack context. Return a
+    # generic, category-appropriate message instead of the raw exception text.
+    lowered = str(exc).lower()
     status_code = status.HTTP_502_BAD_GATEWAY
+    detail = "IAM provider error"
 
     if any(keyword in lowered for keyword in ("already exists", "not found", "provided")):
         status_code = status.HTTP_400_BAD_REQUEST
+        detail = "Invalid IAM request (see server logs for details)"
 
     return HTTPException(status_code=status_code, detail=detail)
 
@@ -160,6 +166,59 @@ def _require_admin(user_context: dict) -> None:
         )
 
 
+def _admin_safety_http(exc: AdminSafetyError) -> HTTPException:
+    """Translate an AdminSafetyError into an HTTPException.
+
+    Fail-closed guard failures surface as 4xx/5xx with the guard's own detail so
+    the operator sees exactly why the intra-admin safety check refused.
+    """
+    return HTTPException(status_code=exc.status_code, detail=exc.detail)
+
+
+async def _audit_admin_grant(
+    request: Request,
+    username: str,
+    desired_groups: list[str] | None,
+    operation: str,
+) -> None:
+    """Emit a distinct audit event when an operation grants admin-tier access.
+
+    A generic user create/update audit entry does not distinguish a routine
+    group change from a privilege escalation to administrator. This records a
+    dedicated event whenever the resulting group set confers admin so the grant
+    is independently traceable.
+
+    Never fails the operation: an audit-derivation error is logged and
+    swallowed (the primary mutation and its own audit entry are unaffected).
+    """
+    try:
+        if await admin_safety.desired_groups_grant_admin(desired_groups):
+            logger.warning(
+                "admin_grant username=%s operation=%s: account granted "
+                "administrator-tier group membership",
+                username,
+                operation,
+            )
+            set_audit_action(
+                request,
+                operation=operation,
+                resource_type="user",
+                resource_id=username,
+                description=(f"Granted administrator-tier group membership to '{username}'"),
+                metadata={"admin_grant": True},
+            )
+    except AdminSafetyError as exc:
+        # Could not determine whether this is an admin grant. Do not block the
+        # (already-completed) mutation, but log loudly so the gap is visible.
+        logger.error(
+            "admin_grant audit could not be evaluated for username=%s: %s",
+            username,
+            exc.detail,
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.exception("admin_grant audit evaluation failed for username=%s", username)
+
+
 @router.get("/iam/users", response_model=UserListResponse)
 async def management_list_users(
     search: str | None = None,
@@ -236,9 +295,15 @@ async def management_list_users(
 @router.post("/iam/users/m2m")
 async def management_create_m2m_user(
     payload: M2MAccountRequest,
+    request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
-    """Create a service account client and return its credentials (admin only)."""
+    """Create a service account client and return its credentials (admin only).
+
+    Emits a distinct audit event when the service account is created directly
+    into an administrator-tier group.
+    """
     _require_admin(user_context)
 
     iam = get_iam_manager()
@@ -283,15 +348,23 @@ async def management_create_m2m_user(
     except Exception as exc:
         raise _translate_iam_error(exc) from exc
 
+    await _audit_admin_grant(request, payload.name, payload.groups, operation="create")
+
     return result
 
 
 @router.post("/iam/users/human")
 async def management_create_human_user(
     payload: HumanUserRequest,
+    request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
-    """Create a human user and assign groups (admin only)."""
+    """Create a human user and assign groups (admin only).
+
+    Emits a distinct audit event when the new account is created directly into
+    an administrator-tier group.
+    """
     _require_admin(user_context)
 
     iam = get_iam_manager()
@@ -307,6 +380,13 @@ async def management_create_human_user(
         )
     except Exception as exc:
         raise _translate_iam_error(exc) from exc
+
+    await _audit_admin_grant(
+        request,
+        user_doc.get("username", payload.username),
+        user_doc.get("groups", payload.groups),
+        operation="create",
+    )
 
     return UserSummary(
         id=user_doc.get("id", ""),
@@ -324,9 +404,30 @@ async def management_delete_user(
     username: str,
     request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
-    """Delete a user by username (admin only)."""
+    """Delete a user by username (admin only).
+
+    Intra-admin safety guards (applied before any deletion):
+    - An admin may not delete their own account (self-deletion guard).
+    - The last remaining administrator may not be deleted (lockout guard).
+    Both fail closed: an inability to determine the admin population refuses
+    the delete rather than allowing it.
+    """
     _require_admin(user_context)
+
+    # Guard 1: self-deletion. Reject an admin deleting their own account.
+    if admin_safety.is_self_target(user_context.get("username"), username):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot delete your own account.",
+        )
+
+    # Guard 2: last-admin lockout. Refuse deleting the final administrator.
+    try:
+        await admin_safety.assert_not_last_admin(username)
+    except AdminSafetyError as exc:
+        raise _admin_safety_http(exc) from exc
 
     iam = get_iam_manager()
 
@@ -387,7 +488,9 @@ async def management_delete_user(
 async def management_update_user_groups(
     username: str,
     payload: UpdateUserGroupsRequest,
+    request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """Update a user's group memberships (admin only).
 
@@ -396,10 +499,24 @@ async def management_update_user_groups(
 
     For M2M accounts (service accounts), updates the DocumentDB record directly.
     For human users, delegates to the IdP manager.
+
+    Intra-admin safety:
+    - A group update that would strip the last administrator of every
+      admin-conferring group is refused (fail closed).
+    - A distinct audit event is emitted whenever the resulting group set
+      confers administrator-tier access.
     """
     from datetime import datetime
 
     _require_admin(user_context)
+
+    # Last-admin demotion guard: refuse a group change that would leave the
+    # deployment with zero administrators. Runs before any mutation and fails
+    # closed if the admin population cannot be determined.
+    try:
+        await admin_safety.would_remove_last_admin_via_groups(username, payload.groups)
+    except AdminSafetyError as exc:
+        raise _admin_safety_http(exc) from exc
 
     # Check if this is an M2M account by looking it up in DocumentDB
     try:
@@ -431,6 +548,8 @@ async def management_update_user_groups(
             )
 
             logger.info(f"Updated M2M account {username}: added {added}, removed {removed}")
+
+            await _audit_admin_grant(request, username, new_groups, operation="update")
 
             return UpdateUserGroupsResponse(
                 username=username,
@@ -471,6 +590,10 @@ async def management_update_user_groups(
                 ),
             ) from exc
         raise _translate_iam_error(exc) from exc
+
+    await _audit_admin_grant(
+        request, username, result.get("groups", payload.groups), operation="update"
+    )
 
     return UpdateUserGroupsResponse(
         username=result.get("username", username),
@@ -569,6 +692,7 @@ async def management_create_group(
     payload: GroupCreateRequest,
     request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Create a new group in the identity provider and/or MongoDB (admin only).
@@ -691,6 +815,7 @@ async def management_delete_group(
     group_name: str,
     request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Delete a group (admin only).
@@ -825,7 +950,7 @@ async def management_get_group(
         logger.error("Failed to get group: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Failed to get group details: {exc}",
+            detail="Failed to get group details",
         ) from exc
 
 
@@ -835,6 +960,7 @@ async def management_update_group(
     payload: GroupUpdateRequest,
     request: Request,
     user_context: Annotated[dict, Depends(nginx_proxied_auth)] = None,
+    _csrf: Annotated[None, Depends(verify_csrf_token_flexible)] = None,
 ):
     """
     Update a group's properties and scope configuration (admin only).

@@ -114,7 +114,7 @@ This setup is for agents that have their own identity and authenticate using cli
    - **App type**: Select "Machine to Machine"
    - **App client name**: Enter `Agent` (or `My AI Assistant` or any name that reflects what the agent will do)
    - **Client secret**: Select "Generate a client secret"
-   - **Copy and save** the **Client ID** and **Client Secret** - you'll need these for the [`agents/.env.agent`](../agents/.env.agent) file
+   - **Copy and save** the **Client ID** and **Client Secret** - you'll need these for the `agents/.env.agent` file
 
 #### Step 2: Create Resource Server and Custom Scopes
 
@@ -539,7 +539,7 @@ touch .env.user
 
 ### Step 2: Configure Client Credentials
 
-Edit the [`agents/.env.user`](../agents/.env.user) file with your Cognito credentials obtained from the [User Group Setup](#user-group-setup-for-users-and-agents-using-user-identity) section:
+Edit the `agents/.env.user` file with your Cognito credentials obtained from the [User Group Setup](#user-group-setup-for-users-and-agents-using-user-identity) section:
 
 ```bash
 # Cognito Authentication Configuration

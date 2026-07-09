@@ -120,7 +120,7 @@ async def load_all() -> None  # Load/reload from storage at startup
 ```
 
 **Implementations:**
-- [`registry/repositories/file/server_repository.py`](../../registry/repositories/file/server_repository.py) - File-based
+- `registry/repositories/file/server_repository.py` - File-based
 - [`registry/repositories/documentdb/server_repository.py`](../../registry/repositories/documentdb/server_repository.py) - DocumentDB/MongoDB
 
 ---
@@ -147,7 +147,7 @@ async def load_all() -> None  # Load/reload from storage
 ```
 
 **Implementations:**
-- [`registry/repositories/file/agent_repository.py`](../../registry/repositories/file/agent_repository.py) - File-based
+- `registry/repositories/file/agent_repository.py` - File-based
 - [`registry/repositories/documentdb/agent_repository.py`](../../registry/repositories/documentdb/agent_repository.py) - DocumentDB/MongoDB
 
 ---
@@ -214,7 +214,7 @@ async def load_all() -> None  # Load/reload from storage
 ```
 
 **Implementations:**
-- [`registry/repositories/file/scope_repository.py`](../../registry/repositories/file/scope_repository.py) - File-based (YAML)
+- `registry/repositories/file/scope_repository.py` - File-based (YAML)
 - [`registry/repositories/documentdb/scope_repository.py`](../../registry/repositories/documentdb/scope_repository.py) - DocumentDB/MongoDB
 
 ---
@@ -241,7 +241,7 @@ async def load_all() -> None  # Load/reload from storage
 ```
 
 **Implementations:**
-- [`registry/repositories/file/security_scan_repository.py`](../../registry/repositories/file/security_scan_repository.py) - File-based
+- `registry/repositories/file/security_scan_repository.py` - File-based
 - [`registry/repositories/documentdb/security_scan_repository.py`](../../registry/repositories/documentdb/security_scan_repository.py) - DocumentDB/MongoDB
 
 ---
@@ -281,7 +281,7 @@ async def remove_entity(path: str) -> None
 ```
 
 **Implementations:**
-- [`registry/repositories/file/search_repository.py`](../../registry/repositories/file/search_repository.py) - Application-level vector search (legacy)
+- `registry/repositories/file/search_repository.py` - Application-level vector search (legacy)
 - [`registry/repositories/documentdb/search_repository.py`](../../registry/repositories/documentdb/search_repository.py) - DocumentDB/MongoDB Hybrid Search (BM25 + k-NN)
 
 ---
@@ -307,7 +307,7 @@ async def list_configs() -> List[Dict[str, Any]]
 ```
 
 **Implementations:**
-- [`registry/repositories/file/federation_config_repository.py`](../../registry/repositories/file/federation_config_repository.py) - File-based (JSON)
+- `registry/repositories/file/federation_config_repository.py` - File-based (JSON)
 - [`registry/repositories/documentdb/federation_config_repository.py`](../../registry/repositories/documentdb/federation_config_repository.py) - DocumentDB/MongoDB
 
 ---
@@ -348,12 +348,12 @@ registry/
 ```
 
 **Implementation Classes:**
-- [`FileServerRepository`](../../registry/repositories/file/server_repository.py)
-- [`FileAgentRepository`](../../registry/repositories/file/agent_repository.py)
-- [`FileScopeRepository`](../../registry/repositories/file/scope_repository.py)
-- [`FileSecurityScanRepository`](../../registry/repositories/file/security_scan_repository.py)
-- [`FileSearchRepository`](../../registry/repositories/file/search_repository.py)
-- [`FileFederationConfigRepository`](../../registry/repositories/file/federation_config_repository.py)
+- `FileServerRepository`
+- `FileAgentRepository`
+- `FileScopeRepository`
+- `FileSecurityScanRepository`
+- `FileSearchRepository`
+- `FileFederationConfigRepository`
 
 **Advantages:**
 - No infrastructure setup needed

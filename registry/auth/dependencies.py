@@ -4,6 +4,7 @@ from typing import Annotated, Any
 from fastapi import Cookie, Depends, Header, HTTPException, Request, status
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from ..common.log_redaction import redact_headers, redact_mapping
 from ..core.config import settings
 from .access_resolver import (
     get_user_accessible_tools,  # noqa: F401 - re-exported for external callers
@@ -467,6 +468,8 @@ async def _derive_user_context(
     provider: str,
     session_id: str | None = None,
     client_id: str = "",
+    egress_user: str = "",
+    email: str = "",
 ) -> dict[str, Any]:
     """Build the canonical user_context dict from authenticated identity inputs.
 
@@ -487,11 +490,13 @@ async def _derive_user_context(
     if auth_method == "federation-static":
         return {
             "username": username,
+            "email": email,
             "client_id": client_id,
             "groups": groups,
             "scopes": scopes,
             "auth_method": auth_method,
             "provider": provider,
+            "egress_user": egress_user or username,
             "session_id": session_id,
             "accessible_servers": [],
             "accessible_tools": {},
@@ -508,11 +513,18 @@ async def _derive_user_context(
 
     return {
         "username": username,
+        # Human-readable email for audit records (preferred over username, which
+        # is the OIDC sub on some paths). Empty when the source carried none.
+        "email": email,
         "client_id": client_id,
         "groups": groups,
         "scopes": scopes,
         "auth_method": auth_method,
         "provider": provider,
+        # egress_user is the canonical per-user egress vault id (OIDC sub when
+        # available, else username). The consent-write path keys the vault on
+        # it so it matches the vend path's egress_user claim. See #933.
+        "egress_user": egress_user or username,
         # session_id is the opaque server-side identifier — used by template
         # callers to mint CSRF tokens via generate_csrf_token(session_id).
         "session_id": session_id,
@@ -534,6 +546,8 @@ async def _resolve_context_from_groups(
     provider: str,
     session_id: str | None = None,
     client_id: str = "",
+    egress_user: str = "",
+    email: str = "",
 ) -> dict[str, Any]:
     """Derive the canonical user_context from groups, server-side.
 
@@ -544,7 +558,7 @@ async def _resolve_context_from_groups(
     they were authenticated (guards #933).
     """
     scopes = await map_cognito_groups_to_scopes(groups)
-    logger.info(f"User {username} with groups {groups} mapped to scopes: {scopes}")
+    logger.info(f"User {username} with {len(groups)} groups mapped to {len(scopes)} scopes")
     if not groups:
         logger.warning(
             f"User {username} has no groups! This user may not have proper group assignments."
@@ -557,6 +571,8 @@ async def _resolve_context_from_groups(
         provider=provider,
         session_id=session_id,
         client_id=client_id,
+        egress_user=egress_user,
+        email=email,
     )
 
 
@@ -588,9 +604,7 @@ async def _context_from_internal_token(
         session_data = await _store_resolve_session(session_id)
         if session_data is None or not session_data.get("username"):
             # Present token bound to a session that no longer resolves: fail closed.
-            logger.warning(
-                "signed-token auth: session_id in token did not resolve; rejecting"
-            )
+            logger.warning("signed-token auth: session_id in token did not resolve; rejecting")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Authentication required",
@@ -602,6 +616,11 @@ async def _context_from_internal_token(
             provider=session_data.get("provider", "local"),
             session_id=session_id,
             client_id=claims.get("client_id") or "",
+            # The auth_server stamps the canonical egress user (OIDC sub) into
+            # the token; prefer it so the consent-write vault key matches vend.
+            egress_user=claims.get("egress_user") or "",
+            # Human-readable email for audit records (from the session or claim).
+            email=session_data.get("email") or claims.get("email") or "",
         )
 
     # No session row (bearer / IdP-JWT / static-token caller): trust the claim's
@@ -613,6 +632,9 @@ async def _context_from_internal_token(
         auth_method=auth_method,
         provider=auth_method,
         client_id=claims.get("client_id") or "",
+        egress_user=claims.get("egress_user") or "",
+        # Human-readable email for audit records when the claim carries it.
+        email=claims.get("email") or "",
     )
 
 
@@ -631,7 +653,9 @@ async def enhanced_auth(
     groups = session_data.get("groups", [])
     auth_method = session_data.get("auth_method", "oauth2")
 
-    logger.info(f"Enhanced auth debug for {username}: groups={groups}, auth_method={auth_method}")
+    logger.info(
+        f"Enhanced auth debug for {username}: {len(groups)} groups, auth_method={auth_method}"
+    )
 
     user_context = await _resolve_context_from_groups(
         username=username,
@@ -639,12 +663,18 @@ async def enhanced_auth(
         auth_method=auth_method,
         provider=session_data.get("provider", "local"),
         session_id=session_data.get("session_id"),
+        # Canonical egress vault id (OIDC sub persisted at login). Keeps the
+        # consent-write path (which reaches enhanced_auth via the callback's
+        # cookie, no internal token) keyed the same as the vend path. See #933.
+        egress_user=session_data.get("subject") or "",
+        # Human-readable email for audit records (session store persists it).
+        email=session_data.get("email") or "",
     )
 
     # Set user context on request state for audit logging middleware
     request.state.user_context = user_context
 
-    logger.debug(f"Enhanced auth context for {username}: {user_context}")
+    logger.debug(f"Enhanced auth context for {username}: {redact_mapping(user_context)}")
     return user_context
 
 
@@ -692,18 +722,16 @@ async def nginx_proxied_auth(
     )
     logger.debug(f"[NGINX_AUTH_DEBUG] Session cookie present: {session is not None}")
     logger.debug(
-        f"[NGINX_AUTH_DEBUG] Authorization header: {request.headers.get('authorization', 'NOT PRESENT')[:50] if request.headers.get('authorization') else 'NOT PRESENT'}"
+        "[NGINX_AUTH_DEBUG] Authorization header present: "
+        f"{request.headers.get('authorization') is not None}"
     )
 
     # Log ALL headers for complete diagnostic, with sensitive values redacted.
-    # cookie/authorization carry the session and bearer token; even at DEBUG we
-    # don't want them in logs.
-    _redacted_header_names = {"cookie", "authorization"}
-    all_headers = {
-        name: ("[REDACTED]" if name.lower() in _redacted_header_names else value)
-        for name, value in request.headers.items()
-    }
-    logger.debug(f"[NGINX_AUTH_DEBUG] ALL REQUEST HEADERS: {all_headers}")
+    # cookie/authorization carry the session and bearer token, and other headers
+    # (e.g. X-Auth-Credential, X-Api-Key) can carry credentials; even at DEBUG we
+    # never emit any of them (not even a prefix). Uses the shared redaction
+    # helper, which redacts by exact name and by credential substring.
+    logger.debug(f"[NGINX_AUTH_DEBUG] ALL REQUEST HEADERS: {redact_headers(request.headers)}")
 
     # Signed-token path. The auth_server's /validate mints an HS256 token
     # (X-Internal-Token-Registry) bound to the validated identity; nginx forwards
@@ -739,12 +767,10 @@ async def nginx_proxied_auth(
     # either no identity headers, or NGINX_DISABLE_API_AUTH_REQUEST is set (local-dev
     # mode where FastAPI authenticates the cookie/bearer itself). The inbound identity
     # headers are ignored in every case.
-    logger.info(
-        "[NGINX_AUTH_FALLBACK] No internal token; falling back to session cookie auth"
-    )
-    logger.info(
-        f"[NGINX_AUTH_FALLBACK] Session cookie value: {session[:20] if session else 'None'}..."
-    )
+    logger.info("[NGINX_AUTH_FALLBACK] No internal token; falling back to session cookie auth")
+    # The session cookie is a signed credential: log only its presence, never
+    # any part of its value (a prefix is still credential material).
+    logger.info(f"[NGINX_AUTH_FALLBACK] Session cookie present: {session is not None}")
     logger.info(f"[NGINX_AUTH_FALLBACK] Request path: {request.url.path}")
     try:
         return await enhanced_auth(request, session)

@@ -1,405 +1,18 @@
 """
 Unit tests for registry/api/wellknown_routes.py
 
-Tests the well-known URL discovery endpoint including:
-- GET /.well-known/mcp-servers - MCP server discovery
-- Health status retrieval from health service
-- Status normalization for client consumption
+Tests the well-known discovery endpoints:
+- GET /.well-known/oauth-protected-resource (RFC 9728)
+- GET /.well-known/oauth-authorization-server (RFC 8414)
 """
 
 import logging
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# FIXTURES
-# =============================================================================
-
-
-@pytest.fixture
-def mock_server_service():
-    """Mock server_service dependency."""
-    mock_service = MagicMock()
-    mock_service.get_all_servers = AsyncMock(return_value={})
-    mock_service.is_service_enabled = AsyncMock(return_value=True)
-    return mock_service
-
-
-@pytest.fixture
-def mock_health_service():
-    """Mock health_service dependency with server_health_status dict."""
-    mock_service = MagicMock()
-    mock_service.server_health_status = {}
-    return mock_service
-
-
-@pytest.fixture
-def sample_server_info() -> dict[str, Any]:
-    """Create sample server information for testing."""
-    return {
-        "path": "test-server",
-        "server_name": "Test Server",
-        "description": "A test MCP server",
-        "transport": "streamable-http",
-        "auth_type": "oauth",
-        "auth_provider": "keycloak",
-        "tool_list": [
-            {"name": "get_data", "description": "Get data from source"},
-            {"name": "process_data", "description": "Process data"},
-        ],
-        "proxy_pass_url": "http://localhost:8000",
-        "is_enabled": True,
-    }
-
-
-# =============================================================================
-# UNIT TESTS FOR _get_normalized_health_status
-# =============================================================================
-
-
-class TestGetNormalizedHealthStatus:
-    """Tests for the _get_normalized_health_status helper function."""
-
-    def test_healthy_status_normalized(self, mock_health_service, mock_settings):
-        """Test that 'healthy' status is returned as 'healthy'."""
-        mock_health_service.server_health_status = {"test-server": "healthy"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "healthy"
-
-    def test_healthy_auth_expired_normalized_to_healthy(self, mock_health_service, mock_settings):
-        """Test that 'healthy-auth-expired' is normalized to 'healthy'."""
-        mock_health_service.server_health_status = {"test-server": "healthy-auth-expired"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "healthy"
-
-    def test_unhealthy_timeout_normalized(self, mock_health_service, mock_settings):
-        """Test that 'unhealthy: timeout' is normalized to 'unhealthy'."""
-        mock_health_service.server_health_status = {"test-server": "unhealthy: timeout"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "unhealthy"
-
-    def test_unhealthy_connection_error_normalized(self, mock_health_service, mock_settings):
-        """Test that 'unhealthy: connection error' is normalized to 'unhealthy'."""
-        mock_health_service.server_health_status = {"test-server": "unhealthy: connection error"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "unhealthy"
-
-    def test_error_status_normalized_to_unhealthy(self, mock_health_service, mock_settings):
-        """Test that error statuses are normalized to 'unhealthy'."""
-        mock_health_service.server_health_status = {"test-server": "error: ConnectionError"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "unhealthy"
-
-    def test_disabled_status_normalized(self, mock_health_service, mock_settings):
-        """Test that 'disabled' status is returned as 'disabled'."""
-        mock_health_service.server_health_status = {"test-server": "disabled"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "disabled"
-
-    def test_checking_status_normalized_to_unknown(self, mock_health_service, mock_settings):
-        """Test that 'checking' status is normalized to 'unknown'."""
-        mock_health_service.server_health_status = {"test-server": "checking"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("test-server")
-            assert result == "unknown"
-
-    def test_unknown_server_returns_unknown(self, mock_health_service, mock_settings):
-        """Test that unknown servers return 'unknown' status."""
-        mock_health_service.server_health_status = {}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _get_normalized_health_status
-
-            result = _get_normalized_health_status("nonexistent-server")
-            assert result == "unknown"
-
-
-# =============================================================================
-# UNIT TESTS FOR _format_server_discovery
-# =============================================================================
-
-
-class TestFormatServerDiscovery:
-    """Tests for the _format_server_discovery function."""
-
-    def test_format_includes_health_status(
-        self, mock_health_service, mock_settings, sample_server_info
-    ):
-        """Test that formatted server includes actual health status."""
-        mock_health_service.server_health_status = {"test-server": "healthy"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _format_server_discovery
-
-            # Create a mock request
-            mock_request = MagicMock()
-            mock_request.headers = {"host": "localhost:7860"}
-            mock_request.url.scheme = "http"
-
-            result = _format_server_discovery(sample_server_info, mock_request)
-
-            assert result["health_status"] == "healthy"
-            assert result["name"] == "Test Server"
-            assert result["description"] == "A test MCP server"
-
-    def test_format_uses_unhealthy_status_from_health_service(
-        self, mock_health_service, mock_settings, sample_server_info
-    ):
-        """Test that formatted server uses unhealthy status from health service."""
-        mock_health_service.server_health_status = {"test-server": "unhealthy: timeout"}
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _format_server_discovery
-
-            mock_request = MagicMock()
-            mock_request.headers = {"host": "localhost:7860"}
-            mock_request.url.scheme = "http"
-
-            result = _format_server_discovery(sample_server_info, mock_request)
-
-            # Should be normalized to 'unhealthy'
-            assert result["health_status"] == "unhealthy"
-
-    def test_format_unknown_server_has_unknown_status(self, mock_health_service, mock_settings):
-        """Test that servers not in health service have 'unknown' status."""
-        mock_health_service.server_health_status = {}
-
-        server_info = {
-            "path": "new-server",
-            "server_name": "New Server",
-            "description": "A new server",
-        }
-
-        with patch("registry.api.wellknown_routes.health_service", mock_health_service):
-            from registry.api.wellknown_routes import _format_server_discovery
-
-            mock_request = MagicMock()
-            mock_request.headers = {"host": "localhost:7860"}
-            mock_request.url.scheme = "http"
-
-            result = _format_server_discovery(server_info, mock_request)
-
-            assert result["health_status"] == "unknown"
-
-
-# =============================================================================
-# INTEGRATION TESTS FOR GET /.well-known/mcp-servers
-# =============================================================================
-
-
-class TestWellKnownMcpServersEndpoint:
-    """Integration tests for the well-known MCP servers endpoint."""
-
-    def test_endpoint_returns_actual_health_status(
-        self,
-        mock_server_service,
-        mock_health_service,
-        mock_settings,
-        sample_server_info,
-    ):
-        """Test that the endpoint returns actual health status, not hardcoded."""
-        # Set up mock data
-        mock_server_service.get_all_servers = AsyncMock(
-            return_value={"test-server": sample_server_info}
-        )
-        mock_server_service.is_service_enabled = AsyncMock(return_value=True)
-        mock_health_service.server_health_status = {"test-server": "unhealthy: connection error"}
-
-        # Patch settings to enable discovery
-        mock_settings.enable_wellknown_discovery = True
-        mock_settings.wellknown_cache_ttl = 300
-
-        with (
-            patch("registry.api.wellknown_routes.server_service", mock_server_service),
-            patch("registry.api.wellknown_routes.health_service", mock_health_service),
-            patch("registry.api.wellknown_routes.settings", mock_settings),
-        ):
-            from fastapi import FastAPI
-
-            from registry.api.wellknown_routes import router
-
-            app = FastAPI()
-            app.include_router(router, prefix="/.well-known")
-
-            client = TestClient(app)
-            response = client.get("/.well-known/mcp-servers")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["servers"]) == 1
-            # Verify health_status is normalized from "unhealthy: connection error" to "unhealthy"
-            assert data["servers"][0]["health_status"] == "unhealthy"
-
-    def test_endpoint_returns_healthy_status(
-        self,
-        mock_server_service,
-        mock_health_service,
-        mock_settings,
-        sample_server_info,
-    ):
-        """Test that healthy servers show as healthy."""
-        mock_server_service.get_all_servers = AsyncMock(
-            return_value={"test-server": sample_server_info}
-        )
-        mock_server_service.is_service_enabled = AsyncMock(return_value=True)
-        mock_health_service.server_health_status = {"test-server": "healthy"}
-
-        mock_settings.enable_wellknown_discovery = True
-        mock_settings.wellknown_cache_ttl = 300
-
-        with (
-            patch("registry.api.wellknown_routes.server_service", mock_server_service),
-            patch("registry.api.wellknown_routes.health_service", mock_health_service),
-            patch("registry.api.wellknown_routes.settings", mock_settings),
-        ):
-            from fastapi import FastAPI
-
-            from registry.api.wellknown_routes import router
-
-            app = FastAPI()
-            app.include_router(router, prefix="/.well-known")
-
-            client = TestClient(app)
-            response = client.get("/.well-known/mcp-servers")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["servers"][0]["health_status"] == "healthy"
-
-    def test_endpoint_returns_unknown_for_unchecked_servers(
-        self,
-        mock_server_service,
-        mock_health_service,
-        mock_settings,
-        sample_server_info,
-    ):
-        """Test that servers not yet health-checked show as unknown."""
-        mock_server_service.get_all_servers = AsyncMock(
-            return_value={"test-server": sample_server_info}
-        )
-        mock_server_service.is_service_enabled = AsyncMock(return_value=True)
-        # Empty health status dict means no health checks have run yet
-        mock_health_service.server_health_status = {}
-
-        mock_settings.enable_wellknown_discovery = True
-        mock_settings.wellknown_cache_ttl = 300
-
-        with (
-            patch("registry.api.wellknown_routes.server_service", mock_server_service),
-            patch("registry.api.wellknown_routes.health_service", mock_health_service),
-            patch("registry.api.wellknown_routes.settings", mock_settings),
-        ):
-            from fastapi import FastAPI
-
-            from registry.api.wellknown_routes import router
-
-            app = FastAPI()
-            app.include_router(router, prefix="/.well-known")
-
-            client = TestClient(app)
-            response = client.get("/.well-known/mcp-servers")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert data["servers"][0]["health_status"] == "unknown"
-
-    def test_multiple_servers_with_different_health_statuses(
-        self,
-        mock_server_service,
-        mock_health_service,
-        mock_settings,
-    ):
-        """Test that multiple servers show their individual health statuses."""
-        servers = {
-            "healthy-server": {
-                "path": "healthy-server",
-                "server_name": "Healthy Server",
-                "description": "A healthy server",
-                "is_enabled": True,
-            },
-            "unhealthy-server": {
-                "path": "unhealthy-server",
-                "server_name": "Unhealthy Server",
-                "description": "An unhealthy server",
-                "is_enabled": True,
-            },
-            "unknown-server": {
-                "path": "unknown-server",
-                "server_name": "Unknown Server",
-                "description": "A server with unknown status",
-                "is_enabled": True,
-            },
-        }
-
-        mock_server_service.get_all_servers = AsyncMock(return_value=servers)
-        mock_server_service.is_service_enabled = AsyncMock(return_value=True)
-        mock_health_service.server_health_status = {
-            "healthy-server": "healthy",
-            "unhealthy-server": "unhealthy: timeout",
-            # unknown-server not in dict, should return "unknown"
-        }
-
-        mock_settings.enable_wellknown_discovery = True
-        mock_settings.wellknown_cache_ttl = 300
-
-        with (
-            patch("registry.api.wellknown_routes.server_service", mock_server_service),
-            patch("registry.api.wellknown_routes.health_service", mock_health_service),
-            patch("registry.api.wellknown_routes.settings", mock_settings),
-        ):
-            from fastapi import FastAPI
-
-            from registry.api.wellknown_routes import router
-
-            app = FastAPI()
-            app.include_router(router, prefix="/.well-known")
-
-            client = TestClient(app)
-            response = client.get("/.well-known/mcp-servers")
-
-            assert response.status_code == 200
-            data = response.json()
-            assert len(data["servers"]) == 3
-
-            # Create a dict for easier verification
-            server_statuses = {s["name"]: s["health_status"] for s in data["servers"]}
-
-            assert server_statuses["Healthy Server"] == "healthy"
-            assert server_statuses["Unhealthy Server"] == "unhealthy"
-            assert server_statuses["Unknown Server"] == "unknown"
 
 
 # =============================================================================
@@ -543,8 +156,8 @@ class TestOAuthProtectedResourceEndpoint:
             assert response.status_code == 200
             assert response.json()["resource"] == "http://localhost:7860"
 
-    def test_cache_control_header(self, mock_settings, fake_provider):
-        """RFC 9728 docs are cacheable for 5 minutes."""
+    def test_cache_control_header_is_no_store(self, mock_settings, fake_provider):
+        """PRM metadata must not be cached by shared/CDN caches (poisoning risk)."""
         mock_settings.registry_url = "https://gw.example.com"
         mock_settings.mcp_https_required = True
         mock_settings.mcp_resource_documentation_url = None
@@ -561,7 +174,10 @@ class TestOAuthProtectedResourceEndpoint:
             client = TestClient(app)
             response = client.get("/.well-known/oauth-protected-resource")
 
-            assert response.headers["cache-control"] == "public, max-age=300"
+            cache_control = response.headers["cache-control"]
+            assert cache_control == "no-store"
+            assert "public" not in cache_control
+            assert "max-age" not in cache_control
 
     def test_provider_not_implemented_returns_501(self, mock_settings):
         """A provider whose authorization_server_metadata() raises NotImplementedError surfaces as 501."""
@@ -634,8 +250,8 @@ class TestOAuthAuthorizationServerEndpoint:
             assert response.status_code == 200
             assert response.json() == fake_as_metadata
 
-    def test_cache_control_header(self, mock_settings, fake_provider):
-        """RFC 8414 docs are cacheable for 5 minutes."""
+    def test_cache_control_header_is_no_store(self, mock_settings, fake_provider):
+        """AS metadata must not be cached by shared/CDN caches (poisoning risk)."""
         with patch(
             "registry.api.wellknown_routes._get_active_auth_provider",
             return_value=fake_provider,
@@ -644,7 +260,10 @@ class TestOAuthAuthorizationServerEndpoint:
             client = TestClient(app)
             response = client.get("/.well-known/oauth-authorization-server")
 
-            assert response.headers["cache-control"] == "public, max-age=300"
+            cache_control = response.headers["cache-control"]
+            assert cache_control == "no-store"
+            assert "public" not in cache_control
+            assert "max-age" not in cache_control
 
     def test_provider_not_implemented_returns_501(self, mock_settings):
         """A stub provider returns 501 cleanly rather than 500."""
@@ -723,3 +342,181 @@ class TestPrmAndResourceMetadataMatchByteForByte:
                 expected_resource_metadata
                 == f"{resource_field}/.well-known/oauth-protected-resource"
             )
+
+
+class TestPerServerOAuthProtectedResource:
+    """Tests for GET /.well-known/oauth-protected-resource/{server_path} (per-server PRM).
+
+    Serves a document ONLY for obo_exchange servers; advertises the SHARED
+    gateway resource (one Entra App ID URI for all obo servers). Non-obo or
+    unknown servers 404 so clients fall back to the global PRM.
+    """
+
+    def _settings(self, auth_provider="entra"):
+        s = MagicMock()
+        s.registry_url = "https://gw.example.com"
+        s.mcp_https_required = True
+        s.mcp_resource_documentation_url = None
+        s.mcp_advertised_scopes = ""
+        s.auth_provider = auth_provider
+        return s
+
+    def test_obo_server_returns_per_server_connection_url_resource(self, fake_provider):
+        s = self._settings()
+        obo_server = {"path": "/obo-echo", "egress_auth_mode": "obo_exchange"}
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=obo_server),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            # path-aware discovery form the client uses (with /mcp suffix)
+            resp = client.get("/.well-known/oauth-protected-resource/obo-echo/mcp")
+            assert resp.status_code == 200
+            data = resp.json()
+            # Per-server connection URL (the only Entra-matchable + client-accepted
+            # value): https://gw/<server>/mcp, no trailing slash.
+            assert data["resource"] == "https://gw.example.com/obo-echo/mcp"
+            assert data["scopes_supported"] == [
+                "https://gw.example.com/obo-echo/mcp/user_impersonation"
+            ]
+
+    def test_append_mcp_false_server_omits_mcp_suffix(self, fake_provider):
+        s = self._settings()
+        obo_server = {
+            "path": "/aws-knowledge",
+            "egress_auth_mode": "obo_exchange",
+            "append_mcp_path": False,
+        }
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=obo_server),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            resp = client.get("/.well-known/oauth-protected-resource/aws-knowledge")
+            assert resp.status_code == 200
+            assert resp.json()["resource"] == "https://gw.example.com/aws-knowledge"
+
+    def test_oauth_user_server_returns_per_server_resource_on_entra(self, fake_provider):
+        # 3LO (oauth_user) on ENTRA gets a per-server PRM: its ingress leg hits the
+        # same strict resource/scope alignment constraint as obo_exchange.
+        s = self._settings(auth_provider="entra")
+        oauth_user_server = {"path": "/github", "egress_auth_mode": "oauth_user"}
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=oauth_user_server),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            resp = client.get("/.well-known/oauth-protected-resource/github/mcp")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["resource"] == "https://gw.example.com/github/mcp"
+            assert data["scopes_supported"] == [
+                "https://gw.example.com/github/mcp/user_impersonation"
+            ]
+
+    def test_oauth_user_server_404s_on_keycloak(self, fake_provider):
+        # REGRESSION GUARD: Keycloak 3LO works today via the gateway-wide root PRM.
+        # oauth_user must NOT get a per-server PRM on Keycloak (only on Entra), or
+        # we'd change that working path. 404 here -> client falls back to the global
+        # PRM, exactly as on main.
+        s = self._settings(auth_provider="keycloak")
+        oauth_user_server = {"path": "/github", "egress_auth_mode": "oauth_user"}
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=oauth_user_server),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            resp = client.get("/.well-known/oauth-protected-resource/github/mcp")
+            assert resp.status_code == 404
+
+    def test_non_egress_server_404s(self, fake_provider):
+        # A server with no gateway-login egress mode falls back to the global PRM.
+        s = self._settings()
+        plain_server = {"path": "/plain", "egress_auth_mode": "none"}
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=plain_server),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            resp = client.get("/.well-known/oauth-protected-resource/plain/mcp")
+            assert resp.status_code == 404
+
+    def test_unknown_server_404s(self, fake_provider):
+        s = self._settings()
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch(
+                "registry.api.wellknown_routes.server_service.get_server_info",
+                new=AsyncMock(return_value=None),
+            ),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            resp = client.get("/.well-known/oauth-protected-resource/nope/mcp")
+            assert resp.status_code == 404
+
+    def test_path_normalization_strips_mcp_suffix(self, fake_provider):
+        """The handler must look up '/obo-echo', not '/obo-echo/mcp'."""
+        s = self._settings()
+        seen = {}
+
+        async def _capture(path, *a, **k):
+            seen["path"] = path
+            return {"path": "/obo-echo", "egress_auth_mode": "obo_exchange"}
+
+        with (
+            patch(
+                "registry.api.wellknown_routes._get_active_auth_provider",
+                return_value=fake_provider,
+            ),
+            patch("registry.auth.oauth_metadata.settings", s),
+            patch("registry.api.wellknown_routes.settings", s),
+            patch("registry.api.wellknown_routes.server_service.get_server_info", new=_capture),
+        ):
+            client = TestClient(_make_oauth_discovery_app(fake_provider))
+            client.get("/.well-known/oauth-protected-resource/obo-echo/mcp")
+            assert seen["path"] == "/obo-echo"

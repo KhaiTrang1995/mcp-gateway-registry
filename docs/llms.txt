@@ -48,7 +48,7 @@ Key features include: centralized server management, OAuth 2.0/3.0 authenticatio
 | `credentials-provider/` | **Credential Management** - OAuth token handling | `app.py` (credentials service) |
 | `agents/` | **A2A Agent Cards** - Agent-to-Agent protocol agent cards | JSON files for registered agents |
 | `api/` | **Legacy API** - Deprecated standalone API (use `registry/api/`) | - |
-| `release-notes/` | **Release History** - Version release notes | Markdown files per version |
+| `docs/release-notes/` | **Release History** - Version release notes | Markdown files per version |
 
 **Registry Application Structure (`registry/`):**
 
@@ -145,6 +145,14 @@ Key features include: centralized server management, OAuth 2.0/3.0 authenticatio
 - Dynamic tool discovery and invocation for autonomous workflows
 
 ## 3. Architecture Overview
+
+> **Start with the [Theory of the System](design/theory-of-the-system.md)** — it states the core
+> invariants and the reasoning behind them (single control plane for all asset types; the gateway
+> is a generic reverse proxy while the registry is the control plane; registry is
+> control-plane-not-data-path for A2A; DEPLOYMENT_MODE vs REGISTRY_MODE; three-surface config
+> parity; fail-closed admission vs fail-open notification; IdP-agnostic across a closed provider
+> factory; MCP spec compliance). The sections below detail the mechanisms; the theory doc explains
+> why they are shaped this way.
 
 ### 3.1. Core Architectural Decision: Reverse Proxy Pattern
 

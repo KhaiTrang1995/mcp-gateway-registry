@@ -255,6 +255,21 @@ session_cookie_secure = true
 # Default: Empty (cookie scoped to exact host only - safest option)
 session_cookie_domain = ""
 
+# Number of trusted reverse-proxy hops in front of the app. The audit client IP
+# is taken from the Nth-from-the-right X-Forwarded-For entry (never the
+# client-controlled left-most one). On ECS behind an ALB (+ optional CloudFront),
+# raise this to match the number of trusted proxies. Default 1.
+# trusted_proxy_hops = 2
+
+# ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+# when building OAuth external URLs. Your primary domain is ALREADY covered — the
+# allowlist always includes the registry domain — so leave this empty for a normal
+# single-domain deployment. Set it only if the app is ALSO reached at a hostname
+# that differs from the registry domain: most commonly an ECS deployment fronted by
+# BOTH a custom domain and the CloudFront domain (REGISTRY_URL names only one, so
+# list the other here). A Host not on the allowlist falls back to the configured host.
+# trusted_external_hosts = "dxxxx.cloudfront.net"
+
 # Control whether OAuth provider tokens are stored in session cookies
 # ============================================================================
 # EMBEDDINGS CONFIGURATION
@@ -869,6 +884,17 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # If not set, uses the default Org Authorization Server
 # okta_auth_server_id = "your-auth-server-id"
 
+# Okta M2M audience allowlist (optional). Comma/space-separated list of "aud"
+# values accepted on M2M (client-credentials) access tokens (custom auth servers
+# mint the API identifier, e.g. api://ai-registry, as the audience). Leave unset
+# to accept only the configured client ids (fail closed).
+# okta_m2m_allowed_audiences = "api://ai-registry"
+
+# Okta M2M client -> groups map for RBAC sync (optional). JSON object mapping
+# each M2M client_id to the groups it should receive. A client id not listed
+# here is synced with NO groups (fail closed).
+# okta_m2m_client_groups = "{\"0oaEXAMPLECLIENTID\":[\"public-mcp-users\"]}"
+
 # ============================================================================
 # AUTH0 CONFIGURATION (Alternative to Keycloak)
 # ============================================================================
@@ -908,6 +934,11 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 
 # Auth0 M2M Client Secret (REQUIRED for IAM Management)
 # auth0_m2m_client_secret = "your-m2m-client-secret"
+
+# Auth0 M2M client -> groups map for RBAC sync (optional). JSON object mapping
+# each M2M client_id to the groups it should receive. A client id not listed
+# here is synced with NO groups (fail closed).
+# auth0_m2m_client_groups = "{\"abc123clientid\":[\"public-mcp-users\"]}"
 
 # Auth0 Management API Token (alternative to M2M credentials)
 # You can use a static Management API token instead of M2M client credentials
@@ -1144,6 +1175,9 @@ aws_registry_federation_enabled = true
 # pingfederate_m2m_client_secret    = ""
 # pingfederate_application_id_uri   = ""
 # pingfederate_groups_claim         = "groups"
+# Comma/space-separated allowlist of accepted M2M token audiences. Empty accepts
+# only the configured client ids / application id URI (fail closed).
+# pingfederate_m2m_allowed_audiences = ""
 
 # ---------------------------------------------------------------------------
 # Per-user egress credential vault (third-party OBO support). Off by default.
@@ -1155,6 +1189,11 @@ aws_registry_federation_enabled = true
 # egress_oauth_callback_base_url     = "https://mcpgateway.example.com"
 # egress_token_refresh_skew_seconds  = 300
 # egress_state_ttl_seconds           = 600
+# obo_exchange target_audience allowlist (whitespace-separated). When set, an obo
+# server may only use a listed audience; when empty a shape rule applies (api://
+# App ID URI / bare client-id only, no https host URLs or GUIDs), so shared
+# first-party APIs (Graph/ARM/Key Vault) are rejected at registration.
+# egress_obo_allowed_audiences       = "api://outlook-mcp-server api://calendar-mcp-server"
 # egress_registry_internal_url       = "http://registry:8080"
 # egress_secrets_manager_kms_key_id  = ""   # optional CMK; empty uses the AWS-managed key
 # egress_secrets_manager_path_prefix = "mcp/egress"

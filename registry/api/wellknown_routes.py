@@ -5,13 +5,12 @@ from fastapi.responses import JSONResponse
 
 from ..auth.oauth_metadata import (
     build_canonical_resource_url,
+    build_per_server_resource_url,
     build_resource_documentation_url,
     derive_supported_scopes,
     enforce_https,
 )
-from ..constants import HealthStatus
-from ..core.config import RegistryMode, settings
-from ..health.service import health_service
+from ..core.config import settings
 from ..repositories.factory import get_registry_card_repository
 from ..schemas.registry_card import RegistryCard, RegistryContact
 from ..services import ard_service
@@ -22,81 +21,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+# OAuth discovery metadata (RFC 8414 authorization-server and RFC 9728
+# protected-resource documents) points clients at the authorization server and
+# token endpoint. It must never be served from a shared/intermediary/CDN cache:
+# a poisoned cached copy would redirect every client to an attacker-controlled
+# authorization server for the cache lifetime. Force "no-store" so only the
+# origin ever answers these endpoints (no public/CDN caching, no revalidation
+# window).
 OAUTH_DISCOVERY_CACHE_HEADERS: dict[str, str] = {
-    "Cache-Control": "public, max-age=300",
+    "Cache-Control": "no-store",
     "Content-Type": "application/json",
 }
-
-
-@router.get("/mcp-servers")
-async def get_wellknown_mcp_servers(
-    request: Request, user_context: dict | None = None
-) -> JSONResponse:
-    """
-    Main endpoint handler for /.well-known/mcp-servers
-    Returns JSON with all discoverable MCP servers
-    """
-    # Step 1: Check if discovery is enabled
-    if not settings.enable_wellknown_discovery:
-        raise HTTPException(status_code=404, detail="Well-known discovery is disabled")
-
-    # Step 1.5: In skills-only mode, return empty server list
-    if settings.registry_mode == RegistryMode.SKILLS_ONLY:
-        response_data = {
-            "version": "1.0",
-            "servers": [],
-            "registry": {
-                "name": "Enterprise MCP Gateway (Skills Only)",
-                "description": "Skills-only registry mode - no MCP servers available",
-                "version": "1.0.0",
-                "contact": {
-                    "url": str(request.base_url).rstrip("/"),
-                    "support": "mcp-support@company.com",
-                },
-            },
-        }
-        headers = {
-            "Cache-Control": f"public, max-age={settings.wellknown_cache_ttl}",
-            "Content-Type": "application/json",
-        }
-        logger.info("Returning empty server list - skills-only mode")
-        return JSONResponse(content=response_data, headers=headers)
-
-    # Step 2: Get all servers from server_service
-    all_servers = await server_service.get_all_servers()
-
-    # Step 3: Filter based on discoverability and permissions
-    discoverable_servers = []
-    for server_path, server_info in all_servers.items():
-        # For now, include all enabled servers
-        # TODO: Add discoverability flag to server configs if needed
-        if server_info.get("is_enabled", False):
-            formatted_server = _format_server_discovery(server_info, request)
-            discoverable_servers.append(formatted_server)
-
-    # Step 4: Format response
-    response_data = {
-        "version": "1.0",
-        "servers": discoverable_servers,
-        "registry": {
-            "name": "Enterprise MCP Gateway",
-            "description": "Centralized MCP server registry for enterprise tools",
-            "version": "1.0.0",
-            "contact": {
-                "url": str(request.base_url).rstrip("/"),
-                "support": "mcp-support@company.com",
-            },
-        },
-    }
-
-    # Step 5: Return JSONResponse with cache headers
-    headers = {
-        "Cache-Control": f"public, max-age={settings.wellknown_cache_ttl}",
-        "Content-Type": "application/json",
-    }
-
-    logger.info(f"Returned {len(discoverable_servers)} servers for well-known discovery")
-    return JSONResponse(content=response_data, headers=headers)
 
 
 @router.get("/ai-catalog.json")
@@ -119,149 +54,6 @@ async def get_ai_catalog(
         "Content-Type": "application/json",
     }
     return JSONResponse(content=payload, headers=headers)
-
-
-def _format_server_discovery(server_info: dict, request: Request) -> dict:
-    """Format individual server for discovery response"""
-    server_path = server_info.get("path", "")
-    server_name = server_info.get("server_name", server_path)
-    description = server_info.get("description", "MCP Server")
-
-    # Generate dynamic URL based on request host and server config
-    server_url = _get_server_url(server_path, request, server_info)
-
-    # Get transport type from config
-    transport_type = _get_transport_type(server_info)
-
-    # Get authentication requirements
-    auth_info = _get_authentication_info(server_info)
-
-    # Get first 5 tools as preview
-    tools_preview = _get_tools_preview(server_info, max_tools=5)
-
-    # Get actual health status from health service
-    health_status = _get_normalized_health_status(server_path)
-
-    return {
-        "name": server_name,
-        "description": description,
-        "url": server_url,
-        "transport": transport_type,
-        "authentication": auth_info,
-        "capabilities": ["tools", "resources"],
-        "health_status": health_status,
-        "tools_preview": tools_preview,
-    }
-
-
-def _get_server_url(server_path: str, request: Request, server_info: dict = None) -> str:
-    """Generate full URL for MCP server based on request host and server config.
-
-    Priority:
-    1. If server_info has mcp_endpoint, use it as the full URL
-    2. Otherwise, construct URL from request host + server_path + /mcp
-    """
-    # Check if server has explicit mcp_endpoint configured
-    if server_info and server_info.get("mcp_endpoint"):
-        return server_info.get("mcp_endpoint")
-
-    # Get host from request headers
-    host = request.headers.get("host", "localhost:7860")
-
-    # Get protocol (http/https) from X-Forwarded-Proto or scheme
-    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
-
-    # Clean up server path (remove leading and trailing slashes)
-    clean_path = server_path.strip("/")
-
-    # Return formatted URL with default /mcp suffix
-    return f"{proto}://{host}/{clean_path}/mcp"
-
-
-def _get_transport_type(server_config: dict) -> str:
-    """Determine transport type (sse or streamable-http)"""
-    # Check server configuration for transport setting
-    # Default to "streamable-http" if not specified
-    return server_config.get("transport", "streamable-http")
-
-
-def _get_authentication_info(server_info: dict) -> dict:
-    """Extract authentication requirements for server.
-
-    Reads auth_scheme (the new field). Legacy auth_type is migrated to
-    auth_scheme at read time by the service layer, so we only need to
-    check auth_scheme here.
-    """
-    auth_scheme = server_info.get("auth_scheme", "none")
-    auth_provider = server_info.get("auth_provider", "default")
-
-    if auth_scheme == "bearer":
-        return {
-            "type": "oauth2",
-            "required": True,
-            "authorization_url": "/auth/oauth/authorize",
-            "provider": auth_provider,
-            "scopes": ["mcp:read", f"{auth_provider}:read"],
-        }
-    elif auth_scheme == "api_key":
-        header_name = server_info.get("auth_header_name", "X-API-Key")
-        return {"type": "api-key", "required": True, "header": header_name}
-    else:
-        return {"type": "none", "required": False}
-
-
-def _get_tools_preview(server_info: dict, max_tools: int = 5) -> list:
-    """Get limited list of tools for discovery preview"""
-    # Extract tools from server_info
-    tools = server_info.get("tool_list", [])
-
-    # Return first N tools with name and description
-    preview_tools = []
-    for tool in tools[:max_tools]:
-        if isinstance(tool, dict):
-            # Try to get description from parsed_description.main first, then fall back to description field
-            description = tool.get("parsed_description", {}).get(
-                "main", tool.get("description", "No description available")
-            )
-            preview_tools.append({"name": tool.get("name", "unknown"), "description": description})
-        elif isinstance(tool, str):
-            # Handle case where tools are just strings
-            preview_tools.append({"name": tool, "description": "No description available"})
-
-    return preview_tools
-
-
-def _get_normalized_health_status(server_path: str) -> str:
-    """
-    Get normalized health status for a server from health service.
-
-    Normalizes detailed status strings (e.g., "unhealthy: timeout") to simple
-    values ("unhealthy") for cleaner client consumption in discovery responses.
-
-    Args:
-        server_path: The server path to get health status for
-
-    Returns:
-        Normalized health status string: "healthy", "unhealthy", "disabled", or "unknown"
-    """
-    # Get raw status from health service
-    raw_status = health_service.server_health_status.get(server_path, HealthStatus.UNKNOWN)
-
-    # Normalize status to clean values for client consumption
-    if isinstance(raw_status, str):
-        status_lower = raw_status.lower()
-        if "unhealthy" in status_lower or "error" in status_lower:
-            return "unhealthy"
-        elif "healthy" in status_lower:
-            return "healthy"
-        elif "disabled" in status_lower:
-            return "disabled"
-        elif "checking" in status_lower:
-            return "unknown"
-        else:
-            return raw_status
-
-    return str(raw_status) if raw_status else "unknown"
 
 
 async def _auto_initialize_registry_card():
@@ -400,6 +192,30 @@ def _get_active_auth_provider():
     return get_auth_provider()
 
 
+def server_needs_per_server_prm(egress_auth_mode: str | None) -> bool:
+    """Whether a server should advertise a per-server RFC 9728 PRM (vs the global one).
+
+    The per-server PRM exists to satisfy Entra's strict resource/scope alignment
+    (the ingress login must target a path-qualified App ID URI, not the bare
+    origin). It applies to:
+
+    - ``obo_exchange`` on any provider (the same-IdP exchange always logs the user
+      in at the gateway against a per-server resource), and
+    - ``oauth_user`` ONLY on Entra. The 3LO vault's ingress leg is a gateway login
+      too, but lenient IdPs (Keycloak/Cognito) accept the gateway-wide root PRM's
+      bare origin + OIDC scopes, which is how Keycloak 3LO works today. We must NOT
+      route those through the per-server PRM, or we'd change that working path (and
+      force an exact connection-URL match they don't need). Only Entra requires it.
+
+    Everything else uses the gateway-wide PRM (unchanged behavior).
+    """
+    if egress_auth_mode == "obo_exchange":
+        return True
+    if egress_auth_mode == "oauth_user":
+        return (settings.auth_provider or "").lower() == "entra"
+    return False
+
+
 @router.get("/oauth-protected-resource")
 async def get_oauth_protected_resource() -> JSONResponse:
     """
@@ -425,7 +241,8 @@ async def get_oauth_protected_resource() -> JSONResponse:
         logger.exception("Failed to initialize auth provider for PRM document")
         raise HTTPException(
             status_code=500,
-            detail=f"Auth provider not configured: {exc}",
+            # Public endpoint: do not reflect internal exception detail; logged above.
+            detail="Auth provider not configured",
         ) from exc
 
     try:
@@ -445,6 +262,91 @@ async def get_oauth_protected_resource() -> JSONResponse:
         ) from exc
     except Exception as exc:
         logger.exception("Failed to build PRM document")
+        raise HTTPException(
+            status_code=502,
+            detail="Could not build Protected Resource Metadata",
+        ) from exc
+
+    return JSONResponse(content=document, headers=OAUTH_DISCOVERY_CACHE_HEADERS)
+
+
+def _normalize_prm_server_path(server_path: str) -> str:
+    """Reduce a path-aware PRM suffix to the registered server path.
+
+    MCP clients doing RFC 9728 path-aware discovery request
+    ``/.well-known/oauth-protected-resource/<server>/mcp`` (the connection URL's
+    path). Strip a trailing ``/mcp`` transport segment and normalize to the
+    leading-slash registered path (e.g. ``obo-echo/mcp`` -> ``/obo-echo``).
+    """
+    p = "/" + server_path.strip("/")
+    if p.endswith("/mcp"):
+        p = p[: -len("/mcp")]
+    return p or "/"
+
+
+@router.get("/oauth-protected-resource/{server_path:path}")
+async def get_oauth_protected_resource_for_server(
+    server_path: str,
+) -> JSONResponse:
+    """Per-server RFC 9728 PRM for egress servers (path-aware discovery).
+
+    Spec-compliant MCP clients (Claude Code, etc.) try the path-suffixed
+    well-known URL first, derived from the per-server connection URL. We serve a
+    document only for servers that need it (see ``server_needs_per_server_prm``):
+    ``obo_exchange`` on any provider, and ``oauth_user`` on Entra only. Everything
+    else -- including Keycloak/Cognito 3LO, which works with the gateway-wide root
+    PRM -- 404s here so the client falls back to the global PRM (unchanged
+    behavior).
+
+    The advertised ``resource`` is the **per-server connection URL** (e.g.
+    ``https://gw/github/mcp``). This is the ONLY value that satisfies all three
+    constraints simultaneously:
+      - RFC 9728 §3.3: the client only accepts a PRM ``resource`` equal to the
+        connection URL it is accessing (or the origin); a made-up shared path is
+        rejected.
+      - RFC 8707 canonicalization: a bare origin gets a trailing ``/`` on the
+        wire, which Entra App ID URIs cannot match -- a path-qualified per-server
+        URL is sent verbatim.
+      - Entra: the sent ``resource`` must equal a registered App ID URI exactly.
+    The trade-off: each such server's per-server URL must be an App ID URI on the
+    gateway app (operator maintains the ``identifierUris`` list; see
+    GET /api/egress/obo-identifier-uris for the exact list to register). The
+    registry side is fully dynamic -- this is derived from the server entry, no
+    per-server env config. Lenient IdPs (Keycloak/Cognito) do not hit these
+    constraints; this per-server PRM is what makes Entra ingress login work.
+    """
+    normalized = _normalize_prm_server_path(server_path)
+    info = await server_service.get_server_info(normalized)
+    if not info or not server_needs_per_server_prm(info.get("egress_auth_mode")):
+        # No per-server PRM for this server -> client falls back to the global PRM.
+        raise HTTPException(status_code=404, detail="no per-server resource metadata")
+
+    # Per-server connection-URL resource: the only value that satisfies the
+    # client's RFC 9728 §3.3 match, RFC 8707 canonicalization, and Entra's exact
+    # App ID URI match simultaneously (see the docstring).
+    append_mcp = info.get("append_mcp_path") is not False
+    resource = build_per_server_resource_url(
+        settings.registry_url, normalized, append_mcp=append_mcp
+    )
+    scopes_supported = [f"{resource}/user_impersonation"]
+    enforce_https(resource, https_required=settings.mcp_https_required)
+
+    try:
+        provider = _get_active_auth_provider()
+        document = provider.protected_resource_metadata(
+            resource=resource,
+            scopes_supported=scopes_supported,
+            resource_documentation=build_resource_documentation_url(),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail="OAuth discovery not implemented for the configured auth provider",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to build per-server PRM document")
         raise HTTPException(
             status_code=502,
             detail=f"Could not build Protected Resource Metadata: {exc}",
@@ -470,7 +372,7 @@ async def get_oauth_authorization_server() -> JSONResponse:
         logger.exception("Failed to initialize auth provider for AS metadata")
         raise HTTPException(
             status_code=500,
-            detail=f"Auth provider not configured: {exc}",
+            detail="Auth provider not configured",
         ) from exc
 
     try:
@@ -487,7 +389,7 @@ async def get_oauth_authorization_server() -> JSONResponse:
         logger.exception("Failed to fetch authorization server metadata")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not fetch authorization server metadata: {exc}",
+            detail="Could not fetch authorization server metadata",
         ) from exc
 
     return JSONResponse(content=document, headers=OAUTH_DISCOVERY_CACHE_HEADERS)

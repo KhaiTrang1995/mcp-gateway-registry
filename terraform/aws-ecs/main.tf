@@ -118,10 +118,13 @@ module "mcp_gateway" {
   keycloak_admin_password = var.keycloak_admin_password
 
   # Session cookie security configuration
-  session_cookie_secure = var.session_cookie_secure
-  session_cookie_domain = var.session_cookie_domain
-  cors_allowed_origins  = var.cors_allowed_origins
-  bind_host             = var.bind_host
+  session_cookie_secure  = var.session_cookie_secure
+  session_cookie_domain  = var.session_cookie_domain
+  cors_allowed_origins   = var.cors_allowed_origins
+  trusted_proxy_hops     = var.trusted_proxy_hops
+  trusted_external_hosts = var.trusted_external_hosts
+  trusted_real_ip_cidrs  = var.trusted_real_ip_cidrs
+  bind_host              = var.bind_host
 
   # DocumentDB configuration
   storage_backend = var.storage_backend
@@ -167,14 +170,16 @@ module "mcp_gateway" {
   cognito_domain        = var.cognito_domain
 
   # Okta configuration
-  okta_enabled           = var.okta_enabled
-  okta_domain            = var.okta_domain
-  okta_client_id         = var.okta_client_id
-  okta_client_secret     = var.okta_client_secret
-  okta_m2m_client_id     = var.okta_m2m_client_id
-  okta_m2m_client_secret = var.okta_m2m_client_secret
-  okta_api_token         = var.okta_api_token
-  okta_auth_server_id    = var.okta_auth_server_id
+  okta_enabled               = var.okta_enabled
+  okta_domain                = var.okta_domain
+  okta_client_id             = var.okta_client_id
+  okta_client_secret         = var.okta_client_secret
+  okta_m2m_client_id         = var.okta_m2m_client_id
+  okta_m2m_client_secret     = var.okta_m2m_client_secret
+  okta_api_token             = var.okta_api_token
+  okta_auth_server_id        = var.okta_auth_server_id
+  okta_m2m_allowed_audiences = var.okta_m2m_allowed_audiences
+  okta_m2m_client_groups     = var.okta_m2m_client_groups
 
   # Auth0 configuration
   auth0_enabled              = var.auth0_enabled
@@ -185,18 +190,20 @@ module "mcp_gateway" {
   auth0_groups_claim         = var.auth0_groups_claim
   auth0_m2m_client_id        = var.auth0_m2m_client_id
   auth0_m2m_client_secret    = var.auth0_m2m_client_secret
+  auth0_m2m_client_groups    = var.auth0_m2m_client_groups
   auth0_management_api_token = var.auth0_management_api_token
 
   # PingFederate configuration
-  pingfederate_enabled            = var.pingfederate_enabled
-  pingfederate_base_url           = var.pingfederate_base_url
-  pingfederate_external_url       = var.pingfederate_external_url
-  pingfederate_client_id          = var.pingfederate_client_id
-  pingfederate_client_secret      = var.pingfederate_client_secret
-  pingfederate_m2m_client_id      = var.pingfederate_m2m_client_id
-  pingfederate_m2m_client_secret  = var.pingfederate_m2m_client_secret
-  pingfederate_application_id_uri = var.pingfederate_application_id_uri
-  pingfederate_groups_claim       = var.pingfederate_groups_claim
+  pingfederate_enabled               = var.pingfederate_enabled
+  pingfederate_base_url              = var.pingfederate_base_url
+  pingfederate_external_url          = var.pingfederate_external_url
+  pingfederate_client_id             = var.pingfederate_client_id
+  pingfederate_client_secret         = var.pingfederate_client_secret
+  pingfederate_m2m_client_id         = var.pingfederate_m2m_client_id
+  pingfederate_m2m_client_secret     = var.pingfederate_m2m_client_secret
+  pingfederate_application_id_uri    = var.pingfederate_application_id_uri
+  pingfederate_groups_claim          = var.pingfederate_groups_claim
+  pingfederate_m2m_allowed_audiences = var.pingfederate_m2m_allowed_audiences
 
   # PingFederate Admin API (registry only)
   pf_admin_url  = var.pf_admin_url
@@ -364,6 +371,7 @@ module "mcp_gateway" {
   egress_oauth_callback_base_url     = var.egress_oauth_callback_base_url
   egress_token_refresh_skew_seconds  = var.egress_token_refresh_skew_seconds
   egress_state_ttl_seconds           = var.egress_state_ttl_seconds
+  egress_obo_allowed_audiences       = var.egress_obo_allowed_audiences
   egress_registry_internal_url       = var.egress_registry_internal_url
   egress_nginx_marker_secret         = var.egress_nginx_marker_secret
   egress_secrets_manager_kms_key_id  = var.egress_secrets_manager_kms_key_id

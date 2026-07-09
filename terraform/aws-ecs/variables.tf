@@ -146,6 +146,11 @@ variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
+
+  validation {
+    condition     = !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+  }
 }
 
 variable "keycloak_database_min_acu" {
@@ -175,19 +180,19 @@ variable "keycloak_log_level" {
 variable "registry_image_uri" {
   description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/registry:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.26.0"
 }
 
 variable "auth_server_image_uri" {
   description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.26.0"
 }
 
 variable "mcpgw_image_uri" {
   description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.26.0"
 }
 
 variable "keycloak_image_uri" {
@@ -361,6 +366,24 @@ variable "session_cookie_domain" {
   default     = ""
 }
 
+variable "trusted_proxy_hops" {
+  description = "Number of trusted reverse-proxy hops in front of the app. The audit client IP is taken from the Nth-from-the-right X-Forwarded-For entry, never the client-controlled left-most one. Default 1 (the bundled nginx). Raise it when additional trusted proxies (e.g. ALB + CloudFront) sit in front."
+  type        = number
+  default     = 1
+}
+
+variable "trusted_external_hosts" {
+  description = "ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header when building OAuth external URLs. The primary domain is already covered automatically (the allowlist always includes the registry URL host), so leave empty for a single-domain deployment. Only list extra hostnames the app is also reached at but that differ from the registry URL host (e.g. a CloudFront domain alongside a custom domain). A Host not on the allowlist falls back to the configured host (prevents host-header injection / open redirect)."
+  type        = string
+  default     = ""
+}
+
+variable "trusted_real_ip_cidrs" {
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  type        = string
+  default     = ""
+}
+
 variable "bind_host" {
   description = "Network bind address for registry and gateway services. Default '0.0.0.0' (IPv4) works on all hosts. Set to '::' only for IPv6-only deployments (requires net.ipv6.bindv6only=0 on the host)."
   type        = string
@@ -383,6 +406,11 @@ variable "documentdb_admin_password" {
   type        = string
   sensitive   = true
   default     = ""
+
+  validation {
+    condition     = var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+  }
 }
 
 variable "documentdb_shard_capacity" {
@@ -717,6 +745,18 @@ variable "okta_auth_server_id" {
   default     = ""
 }
 
+variable "okta_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted Okta M2M token audiences (e.g. api://ai-registry). Empty accepts only the configured client ids (fail closed)."
+  type        = string
+  default     = ""
+}
+
+variable "okta_m2m_client_groups" {
+  description = "JSON object mapping Okta M2M client_id to a list of group names for RBAC sync, e.g. {\"0oaEXAMPLECLIENTID\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # AUTH0 CONFIGURATION
 # =============================================================================
@@ -769,6 +809,12 @@ variable "auth0_m2m_client_secret" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "auth0_m2m_client_groups" {
+  description = "JSON object mapping Auth0 M2M client_id to a list of group names for RBAC sync, e.g. {\"abc123clientid\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
 }
 
 variable "auth0_management_api_token" {
@@ -836,6 +882,12 @@ variable "pingfederate_groups_claim" {
   description = "JWT claim name carrying group memberships (default: groups)"
   type        = string
   default     = "groups"
+}
+
+variable "pingfederate_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted PingFederate M2M token audiences. Empty accepts only the configured client ids / application id URI (fail closed)."
+  type        = string
+  default     = ""
 }
 
 # =============================================================================
@@ -1790,6 +1842,18 @@ variable "egress_state_ttl_seconds" {
   description = "TTL for the AEAD-encrypted egress OAuth state blob."
   type        = number
   default     = 600
+}
+
+variable "egress_obo_allowed_audiences" {
+  description = <<-EOT
+    Optional allowlist (whitespace-separated) for obo_exchange target_audience
+    values. When set, an obo server may only use a listed audience (authoritative
+    positive control). When empty, a shape rule applies: the target must be an
+    internal app audience (api:// App ID URI or bare client-id/GUID), never an
+    https host URL, so shared first-party APIs (Graph/ARM/Key Vault) are rejected.
+  EOT
+  type        = string
+  default     = ""
 }
 
 variable "egress_registry_internal_url" {

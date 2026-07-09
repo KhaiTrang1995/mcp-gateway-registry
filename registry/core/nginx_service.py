@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -37,6 +38,16 @@ DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS: int = 30
 
 
+# Minimum sane prefix length for a TRUSTED_REAL_IP_CIDRS entry. A prefix shorter
+# than this (e.g. 0.0.0.0/1, 10.0.0.0/4) trusts an implausibly large peer range
+# for a proxy subnet and edges toward the catch-all footgun, so we warn (but still
+# honour it — unlike a /0, which is rejected outright). IPv4-scale; IPv6 prefixes
+# are compared on their IPv4-equivalent host-bit width so a normal /48–/64 proxy
+# subnet does not trip the warning.
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V4: int = 8
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V6: int = 32
+
+
 def _resolve_mcp_proxy_read_timeout_seconds() -> int:
     """Resolve nginx's proxy_read_timeout (seconds) for MCP location blocks.
 
@@ -57,11 +68,107 @@ def _resolve_mcp_proxy_read_timeout_seconds() -> int:
         if value is not None:
             upstream = max(float(value), minimum_upstream)
     except (TypeError, ValueError) as e:
-        logger.debug(
-            f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}"
-        )
+        logger.debug(f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}")
         upstream = default_upstream
     return int(math.ceil(upstream)) + MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS
+
+
+def _render_real_ip_config() -> str:
+    """Render nginx realip directives from the ``TRUSTED_REAL_IP_CIDRS`` env var.
+
+    ``TRUSTED_REAL_IP_CIDRS`` is a comma-separated list of CIDRs (or bare IPs)
+    identifying the trusted proxy hop(s) directly in front of nginx — typically
+    the VPC/subnet CIDR an ALB's ENI lives in. When set, nginx recovers the real
+    client IP from ``X-Forwarded-For`` for connections whose immediate peer falls
+    in one of these ranges, so the audited client IP is the end user rather than
+    the load balancer's internal address.
+
+    Fails closed on bad input: each entry is validated as a well-formed network,
+    and any malformed entry is dropped with a warning rather than emitting an
+    invalid directive that would break nginx config generation. When the variable
+    is unset or yields no valid entries, an EMPTY string is returned — no realip
+    directives are emitted, which is the correct behaviour for edge deployments
+    (compose / single host) where nginx's peer already IS the client.
+
+    ``real_ip_recursive`` walks the forwarded chain right-to-left skipping the
+    trusted CIDRs, stopping at the first untrusted address (the real client). It
+    is emitted as ``on`` ONLY when more than one trusted CIDR is configured (a
+    stacked-proxy topology, e.g. CloudFront in front of an ALB). For the common
+    single-hop case (one ALB) recursion is left off: nginx takes the single
+    right-most entry, which is what the one trusted proxy appended, and a spoofed
+    left-most entry can never win. Recursion + an over-broad trusted range would
+    let a client whose own source falls inside that range inject a left-most
+    entry, so we don't enable it unless the topology actually needs it.
+
+    Catch-all ranges (``0.0.0.0/0`` / ``::/0``) are rejected: they would make
+    nginx trust EVERY peer and take the spoofable left-most XFF entry — a
+    fail-open misconfiguration — so they are dropped with a warning like any other
+    invalid entry. Narrow the trust to the load balancer's specific subnet(s).
+
+    Returns:
+        The nginx directive block (``set_real_ip_from`` lines + ``real_ip_header``
+        + optional ``real_ip_recursive on``), or an empty string when no valid
+        CIDRs are configured.
+    """
+    raw = os.environ.get("TRUSTED_REAL_IP_CIDRS", "").strip()
+    if not raw:
+        return ""
+
+    valid_cidrs: list[str] = []
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            # strict=False so a host address (e.g. 10.1.3.39) is accepted as a
+            # /32 rather than rejected for having host bits set.
+            network = ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            logger.warning("Ignoring malformed entry in TRUSTED_REAL_IP_CIDRS: %r", candidate)
+            continue
+        # Reject a catch-all range: trusting every peer defeats the guard and
+        # makes the spoofable left-most XFF entry win (fail-open). prefixlen == 0
+        # is 0.0.0.0/0 or ::/0.
+        if network.prefixlen == 0:
+            logger.warning(
+                "Refusing catch-all range %r in TRUSTED_REAL_IP_CIDRS "
+                "(would trust every peer); narrow it to the proxy's subnet",
+                candidate,
+            )
+            continue
+        # Warn (but honour) an implausibly broad, non-catch-all range. A proxy
+        # subnet is realistically a /16-/28 (v4) or /48-/64 (v6); anything much
+        # broader trusts far more peers than a real LB tier occupies and edges
+        # toward the same spoofing risk as a catch-all.
+        floor = (
+            MIN_TRUSTED_REAL_IP_PREFIXLEN_V6
+            if network.version == 6
+            else MIN_TRUSTED_REAL_IP_PREFIXLEN_V4
+        )
+        if network.prefixlen < floor:
+            logger.warning(
+                "TRUSTED_REAL_IP_CIDRS entry %r is very broad (/%d); trusting this "
+                "many peers is risky — narrow it to the proxy's actual subnet",
+                candidate,
+                network.prefixlen,
+            )
+        valid_cidrs.append(str(network))
+
+    if not valid_cidrs:
+        logger.warning(
+            "TRUSTED_REAL_IP_CIDRS was set but contained no valid CIDRs; "
+            "not emitting realip directives"
+        )
+        return ""
+
+    logger.info("Configuring nginx realip trust for CIDRs: %s", ", ".join(valid_cidrs))
+    lines = [f"set_real_ip_from {cidr};" for cidr in valid_cidrs]
+    lines.append("real_ip_header X-Forwarded-For;")
+    # Only recurse for stacked proxies (>1 trusted hop). A single trusted CIDR
+    # needs no recursion — the right-most entry is the one that proxy appended.
+    if len(valid_cidrs) > 1:
+        lines.append("real_ip_recursive on;")
+    return "\n".join(lines)
 
 
 def _atomic_write_text(
@@ -935,6 +1042,11 @@ class NginxConfigService:
             config_content = config_content.replace("{{AUTH_SERVER_HOST}}", auth_host)
             config_content = config_content.replace("{{AUTH_SERVER_PORT}}", auth_port)
 
+            # Real client-IP recovery (TRUSTED_REAL_IP_CIDRS). Empty by default so
+            # edge deployments emit nothing; when trusted proxy CIDRs are set, the
+            # audited client IP becomes the end user instead of the load balancer.
+            config_content = config_content.replace("{{REAL_IP_CONFIG}}", _render_real_ip_config())
+
             # Generate registry-only block (503 response for MCP proxy requests)
             registry_only_block = self._generate_registry_only_block()
             config_content = config_content.replace("{{REGISTRY_ONLY_BLOCK}}", registry_only_block)
@@ -1299,7 +1411,15 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
     ) -> str:
         """Sanitize a string for safe use inside an nginx set directive's double quotes.
 
-        Escapes double quotes and backslashes, and strips newlines.
+        Escapes double quotes and backslashes, strips newlines, and neutralizes
+        the ``$`` sigil. nginx has no backslash escape for ``$`` inside a quoted
+        string -- it always begins a variable reference -- so a stray ``$`` cannot
+        be safely represented and is stripped (like newlines). None of this
+        helper's legitimate inputs (backend URLs, hosts, paths, ids) contain a
+        live nginx variable, and a ``$`` reaching here is already malformed; a
+        rendered ``$undefined`` would otherwise fail ``nginx -t`` and block the
+        reload. It cannot break out to a new directive (that needs ``"`` + ``;``,
+        both handled), so this is defense-in-depth, not the primary guard.
 
         Args:
             value: Raw string (e.g., server_id from URL path)
@@ -1310,6 +1430,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         sanitized = re.sub(r"[\r\n]+", " ", value)
         sanitized = sanitized.replace("\\", "\\\\")
         sanitized = sanitized.replace('"', '\\"')
+        sanitized = sanitized.replace("$", "")
         return sanitized
 
     async def _generate_virtual_server_blocks(self) -> str:
@@ -1485,7 +1606,18 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
         proxy_set_header Host {safe_upstream_host};
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY: this location proxies directly to a registrant-controlled
+        # (not fully trusted) MCP backend. Never relay the caller's registry
+        # credential here -- clearing Authorization AND Cookie prevents a
+        # malicious registered upstream from capturing and replaying the
+        # caller's gateway bearer token or registry session cookie against the
+        # registry API. This location is reached via a Lua subrequest that
+        # inherits the parent request's headers, so Cookie must be explicitly
+        # cleared or the user's session cookie would be forwarded verbatim.
+        # The gateway authenticates the upstream via its own mechanism, not by
+        # forwarding the caller's credential.
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
         proxy_buffering off;
         proxy_set_header Accept "application/json, text/event-stream";
         proxy_set_header Content-Type $content_type;
@@ -1673,6 +1805,41 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         # `set $backend_url "..."` context.
         safe_proxy_pass_url = self._sanitize_for_nginx_set(proxy_pass_url)
 
+        # For servers that need a per-server PRM (obo_exchange on any provider,
+        # oauth_user on Entra only -- see server_needs_per_server_prm), the 401
+        # WWW-Authenticate must point MCP clients at the PER-SERVER PRM (so the
+        # client discovers the per-server resource that matches its connection URL
+        # and the Entra App ID URI, not the bare-origin gateway PRM Entra rejects).
+        # Override the default global $mcp_resource_metadata in this location only.
+        # Keycloak/Cognito 3LO keeps the global PRM (unchanged working behavior).
+        # RFC 9728 clients follow the resource_metadata from the 401 header in
+        # preference to guessing.
+        from registry.api.wellknown_routes import server_needs_per_server_prm
+
+        obo_resource_metadata = ""
+        if server_info and server_needs_per_server_prm(server_info.get("egress_auth_mode")):
+            from registry.auth.oauth_metadata import build_per_server_prm_url
+
+            try:
+                append_mcp = server_info.get("append_mcp_path") is not False
+                per_server_prm = build_per_server_prm_url(
+                    settings.registry_url, path, append_mcp=append_mcp
+                )
+                # Defense-in-depth: the PRM URL embeds the registrant-supplied
+                # server path (build_per_server_prm_url does a raw concat, no
+                # escaping), so sanitize before it lands in the quoted
+                # `set $mcp_resource_metadata "..."` directive -- matching the
+                # escaping applied to every other interpolated value in this file
+                # (e.g. $backend_url above). Without it, a path containing a
+                # double-quote + semicolon could break out of the string and
+                # inject nginx directives into the obo location block.
+                safe_per_server_prm = self._sanitize_for_nginx_set(per_server_prm)
+                obo_resource_metadata = (
+                    f'\n        set $mcp_resource_metadata "{safe_per_server_prm}";'
+                )
+            except ValueError:
+                obo_resource_metadata = ""
+
         # Extract hostname from proxy_pass_url for external services
         parsed_url = urlparse(proxy_pass_url)
         upstream_host = parsed_url.netloc
@@ -1814,7 +1981,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Handle auth errors
         error_page 401 = @auth_error;
-        error_page 403 = @forbidden_error;{version_headers}"""
+        error_page 403 = @forbidden_error;{obo_resource_metadata}{version_headers}"""
 
         # Transport-specific settings
         if transport_type == "sse":

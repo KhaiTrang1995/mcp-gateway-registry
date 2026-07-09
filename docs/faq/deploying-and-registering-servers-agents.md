@@ -92,7 +92,7 @@ You can also call the REST API directly. See the [OpenAPI specification](../../a
 
 ### Example JSON files
 
-See the [cli/examples/](../../cli/examples/) directory for complete registration examples:
+See the [cli/examples/](../../cli/examples) directory for complete registration examples:
 
 **MCP Servers:**
 - `currenttime.json` -- minimal server example

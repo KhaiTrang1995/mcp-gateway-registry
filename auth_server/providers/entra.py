@@ -193,6 +193,15 @@ class EntraIdProvider(AuthProvider):
             app_id_uri = os.environ.get("ENTRA_APPLICATION_ID_URI")
             if app_id_uri:
                 accepted_audiences.append(app_id_uri.rstrip("/"))
+            # Per-server OBO resource audiences (RFC 8707). The OBO ingress token
+            # is audienced to the per-server resource URL (e.g.
+            # https://gw/<server>/mcp); the caller passes the expected value(s)
+            # for the server being accessed so we accept it without a static env
+            # list. Still a closed allowlist -- only caller-provided, registry-
+            # derived audiences are added, never a wildcard.
+            for extra in kwargs.get("extra_audiences") or []:
+                if extra:
+                    accepted_audiences.append(extra.rstrip("/"))
             claims = jwt.decode(
                 token,
                 signing_key,
@@ -213,7 +222,8 @@ class EntraIdProvider(AuthProvider):
             if not groups and "roles" in claims:
                 # M2M token - use roles claim as groups
                 groups = claims.get("roles", [])
-                logger.debug(f"M2M token detected, using roles claim as groups: {groups}")
+                # Count only: role/group names reveal the internal authz structure.
+                logger.debug("M2M token detected, using %d roles as groups", len(groups))
 
             return {
                 "valid": True,

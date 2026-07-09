@@ -3,7 +3,7 @@ global:
   image:
     # Container registry (host + optional namespace). Shared default across subcharts.
     registry: public.ecr.aws/p3v1o3c6
-    tag: 1.25.0
+    tag: 1.26.0
     pullPolicy: IfNotPresent
 # Per-service image configuration
 # Any field left empty falls back to the corresponding global.image.* value.
@@ -17,9 +17,8 @@ image:
 # attached to a stable identity. Set create=false + name to bring your own.
 serviceAccount:
   create: true
-  name: ""  # defaults to app.name ("auth-server") when empty
+  name: "" # defaults to app.name ("auth-server") when empty
   annotations: {}
-
 app:
   name: auth-server
   replicas: 1
@@ -37,6 +36,19 @@ app:
   # to scope the cookie tighter, or to a different parent
   # (".team.example.com") if this stack lives under a subdomain.
   sessionCookieDomain: ""
+  # Number of trusted reverse-proxy hops in front of the app. The audit client IP
+  # is taken from the Nth-from-the-right X-Forwarded-For entry, never the
+  # client-controlled left-most one. Default 1 (the bundled nginx). Raise it when
+  # additional trusted proxies (e.g. ALB + CloudFront) sit in front.
+  trustedProxyHops: 1
+  # ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+  # when building OAuth external URLs. Your primary domain is ALREADY covered — the
+  # allowlist always includes the host from the registry URL — so leave this empty
+  # for a normal single-domain deployment. Only list EXTRA hostnames the app is
+  # also reached at but that differ from the registry URL host (e.g. a CloudFront
+  # domain alongside a custom domain). A Host not on the allowlist falls back to
+  # the configured host (prevents host-header injection / open redirect).
+  trustedExternalHosts: ""
   # Internal JWT configuration for service-to-service tokens
   jwtIssuer: "mcp-auth-server" # Issuer claim for internal JWT tokens
   jwtAudience: "mcp-registry" # Audience claim for internal JWT tokens
@@ -105,6 +117,8 @@ okta:
   apiTokenExistingSecret: "" # If set, read OKTA_API_TOKEN from this K8s secret
   apiTokenExistingSecretKey: "OKTA_API_TOKEN"
   authServerId: "" # Optional: uses default Org Authorization Server if not set
+  m2mAllowedAudiences: "" # Optional: comma/space-separated M2M audience allowlist; empty = only client ids accepted (fail closed)
+  m2mClientGroups: "" # Optional: JSON client_id->[groups] map for M2M RBAC sync; empty = no groups (fail closed)
 # Auth0 integration (used when authProvider.type = "auth0")
 auth0:
   domain: "" # e.g., your-tenant.us.auth0.com
@@ -118,6 +132,7 @@ auth0:
   m2mClientSecret: "" # Required for IAM Management
   m2mClientSecretExistingSecret: "" # If set, read AUTH0_M2M_CLIENT_SECRET from this K8s secret
   m2mClientSecretExistingSecretKey: "AUTH0_M2M_CLIENT_SECRET"
+  m2mClientGroups: "" # Optional: JSON client_id->[groups] map for M2M RBAC sync; empty = no groups (fail closed)
   managementApiToken: "" # Optional: alternative to M2M credentials (expires after 24h)
   managementApiTokenExistingSecret: "" # If set, read AUTH0_MANAGEMENT_API_TOKEN from this K8s secret
   managementApiTokenExistingSecretKey: "AUTH0_MANAGEMENT_API_TOKEN"
@@ -126,9 +141,8 @@ cognito:
   userPoolId: "" # Cognito User Pool ID
   clientId: ""
   clientSecret: ""
-  domain: ""  # Optional: custom Cognito domain
-  region: "us-east-1"  # AWS region for the User Pool
-
+  domain: "" # Optional: custom Cognito domain
+  region: "us-east-1" # AWS region for the User Pool
 # Per-user egress credential vault (third-party OBO support).
 # The auth-server only needs the feature flag + the internal vend URL (it calls
 # the registry's /_egress_internal vend endpoint) + the nginx marker secret; it
@@ -157,7 +171,6 @@ egressAuth:
   # at startup. Set a strong random value, identical to the registry's. In the
   # stack it is auto-generated + shared, so leave empty there.
   markerSecret: ""
-
 # PingFederate integration (used when authProvider.type = "pingfederate")
 pingfederate:
   enabled: false
@@ -173,6 +186,7 @@ pingfederate:
   m2mClientSecretExistingSecretKey: "PINGFEDERATE_M2M_CLIENT_SECRET"
   applicationIdUri: ""
   groupsClaim: "groups"
+  m2mAllowedAudiences: "" # Optional: comma/space-separated M2M audience allowlist; empty = only client ids accepted (fail closed)
 # IdP user-to-group fallback (issue #1127)
 # Comma-separated list of IdP providers (e.g. pingfederate) for which the
 # registry's local idp_user_groups collection is consulted to populate empty

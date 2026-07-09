@@ -109,6 +109,148 @@ def mock_health_service():
 # =============================================================================
 
 
+# =============================================================================
+# REAL-IP CONFIG RENDERING TESTS (_render_real_ip_config)
+# =============================================================================
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_empty_when_unset():
+    """Unset TRUSTED_REAL_IP_CIDRS emits nothing (edge deploy, no rewrite)."""
+    with patch.dict("os.environ", {}, clear=True):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_empty_when_blank():
+    """Whitespace-only value is treated as unset."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "   "}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_single_cidr_no_recursion():
+    """A single VPC CIDR renders set_real_ip_from + header, but NOT recursion.
+
+    One trusted hop needs no recursion — nginx takes the single right-most entry
+    (what that proxy appended). Recursion is reserved for stacked proxies.
+    """
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16"}):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "real_ip_header X-Forwarded-For;" in out
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_multiple_enables_recursion():
+    """More than one trusted CIDR (stacked proxies) enables real_ip_recursive on."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16, 130.176.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "set_real_ip_from 130.176.0.0/16;" in out
+    assert "real_ip_recursive on;" in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_multiple_and_bare_ip():
+    """Multiple entries render in order; a bare IP normalizes to /32."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16, 192.168.1.5 , 2001:db8::/32"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "set_real_ip_from 192.168.1.5/32;" in out
+    assert "set_real_ip_from 2001:db8::/32;" in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_drops_malformed_entries():
+    """Malformed entries are dropped (fail closed) but valid ones survive."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16, not-an-ip, 999.999.999.999"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "not-an-ip" not in out
+    assert "999.999.999.999" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_all_invalid_emits_nothing():
+    """When every entry is malformed, emit nothing rather than a broken directive."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "garbage, also-bad"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv4_catch_all():
+    """0.0.0.0/0 is rejected (would trust every peer -> spoofable, fail-open)."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv6_catch_all():
+    """::/0 is rejected for the same reason as the IPv4 catch-all."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "::/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_drops_catch_all_keeps_valid():
+    """A catch-all mixed with a valid CIDR drops only the catch-all."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0, 10.0.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "0.0.0.0/0" not in out
+    # Only one valid CIDR survived -> no recursion.
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_warns_but_honours_broad_range(caplog):
+    """A broad non-catch-all range (e.g. /1) is warned about but still emitted.
+
+    Unlike /0 (rejected outright), a /1 is honoured — an operator may have a
+    reason — but a warning flags that it trusts an implausibly large peer range.
+    """
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/1"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 0.0.0.0/1;" in out
+    assert any("very broad" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_normal_v6_subnet_no_broad_warning(caplog):
+    """A normal IPv6 proxy subnet (/48) must NOT trip the broad-range warning."""
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "2001:db8::/48"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 2001:db8::/48;" in out
+    assert not any("very broad" in r.message for r in caplog.records)
+
+
 @pytest.mark.unit
 def test_nginx_service_init_http_only():
     """Test NginxConfigService initialization with HTTP-only template."""
@@ -510,6 +652,71 @@ def test_generate_transport_location_blocks_streamable_http(nginx_service):
     # subrequest can bind it into the internal token, then forwarded as X-Upstream-Url.
     assert 'set $backend_url "http://localhost:8000/mcp"' in blocks[0]
     assert "proxy_set_header X-Upstream-Url $backend_url" in blocks[0]
+
+
+@pytest.mark.unit
+def test_obo_location_block_sets_per_server_resource_metadata(nginx_service):
+    """An obo_exchange server's location block overrides $mcp_resource_metadata
+    with its per-server PRM so RFC 9728 clients discover the per-server resource."""
+    import registry.core.nginx_service as ns
+
+    # The nginx_service fixture patches registry.core.nginx_service.settings with a
+    # MagicMock; set the concrete registry_url the obo PRM builder needs (a bare
+    # MagicMock attr has no scheme and build_per_server_prm_url would raise).
+    ns.settings.registry_url = "https://gw.example.com"
+    server_info = {
+        "proxy_pass_url": "http://localhost:8000/mcp",
+        "supported_transports": ["streamable-http"],
+        "egress_auth_mode": "obo_exchange",
+    }
+
+    blocks = nginx_service._generate_transport_location_blocks("/obo-echo", server_info)
+
+    assert len(blocks) == 1
+    assert "set $mcp_resource_metadata " in blocks[0]
+    # The per-server PRM path segment is present.
+    assert "oauth-protected-resource/obo-echo" in blocks[0]
+
+
+@pytest.mark.unit
+def test_obo_location_block_sanitizes_hostile_path(nginx_service):
+    """Defense-in-depth: a hostile persisted path (pre-validator legacy data) must
+    not break out of the quoted `set $mcp_resource_metadata "..."` directive.
+
+    ServerInfo now rejects such a path at registration, but the render layer still
+    escapes it (the per-site guard behind the model validator). A raw quote must be
+    backslash-escaped and a newline collapsed, so no bare `";` can terminate the
+    directive and inject nginx config."""
+    import registry.core.nginx_service as ns
+
+    ns.settings.registry_url = "https://gw.example.com"
+    hostile_path = '/x" ; return 200 "pwned"; #'
+    server_info = {
+        "proxy_pass_url": "http://localhost:8000/mcp",
+        "supported_transports": ["streamable-http"],
+        "egress_auth_mode": "obo_exchange",
+    }
+
+    blocks = nginx_service._generate_transport_location_blocks(hostile_path, server_info)
+
+    assert len(blocks) == 1
+    block = blocks[0]
+    # The obo override must be present (proves we're exercising the obo path).
+    assert "set $mcp_resource_metadata " in block
+    # The set directive renders on a single line (no newline in the hostile path
+    # survived to split it) ...
+    set_lines = [ln for ln in block.splitlines() if "set $mcp_resource_metadata" in ln]
+    assert len(set_lines) == 1
+    directive = set_lines[0]
+    # ... and every embedded double-quote from the hostile path is backslash-
+    # escaped, leaving exactly two REAL (unescaped) string delimiters. A successful
+    # break-out (bare `"` closing the string early) would leave an odd count of
+    # real delimiters, so this is the injection invariant.
+    real_delimiters = directive.count('"') - directive.count('\\"')
+    assert real_delimiters == 2
+    # The trailing `; return 200 ...` only ever appears INSIDE the quoted value
+    # (preceded by the escaped quote), never as a bare directive break-out.
+    assert '\\" ; return 200 ' in directive
 
 
 @pytest.mark.unit

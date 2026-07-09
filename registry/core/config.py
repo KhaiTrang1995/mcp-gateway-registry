@@ -65,6 +65,7 @@ def _normalize_cors_origin(value: str) -> str | None:
         return f"{scheme}://{host}:{port}"
     return f"{scheme}://{host}"
 
+
 # Accepted values for STORAGE_BACKEND. Keep in sync with the Terraform allowlist
 # at terraform/aws-ecs/variables.tf (issue #955) so both layers reject the same
 # typos with the same messages.
@@ -189,6 +190,19 @@ class Settings(BaseSettings):
     )
     auth_server_url: str = "http://localhost:8888"
     auth_server_external_url: str = "http://localhost:8888"  # External URL for OAuth redirects
+    trusted_external_hosts: str = Field(
+        default="",
+        description=(
+            "Comma-separated hostnames (optionally host:port) that are trusted "
+            "to appear in the inbound Host header when building external URLs "
+            "for OAuth redirects. Empty means derive the allowlist from "
+            "registry_url (and loopback in local dev). A Host header not on this "
+            "allowlist is rejected: the external URL falls back to the "
+            "configured registry_url host instead of reflecting the attacker-"
+            "supplied Host (fail closed). Set this when the deployment is "
+            "reached at additional hostnames (e.g. a vanity domain)."
+        ),
+    )
     auth_provider: str = "cognito"  # Auth provider: cognito, keycloak, entra, github
     registry_static_token_auth_enabled: bool = False  # Enable static token auth (IdP-independent)
     registry_api_token: str = ""  # Static API token for registry access
@@ -1187,6 +1201,21 @@ class Settings(BaseSettings):
             "which fronts the internal-only location."
         ),
     )
+    egress_obo_allowed_audiences: str = Field(
+        default="",
+        description=(
+            "Optional operator allowlist for obo_exchange target_audience values "
+            "(whitespace-separated). When non-empty, a server may only register an "
+            "obo_exchange target_audience present in this exact set -- the "
+            "authoritative positive control. When empty (default), a shape "
+            "heuristic applies instead: the target must be an internal MCP "
+            "server's own IdP audience (an 'api://...' App ID URI or a bare "
+            "client-id/GUID), never an 'https://' host URL, so shared first-party "
+            "resources (Microsoft Graph, ARM, Key Vault, incl. sovereign clouds) "
+            "are rejected regardless of host spelling. Set this to lock obo down to "
+            "an explicit, audited set of internal server audiences."
+        ),
+    )
     auth_server_nginx_marker_secret: str = Field(
         default="",
         description=(
@@ -1466,6 +1495,59 @@ class Settings(BaseSettings):
             return False
         host = host.lower()
         return host in ("localhost", "127.0.0.1", "::1") or host.endswith(".localhost")
+
+    @property
+    def trusted_external_hosts_set(self) -> set[str]:
+        """Resolve the allowlist of Host header values trusted for external URLs.
+
+        The set is the union of:
+
+        1. Explicit operator-configured hosts from ``TRUSTED_EXTERNAL_HOSTS``
+           (comma-separated), normalized to lower-case. Each entry may be a bare
+           host (``app.example.com``) or ``host:port``.
+        2. The host (and ``host:port``) derived from ``registry_url`` so the app
+           always trusts its own configured external hostname.
+        3. Loopback dev hosts, but only for a genuine local-dev stack (mirrors
+           the CORS resolver so local development is not broken).
+
+        Comparison against an inbound Host header should be case-insensitive
+        (Host headers are). Fails closed: an unparseable configured value is
+        dropped rather than widening the allowlist.
+
+        Returns:
+            Lower-cased set of trusted host / host:port strings.
+        """
+        hosts: set[str] = set()
+
+        for raw in self.trusted_external_hosts.split(","):
+            candidate = raw.strip().lower()
+            if candidate:
+                hosts.add(candidate)
+
+        try:
+            parsed = urlparse(self.registry_url)
+            if parsed.hostname:
+                hosts.add(parsed.hostname.lower())
+                if parsed.port:
+                    hosts.add(f"{parsed.hostname.lower()}:{parsed.port}")
+                elif parsed.netloc:
+                    hosts.add(parsed.netloc.lower())
+        except ValueError:
+            logger.warning("Could not parse registry_url for trusted-host allowlist")
+
+        if self.is_local_dev and self._registry_url_is_loopback():
+            hosts.update(
+                {
+                    "localhost",
+                    "127.0.0.1",
+                    "localhost:7860",
+                    "localhost:8000",
+                    "127.0.0.1:7860",
+                    "127.0.0.1:8000",
+                }
+            )
+
+        return hosts
 
     @property
     def cors_allowed_origins_list(self) -> list[str]:

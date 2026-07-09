@@ -402,6 +402,21 @@ _m2m_management_requests_counter = _meter.create_counter(
 m2m_management_requests_total = _CounterAdapter(_m2m_management_requests_counter)
 
 
+# Internal service-token single-use enforcement (registry/auth/internal_replay_store.py).
+# Emitted from both the registry and auth-server processes (validate_internal_auth
+# runs in both), same as the session store counter above.
+# result: accepted | replay | missing_jti | store_error. store_error is the
+# fail-closed signal: DocumentDB unreachable => every internal call 401s, so
+# rate(...{result="store_error"}) distinguishes a store outage from
+# rate(...{result="replay"}) which flags an actual replay attack.
+_internal_token_replay_check_counter = _meter.create_counter(
+    name="mcpgw_registry_internal_token_replay_check_total",
+    description="Internal service-token single-use checks by outcome",
+    unit="1",
+)
+internal_token_replay_check_total = _CounterAdapter(_internal_token_replay_check_counter)
+
+
 # =============================================================================
 # Self-observability of the migration itself
 # =============================================================================
