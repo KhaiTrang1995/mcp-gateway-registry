@@ -127,6 +127,18 @@ def _iam_mock(users):
     return mock
 
 
+def _mongo_m2m_mock(docs):
+    """Patch target: get_documentdb_client returning a db whose idp_m2m_clients
+    collection yields ``docs`` from ``find({}).to_list()``."""
+    cursor = MagicMock()
+    cursor.to_list = AsyncMock(return_value=docs)
+    collection = MagicMock()
+    collection.find = MagicMock(return_value=cursor)
+    db = MagicMock()
+    db.__getitem__ = MagicMock(return_value=collection)
+    return AsyncMock(return_value=db)
+
+
 @pytest.mark.asyncio
 class TestListAdminUsernames:
     """Tests for counting admin users."""
@@ -146,9 +158,61 @@ class TestListAdminUsernames:
                 "registry.services.admin_safety.get_iam_manager",
                 return_value=_iam_mock(users),
             ),
+            patch(
+                "registry.repositories.documentdb.client.get_documentdb_client",
+                new=_mongo_m2m_mock([]),
+            ),
         ):
             admins = await admin_safety.list_admin_usernames()
         assert admins == {"admin1", "admin2"}
+
+    async def test_counts_m2m_only_admin_from_mongo(self):
+        # The IdP listing has NO admin (M2M group membership lives only in
+        # idp_m2m_clients for non-Keycloak IdPs). The M2M admin must be counted so
+        # the population is not falsely empty and the guard does not 503-brick.
+        users = [{"username": "regular", "groups": ["readers"]}]
+        m2m_docs = [
+            {"client_id": "svc-admin", "name": "svc-admin", "groups": ["mcp-registry-admin"]},
+            {"client_id": "svc-reader", "name": "svc-reader", "groups": ["readers"]},
+        ]
+        with (
+            patch(
+                "registry.services.admin_safety.resolve_admin_group_names",
+                new=AsyncMock(return_value={"mcp-registry-admin"}),
+            ),
+            patch(
+                "registry.services.admin_safety.get_iam_manager",
+                return_value=_iam_mock(users),
+            ),
+            patch(
+                "registry.repositories.documentdb.client.get_documentdb_client",
+                new=_mongo_m2m_mock(m2m_docs),
+            ),
+        ):
+            admins = await admin_safety.list_admin_usernames()
+        assert admins == {"svc-admin"}
+
+    async def test_m2m_store_error_does_not_raise_when_idp_admin_present(self):
+        # A datastore error reading idp_m2m_clients is best-effort: it must not
+        # raise as long as the IdP listing already surfaced an admin.
+        users = [{"username": "admin1", "groups": ["mcp-registry-admin"]}]
+        broken = AsyncMock(side_effect=Exception("mongo down"))
+        with (
+            patch(
+                "registry.services.admin_safety.resolve_admin_group_names",
+                new=AsyncMock(return_value={"mcp-registry-admin"}),
+            ),
+            patch(
+                "registry.services.admin_safety.get_iam_manager",
+                return_value=_iam_mock(users),
+            ),
+            patch(
+                "registry.repositories.documentdb.client.get_documentdb_client",
+                new=broken,
+            ),
+        ):
+            admins = await admin_safety.list_admin_usernames()
+        assert admins == {"admin1"}
 
     async def test_fails_closed_when_users_unavailable(self):
         mock = MagicMock()
@@ -168,10 +232,10 @@ class TestListAdminUsernames:
         assert exc.value.status_code == 503
 
     async def test_fails_closed_when_no_admins_found(self):
-        # Admin-conferring groups exist, but the user listing surfaces NO admin
-        # (e.g. an IdP adapter that returned groupless users, or a truncated
-        # listing). Deriving "no admins, nothing to guard" would bypass the
-        # last-admin guard, so this must fail closed instead of returning set().
+        # Admin-conferring groups exist, but neither the user listing NOR the M2M
+        # store surfaces an admin (e.g. an IdP adapter that returned groupless
+        # users, or a truncated listing). Deriving "no admins, nothing to guard"
+        # would bypass the last-admin guard, so this must fail closed.
         users = [
             {"username": "regular1", "groups": ["readers"]},
             {"username": "regular2", "groups": []},
@@ -184,6 +248,10 @@ class TestListAdminUsernames:
             patch(
                 "registry.services.admin_safety.get_iam_manager",
                 return_value=_iam_mock(users),
+            ),
+            patch(
+                "registry.repositories.documentdb.client.get_documentdb_client",
+                new=_mongo_m2m_mock([]),
             ),
         ):
             with pytest.raises(AdminSafetyError) as exc:

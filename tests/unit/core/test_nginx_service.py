@@ -222,6 +222,36 @@ def test_render_real_ip_config_drops_catch_all_keeps_valid():
 
 
 @pytest.mark.unit
+def test_render_real_ip_config_warns_but_honours_broad_range(caplog):
+    """A broad non-catch-all range (e.g. /1) is warned about but still emitted.
+
+    Unlike /0 (rejected outright), a /1 is honoured — an operator may have a
+    reason — but a warning flags that it trusts an implausibly large peer range.
+    """
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/1"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 0.0.0.0/1;" in out
+    assert any("very broad" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_normal_v6_subnet_no_broad_warning(caplog):
+    """A normal IPv6 proxy subnet (/48) must NOT trip the broad-range warning."""
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "2001:db8::/48"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 2001:db8::/48;" in out
+    assert not any("very broad" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
 def test_nginx_service_init_http_only():
     """Test NginxConfigService initialization with HTTP-only template."""
     with patch("registry.core.nginx_service.Path") as mock_path_class:

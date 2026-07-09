@@ -152,11 +152,64 @@ def groups_confer_admin(
     return False
 
 
+async def _m2m_admin_usernames(admin_group_names: set[str]) -> set[str]:
+    """Return admin M2M service-account usernames from the ``idp_m2m_clients`` store.
+
+    For non-Keycloak IdPs (Okta/Auth0/PingFederate) an M2M client's group
+    membership lives ONLY in the MongoDB ``idp_m2m_clients`` collection, not in the
+    IdP user listing. The user-management list handler merges this collection, so
+    the admin count must too — otherwise an M2M-only admin is invisible and the
+    last-admin guard both under-counts and (with the empty-set fail-closed) can
+    wrongly refuse legitimate operations. Mirrors the merge in
+    ``registry.api.management_routes.management_list_users``.
+
+    Best-effort: a datastore error is logged and treated as "no M2M admins found"
+    rather than raised, because the IdP listing is the primary source and the
+    empty-set guard in :func:`list_admin_usernames` still fails closed if the
+    combined result is empty.
+
+    Args:
+        admin_group_names: Case-folded admin-conferring group set.
+
+    Returns:
+        Case-folded usernames of M2M clients whose groups confer admin.
+    """
+    from ..repositories.documentdb.client import get_documentdb_client
+
+    m2m_admins: set[str] = set()
+    try:
+        db = await get_documentdb_client()
+        collection = db["idp_m2m_clients"]
+        cursor = collection.find({})
+        docs = await cursor.to_list(length=None)
+    except Exception as exc:
+        logger.warning(
+            "admin_safety: could not read idp_m2m_clients for admin count "
+            "(M2M admins not included): %s",
+            exc,
+        )
+        return m2m_admins
+
+    for doc in docs or []:
+        if not isinstance(doc, dict):
+            continue
+        name = doc.get("name") or doc.get("client_id")
+        if not name:
+            continue
+        if groups_confer_admin(doc.get("groups"), admin_group_names):
+            m2m_admins.add(_normalize(name))
+
+    logger.debug("admin_safety: %d M2M admin service-account(s) found", len(m2m_admins))
+    return m2m_admins
+
+
 async def list_admin_usernames() -> set[str]:
     """Return the case-folded usernames of all current administrators.
 
-    Cross-references the IdP/DB user listing against the admin-conferring group
-    set. Fails closed on any error.
+    Cross-references the IdP/DB user listing AND the MongoDB ``idp_m2m_clients``
+    store against the admin-conferring group set, so the admin population matches
+    what the user-management list handler shows (M2M-only admins included). Fails
+    closed on any error enumerating the primary IdP listing.
 
     Raises:
         AdminSafetyError: If users or admin groups cannot be enumerated.
@@ -182,6 +235,11 @@ async def list_admin_usernames() -> set[str]:
             continue
         if groups_confer_admin(user.get("groups"), admin_group_names):
             admins.add(_normalize(username))
+
+    # Merge M2M admins (stored only in idp_m2m_clients for non-Keycloak IdPs) so
+    # the count matches management_list_users and an M2M-only admin is not
+    # invisible to the last-admin guard.
+    admins |= await _m2m_admin_usernames(admin_group_names)
 
     # Fail closed on an empty admin set. We already know at least one
     # admin-conferring group exists (resolve_admin_group_names raises otherwise),

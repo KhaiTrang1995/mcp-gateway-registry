@@ -38,6 +38,16 @@ DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS: int = 30
 
 
+# Minimum sane prefix length for a TRUSTED_REAL_IP_CIDRS entry. A prefix shorter
+# than this (e.g. 0.0.0.0/1, 10.0.0.0/4) trusts an implausibly large peer range
+# for a proxy subnet and edges toward the catch-all footgun, so we warn (but still
+# honour it — unlike a /0, which is rejected outright). IPv4-scale; IPv6 prefixes
+# are compared on their IPv4-equivalent host-bit width so a normal /48–/64 proxy
+# subnet does not trip the warning.
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V4: int = 8
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V6: int = 32
+
+
 def _resolve_mcp_proxy_read_timeout_seconds() -> int:
     """Resolve nginx's proxy_read_timeout (seconds) for MCP location blocks.
 
@@ -126,6 +136,22 @@ def _render_real_ip_config() -> str:
                 candidate,
             )
             continue
+        # Warn (but honour) an implausibly broad, non-catch-all range. A proxy
+        # subnet is realistically a /16-/28 (v4) or /48-/64 (v6); anything much
+        # broader trusts far more peers than a real LB tier occupies and edges
+        # toward the same spoofing risk as a catch-all.
+        floor = (
+            MIN_TRUSTED_REAL_IP_PREFIXLEN_V6
+            if network.version == 6
+            else MIN_TRUSTED_REAL_IP_PREFIXLEN_V4
+        )
+        if network.prefixlen < floor:
+            logger.warning(
+                "TRUSTED_REAL_IP_CIDRS entry %r is very broad (/%d); trusting this "
+                "many peers is risky — narrow it to the proxy's actual subnet",
+                candidate,
+                network.prefixlen,
+            )
         valid_cidrs.append(str(network))
 
     if not valid_cidrs:
