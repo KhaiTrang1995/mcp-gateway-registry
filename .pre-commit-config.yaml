@@ -124,13 +124,16 @@ repos:
   # Local hooks for project-specific checks
   - repo: local
     hooks:
-      # Run fast unit tests
+      # Run fast unit tests. Only triggers when Python files are staged
+      # (types: [python]); pass_filenames: false so it still runs the whole
+      # suite rather than just the changed files. Dropping always_run lets the
+      # file-type filter apply, so a docs- or chart-only commit skips it.
       - id: pytest-fast
         name: Run fast tests
         entry: uv run --frozen pytest -m "not slow" --tb=short
         language: system
         pass_filenames: false
-        always_run: true
+        types: [python]
         stages: [pre-commit]
 
       # Python syntax check
