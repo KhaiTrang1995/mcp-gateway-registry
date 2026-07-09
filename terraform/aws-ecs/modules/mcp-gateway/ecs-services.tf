@@ -411,6 +411,10 @@ module "ecs_service_auth" {
           value = tostring(var.audit_log_ttl_days)
         },
         {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
+        },
+        {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
           value = tostring(var.app_log_centralized_enabled)
         },
@@ -1213,6 +1217,10 @@ module "ecs_service_registry" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
