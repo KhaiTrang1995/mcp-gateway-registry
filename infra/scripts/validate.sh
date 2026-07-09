@@ -179,20 +179,6 @@ if [ "$reg_code" = "201" ]; then
 fi
 
 # ----------------------------------------------------------------------
-# 6. ScopesLoader Lambda fired & seeded all UI-Scope docs
-# ----------------------------------------------------------------------
-echo
-_log_info "ScopesLoader"
-aws lambda invoke --region "$AWS_REGION" --function-name mcp-gateway-scopes-loader \
-  --cli-binary-format raw-in-base64-out --payload '{"debug":true}' /tmp/.validate.lambda > /dev/null 2>&1
-doc_count=$(jq -r '.docs | length // 0' /tmp/.validate.lambda 2>/dev/null)
-has_admin=$(jq -r '[.docs[] | select(._id=="mcp-registry-admin")] | length' /tmp/.validate.lambda 2>/dev/null)
-_check "ScopesLoader Lambda invokable + ${doc_count} UI-Scope docs in DocumentDB" \
-  "$([ "$doc_count" -ge 5 ] && echo 0 || echo 1)" "got $doc_count, want >=5"
-_check "mcp-registry-admin doc present" \
-  "$([ "$has_admin" = "1" ] && echo 0 || echo 1)"
-
-# ----------------------------------------------------------------------
 # Summary
 # ----------------------------------------------------------------------
 echo

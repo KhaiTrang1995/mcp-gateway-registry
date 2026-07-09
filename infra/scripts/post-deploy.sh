@@ -291,13 +291,6 @@ _run_in_registry() {
   return 1
 }
 
-_load_scopes() {
-  _log_info "Loading scopes configuration into DocumentDB..."
-  _run_in_registry "scopes load" \
-    "/app/.venv/bin/python scripts/load-scopes.py --scopes-file /app/config/scopes.yml" \
-    "Successfully loaded|Scopes loading complete|No changes for scope|Updated scope"
-}
-
 # ---------------------------------------------------------------------------
 # Validate all endpoints
 # ---------------------------------------------------------------------------
@@ -413,11 +406,6 @@ main() {
   _disable_ssl_required "$(_get_admin_token)" "mcp-gateway"
 
   _update_client_secrets
-
-  # Top-level scopes (server defs) into DocumentDB. UI-scope group docs are
-  # loaded by the ScopesLoader Lambda in the Registry-Service stack.
-  _retry "Scopes load" 3 20 _load_scopes \
-    || _log_warn "Scopes could not be loaded. Agent registration may return 403."
 
   _restart_services
   _validate_endpoints

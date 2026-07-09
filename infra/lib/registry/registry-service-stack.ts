@@ -20,14 +20,12 @@ import { RegistryConfig } from './registry-config';
 import { RegistryNetworkStack } from './registry-network-stack';
 import { RegistryDataStack } from './registry-data-stack';
 import { RegistryAuthStack } from './registry-auth-stack';
-import * as path from 'path';
 import { RegistryEcsService } from './constructs/registry-ecs-service';
 import { McpServerService } from './constructs/mcp-server-service';
 import { ObservabilityPipeline } from './constructs/observability-pipeline';
 import { RegistryAlb } from './constructs/registry-alb';
 import { RegistryEfs } from './constructs/registry-efs';
 import { RegistrySecrets } from './constructs/registry-secrets';
-import { ScopesLoader } from './constructs/scopes-loader';
 import { RegistryAlarms } from './constructs/registry-alarms';
 
 export interface RegistryServiceStackProps extends cdk.StackProps {
@@ -176,7 +174,6 @@ export class RegistryServiceStack extends cdk.Stack {
       EC2_PUBLIC_DNS: registryDomain || alb.alb.loadBalancerDnsName,
       KEYCLOAK_ENABLED: authStack.keycloakDomain !== '' ? 'true' : 'false',
       KEYCLOAK_ADMIN: 'admin',
-      SCOPES_CONFIG_PATH: '/app/auth_server/scopes.yml',
       EMBEDDINGS_PROVIDER: config.embeddings.provider,
       EMBEDDINGS_MODEL_NAME: config.embeddings.modelName,
       EMBEDDINGS_MODEL_DIMENSIONS: String(config.embeddings.modelDimensions),
@@ -218,7 +215,6 @@ export class RegistryServiceStack extends cdk.Stack {
       ...sharedEnv,
       KEYCLOAK_EXTERNAL_URL: authStack.keycloakUrl,
       KEYCLOAK_M2M_CLIENT_ID: 'mcp-gateway-m2m',
-      SCOPES_CONFIG_PATH: '/efs/auth_config/scopes.yml',
     };
 
     // Container secrets (registry + auth share most of these)
@@ -454,26 +450,6 @@ export class RegistryServiceStack extends cdk.Stack {
         toPort: port,
         sourceSecurityGroupId: source.securityGroupId,
         description,
-      });
-    }
-
-    // UI-scope group docs into DocumentDB. Bridges the upstream-image gap:
-    // init-documentdb-indexes.py only seeds `registry-admins`; this seeds the
-    // rest defined in scopes.yml (mcp-registry-admin, etc.).
-    if (config.storageBackend === 'documentdb' && dataStack.documentDbSecretArn) {
-      new ScopesLoader(this, 'ScopesLoader', {
-        vpc,
-        privateSubnets,
-        ingressSg: registryService.securityGroup,
-        documentDbHost: dataStack.documentDbCluster.attrEndpoint,
-        documentDbPort: 27017,
-        documentDbDatabase: config.documentdb.database,
-        documentDbNamespace: config.documentdb.namespace,
-        documentDbSecretArn: dataStack.documentDbSecretArn,
-        documentDbSecretKmsKeyArn: dataStack.documentDbKmsKey.keyArn,
-        scopesYmlPath: path.join(__dirname, '..', '..', '..', 'auth_server', 'scopes.yml'),
-        authConfigAccessPoint: accessPoints['authConfig'],
-        namePrefix,
       });
     }
 
