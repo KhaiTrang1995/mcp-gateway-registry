@@ -137,6 +137,9 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+# Allow committed env EXAMPLES (never real .env). Covers variants like
+# .env.ecs.example / .env.local.example that .env.* would otherwise ignore.
+!.env.*.example
 .env.backup
 .env.user
 .env.docker
