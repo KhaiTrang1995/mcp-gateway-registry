@@ -36,9 +36,15 @@ from starlette.types import ASGIApp
 
 logger = logging.getLogger(__name__)
 
-# Paths that must remain reachable without a token (container health probes).
-# Keep this list minimal; everything else is authenticated.
-_PUBLIC_PATHS: frozenset[str] = frozenset({"/ping", "/api/health"})
+# Paths that must remain reachable without a token (container health probes and
+# the public agent card). Keep this list minimal; everything else is
+# authenticated. The public agent card at /.well-known/agent-card.json is
+# discovery metadata that the A2A spec treats as publicly fetchable (only the
+# authenticated/extended card requires a credential), and the registry's health
+# probe fetches it unauthenticated -- so it must stay open.
+_PUBLIC_PATHS: frozenset[str] = frozenset(
+    {"/ping", "/api/health", "/.well-known/agent-card.json"}
+)
 
 _SIGNING_ALGORITHMS: tuple[str, ...] = ("RS256", "RS384", "RS512", "ES256", "ES384")
 
@@ -90,6 +96,7 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         realm: str,
         audience: str | None = None,
         auth_disabled: bool = False,
+        presence_only: bool = False,
     ) -> None:
         """Initialize the middleware.
 
@@ -102,9 +109,17 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
                 it in production.
             auth_disabled: When True, authentication is bypassed entirely. Only
                 for trusted local sandboxes; logged as a loud warning.
+            presence_only: When True, a request is accepted if it merely carries a
+                non-empty ``Authorization: Bearer <anything>`` header -- the token
+                is NOT verified against the realm JWKS. This is a TEST/DEMO shim
+                for exercising the A2A gateway's credential passthrough (the
+                gateway forwards Authorization end-to-end and strips
+                X-Authorization); it proves a credential arrived, not that it is
+                valid. Never use in production. Logged as a loud warning.
         """
         super().__init__(app)
         self._auth_disabled = auth_disabled
+        self._presence_only = presence_only
         self._audience = audience
         self._issuer = _build_issuer(keycloak_url, realm)
         self._jwks_client: PyJWKClient | None = None
@@ -113,6 +128,15 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
             logger.warning(
                 "AGENT AUTH IS DISABLED (AGENT_AUTH_DISABLED). All A2A and /api endpoints "
                 "are UNAUTHENTICATED. Never use this in a shared or internet-reachable deployment."
+            )
+            return
+
+        if presence_only:
+            logger.warning(
+                "AGENT AUTH IS PRESENCE-ONLY (AGENT_AUTH_PRESENCE_ONLY). A non-empty "
+                "'Authorization: Bearer <anything>' is accepted WITHOUT verifying the token "
+                "against the realm. This is a TEST/DEMO shim only -- never use it in a shared "
+                "or internet-reachable deployment."
             )
             return
 
@@ -185,6 +209,12 @@ class JWTAuthMiddleware(BaseHTTPMiddleware):
         if not token:
             return JSONResponse({"error": "Empty bearer token"}, status_code=401)
 
+        # Presence-only test/demo shim: a non-empty bearer is enough, no JWKS
+        # verification. Proves the gateway forwarded a credential end-to-end.
+        if self._presence_only:
+            request.state.auth_claims = {"presence_only": True}
+            return await call_next(request)
+
         try:
             claims = self._validate_token(token)
         except AuthConfigurationError:
@@ -236,16 +266,22 @@ def install_agent_auth(
             network-exposed address.
     """
     auth_disabled = _env_flag("AGENT_AUTH_DISABLED", default=False)
+    presence_only = _env_flag("AGENT_AUTH_PRESENCE_ONLY", default=False)
     if auth_disabled and bind_host is not None and bind_host in _EXPOSED_BIND_ADDRESSES:
         raise AuthConfigurationError(
             "Refusing to start: AGENT_AUTH_DISABLED is set while binding to "
             f"'{bind_host}'. An unauthenticated agent must not listen on all "
             "interfaces. Bind to 127.0.0.1 or enable authentication."
         )
+    # presence_only still requires a bearer to be present, so unlike
+    # auth_disabled it is permitted on an exposed bind address (it is the
+    # intended A2A gateway passthrough test mode). It is gated by its own flag
+    # and logged loudly; never enable it in production.
     app.add_middleware(
         JWTAuthMiddleware,
         keycloak_url=keycloak_url,
         realm=realm,
         audience=audience,
         auth_disabled=auth_disabled,
+        presence_only=presence_only,
     )

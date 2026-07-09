@@ -1,5 +1,6 @@
 {
   "protocolVersion": "0.3.0",
+  "supportedProtocol": "a2a",
   "name": "Travel Assistant Agent",
   "description": "Intelligent travel planning and assistance agent",
   "url": "http://travel-assistant-agent.mcp-gateway-v2.local:9000",

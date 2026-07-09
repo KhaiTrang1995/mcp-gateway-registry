@@ -51,7 +51,7 @@ def _mint_token(private_pem, issuer=ISSUER, expired=False, audience=None):
     return jwt.encode(claims, private_pem, algorithm="RS256")
 
 
-def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False):
+def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False, presence_only=False):
     """Build a minimal FastAPI app guarded by the middleware.
 
     The JWKS client is monkeypatched to return the test public key so no network
@@ -74,9 +74,10 @@ def _build_app(rsa_keypair, monkeypatch, audience=None, auth_disabled=False):
         realm=REALM,
         audience=audience,
         auth_disabled=auth_disabled,
+        presence_only=presence_only,
     )
 
-    if not auth_disabled:
+    if not auth_disabled and not presence_only:
 
         class _FakeSigningKey:
             key = public_key
@@ -202,3 +203,32 @@ def test_auth_disabled_on_loopback_is_permitted(monkeypatch):
     monkeypatch.setenv("AGENT_AUTH_DISABLED", "true")
     app = FastAPI()
     install_agent_auth(app, keycloak_url=KEYCLOAK_URL, realm=REALM, bind_host="127.0.0.1")
+
+
+def test_presence_only_accepts_any_nonempty_bearer(rsa_keypair, monkeypatch):
+    """Presence-only mode accepts an unverified bearer (test/demo passthrough)."""
+    app = _build_app(rsa_keypair, monkeypatch, presence_only=True)
+    client = TestClient(app)
+    response = client.post("/api/book", headers={"Authorization": "Bearer a2a-demo-anything"})
+    assert response.status_code == 200
+
+
+def test_presence_only_still_rejects_missing_bearer(rsa_keypair, monkeypatch):
+    """Presence-only still requires a bearer to be present (not fully open)."""
+    app = _build_app(rsa_keypair, monkeypatch, presence_only=True)
+    client = TestClient(app)
+    assert client.post("/api/book").status_code == 401
+    assert client.post("/api/book", headers={"Authorization": "Bearer "}).status_code == 401
+
+
+def test_presence_only_on_all_interfaces_is_permitted(monkeypatch):
+    """Presence-only requires a bearer, so it may bind to 0.0.0.0 (unlike disabled)."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    app = FastAPI()
+    # Must not raise: presence-only is the intended A2A gateway passthrough mode.
+    install_agent_auth(
+        app,
+        keycloak_url=KEYCLOAK_URL,
+        realm=REALM,
+        bind_host="0.0.0.0",  # nosec B104 - test asserts presence-only is allowed here
+    )
