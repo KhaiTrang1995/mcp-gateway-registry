@@ -239,6 +239,12 @@ app:
   updateCheck:
     enabled: true
     intervalHours: 24
+  # Audit durability guard (fail closed). When true (default), the registry
+  # refuses to start if audit logging is enabled but no durable sink
+  # (DocumentDB/MongoDB) is available, instead of silently degrading to
+  # non-durable JSON log lines that are lost on restart and not queryable for
+  # forensics. Set to false only where a non-durable audit trail is acceptable.
+  auditLogRequireDurable: true
   # Tool-level access control (issue #1026)
   mcpToolsListFilterEnabled: true # Registry-side awareness of the MCP tools/list filter (also read by auth-server)
   toolFilterAuditLogLevel: "INFO" # Audit log level for tool-prune events (DEBUG, INFO, WARNING)
