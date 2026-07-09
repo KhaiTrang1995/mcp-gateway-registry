@@ -282,8 +282,9 @@ module "mcp_gateway" {
   registry_contact_url       = var.registry_contact_url
 
   # Audit logging configuration
-  audit_log_enabled  = var.audit_log_enabled
-  audit_log_ttl_days = var.audit_log_ttl_days
+  audit_log_enabled         = var.audit_log_enabled
+  audit_log_ttl_days        = var.audit_log_ttl_days
+  audit_log_require_durable = var.audit_log_require_durable
 
   # Application log configuration
   app_log_centralized_enabled  = var.app_log_centralized_enabled

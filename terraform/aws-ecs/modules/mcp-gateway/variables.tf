@@ -1223,6 +1223,12 @@ variable "audit_log_ttl_days" {
   default     = 7
 }
 
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines. Set to false only where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
+}
+
 # =============================================================================
 # APPLICATION LOG CONFIGURATION
 # =============================================================================

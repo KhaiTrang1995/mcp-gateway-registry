@@ -275,6 +275,13 @@ spec:
               value: {{ .Values.app.updateCheck.enabled | default true | toString | quote }}
             - name: UPDATE_CHECK_INTERVAL_HOURS
               value: {{ .Values.app.updateCheck.intervalHours | default 24 | toString | quote }}
+            # Audit durability guard (fail closed). When true (default), the
+            # registry refuses to start if audit logging is enabled but no
+            # durable sink (DocumentDB/MongoDB) is available, instead of silently
+            # degrading to non-durable JSON log lines. Set to false only where a
+            # non-durable audit trail is acceptable.
+            - name: AUDIT_LOG_REQUIRE_DURABLE
+              value: {{ .Values.app.auditLogRequireDurable | default true | toString | quote }}
             {{- if .Values.app.registryApiKeysExistingSecret }}
             - name: REGISTRY_API_KEYS
               valueFrom:

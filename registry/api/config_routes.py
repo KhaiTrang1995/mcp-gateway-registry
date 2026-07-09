@@ -235,6 +235,7 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("audit_log_local_retention_hours", "Local Retention Hours", False),
             ("audit_log_mongodb_enabled", "MongoDB Enabled", False),
             ("audit_log_mongodb_ttl_days", "MongoDB TTL Days", False),
+            ("audit_log_require_durable", "Require Durable Sink", False),
             ("audit_log_health_checks", "Log Health Checks", False),
             ("audit_log_static_assets", "Log Static Assets", False),
         ],

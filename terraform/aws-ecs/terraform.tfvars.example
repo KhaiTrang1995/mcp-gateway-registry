@@ -654,6 +654,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Default: 7
 # audit_log_ttl_days = 7
 
+# Require a durable audit sink (fail closed)
+# When true (default), the registry refuses to start if audit logging is enabled
+# but no durable store (DocumentDB/MongoDB) is available, instead of silently
+# degrading to non-durable JSON log lines that can be lost on restart and are not
+# queryable for forensics. Set to false only where a non-durable trail is acceptable.
+# Default: true
+# audit_log_require_durable = true
+
 # ============================================================================
 # APPLICATION LOG CONFIGURATION
 # ============================================================================

@@ -83,7 +83,7 @@ sys.path.insert(0, "/app")
 # Import MCP audit logging components
 from registry.audit.mcp_logger import MCPLogger
 from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
-from registry.audit.service import AuditLogger
+from registry.audit.service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
 from registry.common.secret_key import validate_secret_key
@@ -1552,6 +1552,13 @@ async def lifespan(app: FastAPI):
     # Build multi-key static token map (Issue #779).
     # Runs after scopes are loaded so map_groups_to_scopes can resolve groups.
     await _build_static_token_map()
+
+    # Prime the MCP/token-mint audit logger at startup so the durable-sink
+    # guard runs at boot. Without this the guard would only fire lazily on the
+    # first audited request; priming here makes the auth-server refuse to start
+    # (NonDurableAuditError) when audit logging is enabled but no durable sink is
+    # available, matching the registry process's fail-closed startup behavior.
+    get_mcp_logger()
 
     yield
 
@@ -4049,6 +4056,21 @@ def get_mcp_logger() -> MCPLogger | None:
                         logger.warning(f"Failed to initialize MCP audit MongoDB repository: {e}")
                         mongodb_enabled = False
 
+                # Durability guard (fail closed), same posture as the registry
+                # process (registry/main.py). The auth-server owns the
+                # token-mint audit trail — the most forensically critical
+                # records (who was issued which scoped token, when) — so a
+                # silent degradation to a non-durable (or dropped) trail here is
+                # exactly the repudiation gap the guard closes. Refuse to
+                # initialize the logger when AUDIT_LOG_REQUIRE_DURABLE is set and
+                # no durable sink is available, instead of quietly logging to
+                # nowhere. Re-raised below so it fails startup rather than being
+                # swallowed as a generic init failure.
+                enforce_durable_audit_sink(
+                    durable_sink_available=mongodb_enabled,
+                    require_durable=getattr(settings, "audit_log_require_durable", True),
+                )
+
                 _mcp_audit_logger = AuditLogger(
                     log_dir=settings.audit_log_dir,
                     rotation_hours=settings.audit_log_rotation_hours,
@@ -4064,6 +4086,11 @@ def get_mcp_logger() -> MCPLogger | None:
                 )
             else:
                 logger.info("MCP audit logging is disabled")
+        except NonDurableAuditError:
+            # Fail closed: a required-but-unavailable durable audit sink must
+            # stop the process, not degrade to a silent no-op logger. Do not
+            # swallow into the generic handler below.
+            raise
         except Exception as e:
             logger.warning(f"Failed to initialize MCP audit logger: {e}")
             _mcp_logger = None

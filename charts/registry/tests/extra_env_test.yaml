@@ -118,7 +118,8 @@ tests:
       # KEYCLOAK_ADMIN_PASSWORD (conditional on keycloak provider) is env[24];
       # PF_ADMIN_URL/PF_ADMIN_USER (registry-only, always rendered) are
       # env[25]/env[26]; UPDATE_CHECK_ENABLED/UPDATE_CHECK_INTERVAL_HOURS
-      # (always rendered) are env[27]/env[28]; user extraEnv entries are
+      # (always rendered) are env[27]/env[28]; AUDIT_LOG_REQUIRE_DURABLE
+      # (always rendered) is env[29]; user extraEnv entries are
       # appended at the end.
       #
       # NOTE: The indices below assume global.authProvider.type=keycloak
@@ -203,9 +204,12 @@ tests:
           value: UPDATE_CHECK_INTERVAL_HOURS
       - equal:
           path: spec.template.spec.containers[0].env[29].name
-          value: MY_FLAG
+          value: AUDIT_LOG_REQUIRE_DURABLE
       - equal:
           path: spec.template.spec.containers[0].env[30].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[31].name
           value: MY_SECRET_VAR
 
   - it: appends extraEnvFrom entries after chart-managed envFrom sources
@@ -390,6 +394,15 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"UI_TITLE\" is a reserved variable"
+
+  - it: fails when extraEnv contains AUDIT_LOG_REQUIRE_DURABLE
+    set:
+      extraEnv:
+        - name: AUDIT_LOG_REQUIRE_DURABLE
+          value: "false"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"AUDIT_LOG_REQUIRE_DURABLE\" is a reserved variable"
 
   - it: emits empty UI_TITLE by default
     asserts:

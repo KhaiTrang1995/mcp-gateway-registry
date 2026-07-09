@@ -577,6 +577,8 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Audit log enabled | `AUDIT_LOG_ENABLED` | `audit_log_enabled` | — | — |
 | Audit TTL (days) | `AUDIT_LOG_MONGODB_TTL_DAYS` | `audit_log_ttl_days` | — | TTL index. |
+| Audit require durable sink | `AUDIT_LOG_REQUIRE_DURABLE` | `audit_log_require_durable` | `registry.app.auditLogRequireDurable` / `auth-server.app.auditLogRequireDurable` | Fail closed (default `true`): refuse to start if audit logging is enabled but no durable sink (MongoDB/DocumentDB) is available, instead of degrading to non-durable log lines. Set `false` only in local/dev (emits a loud warning). |
+| Audit instance id | `AUDIT_INSTANCE_ID` | — | — | Per-replica attribution label embedded in internal-token `sub` and audit records. Auto-detected per replica from `HOSTNAME` (set per-container by Docker, per-pod by Kubernetes); set explicitly only to override, so no Terraform/Helm column. |
 | App log max bytes | `APP_LOG_MAX_BYTES` | — | `registry.app.appLogMaxBytes` / `auth-server.app.appLogMaxBytes` | Rotating file size. |
 | App log backup count | `APP_LOG_BACKUP_COUNT` | — | `*.app.appLogBackupCount` | — |
 | Centralized log enabled | `APP_LOG_CENTRALIZED_ENABLED` | `app_log_centralized_enabled` | `*.app.appLogCentralizedEnabled` | Write to MongoDB. |

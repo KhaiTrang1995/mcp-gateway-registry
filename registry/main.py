@@ -58,6 +58,7 @@ from registry.api.wellknown_routes import router as wellknown_router
 # Import audit logging
 from registry.audit import AuditLogger, add_audit_middleware
 from registry.audit.routes import router as audit_router
+from registry.audit.service import enforce_durable_audit_sink
 
 # Import auth dependencies
 from registry.auth.dependencies import (
@@ -1083,6 +1084,18 @@ if settings.audit_log_enabled:
         else:
             logger.warning("⚠️ MongoDB audit storage requested but repository unavailable")
             _mongodb_enabled = False
+
+    # Durability guard (fail closed). Without a durable sink, audit records
+    # degrade to best-effort JSON log lines that can be lost on restart, are not
+    # queryable for forensics, and are trivially rotated away — i.e. not a
+    # dependable audit trail for a repudiation-sensitive deployment. When
+    # AUDIT_LOG_REQUIRE_DURABLE is set (the default), refuse to start rather than
+    # run with a non-durable audit trail. Operators who accept a non-durable
+    # trail (local/dev) must explicitly opt out via AUDIT_LOG_REQUIRE_DURABLE=false.
+    enforce_durable_audit_sink(
+        durable_sink_available=_mongodb_enabled,
+        require_durable=settings.audit_log_require_durable,
+    )
 
     _audit_logger = AuditLogger(
         log_dir=str(settings.audit_log_path),
