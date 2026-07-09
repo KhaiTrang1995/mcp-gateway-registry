@@ -27,6 +27,10 @@ import { RegistryAlb } from './constructs/registry-alb';
 import { RegistryEfs } from './constructs/registry-efs';
 import { RegistrySecrets } from './constructs/registry-secrets';
 import { RegistryAlarms } from './constructs/registry-alarms';
+import { CloudFrontOriginDistribution } from './constructs/cloudfront-distribution';
+import { WafRules } from './constructs/waf-rules';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 
 export interface RegistryServiceStackProps extends cdk.StackProps {
   readonly config: RegistryConfig;
@@ -85,10 +89,53 @@ export class RegistryServiceStack extends cdk.Stack {
     this.registryAlbDns = alb.alb.loadBalancerDnsName;
     this.registryAlbArn = alb.alb.loadBalancerArn;
 
-    this.registryUrl =
-      config.enableRoute53Dns || config.certificateArn !== ''
-        ? `https://${registryDomain}`
-        : `http://${alb.alb.loadBalancerDnsName}`;
+    // CloudFront distribution fronting the registry ALB (Mode 1 & 3).
+    let cfDistribution: CloudFrontOriginDistribution | undefined;
+    let cfHostedZone: route53.IHostedZone | undefined;
+    if (config.cloudfront.enabled) {
+      cfHostedZone = config.enableRoute53Dns
+        ? route53.HostedZone.fromLookup(this, 'HostedZone', {
+            domainName: config.baseDomain,
+          })
+        : undefined;
+      cfDistribution = new CloudFrontOriginDistribution(this, 'CloudFront', {
+        config,
+        albDns: alb.alb.loadBalancerDnsName,
+        customDomain: config.enableRoute53Dns ? `registry.${config.baseDomain}` : '',
+        hostedZone: cfHostedZone,
+        comment: `${config.name} MCP Gateway Registry CloudFront Distribution`,
+        logsPrefix: 'mcp-gateway/',
+        emitCloudFrontForwardedProtoHeader: true,
+      });
+
+      // Optional WAFv2 Web ACL
+      new WafRules(this, 'Waf', {
+        config,
+        mcpGatewayAlbArn: alb.alb.loadBalancerArn,
+        keycloakAlbArn: undefined,
+      });
+    }
+
+    // Route53 A-record for registry.<domain> — target ALB (Mode 2) or
+    // CloudFront (Mode 3). Registry ALB alias-in-Mode-2 is created inside
+    // RegistryAlb; here we only handle the Mode-3 case (target CloudFront).
+    if (config.enableRoute53Dns && config.cloudfront.enabled && cfDistribution?.distribution && cfHostedZone) {
+      new route53.ARecord(this, 'RegistryAliasRecord', {
+        zone: cfHostedZone,
+        recordName: `registry.${config.baseDomain}`,
+        target: route53.RecordTarget.fromAlias(
+          new route53targets.CloudFrontTarget(cfDistribution.distribution),
+        ),
+      });
+    }
+
+    if (cfDistribution) {
+      this.registryUrl = cfDistribution.url;
+    } else if (config.enableRoute53Dns || config.certificateArn !== '') {
+      this.registryUrl = `https://${registryDomain}`;
+    } else {
+      this.registryUrl = `http://${alb.alb.loadBalancerDnsName}`;
+    }
 
     // EFS + access points
     const efsResources = new RegistryEfs(this, 'Efs', { config, vpc, privateSubnets });
@@ -118,6 +165,15 @@ export class RegistryServiceStack extends cdk.Stack {
       AUTH_SERVER_EXTERNAL_URL: this.registryUrl,
       AWS_REGION: config.awsRegion,
       AUTH_PROVIDER: authProvider,
+      // Both registry AND auth-server need these *_ENABLED flags — auth-server
+      // substitutes them into oauth2_providers.yml. Missing values leave the
+      // yaml value as literal `${VAR}` which breaks provider registration
+      // (Login page then shows "No login methods are currently configured").
+      KEYCLOAK_ENABLED: authStack.keycloakDomain !== '' ? 'true' : 'false',
+      COGNITO_ENABLED: 'false',
+      GITHUB_ENABLED: 'false',
+      GOOGLE_ENABLED: 'false',
+      PINGFEDERATE_ENABLED: 'false',
       KEYCLOAK_URL: authStack.keycloakUrl,
       KEYCLOAK_REALM: 'mcp-gateway',
       KEYCLOAK_CLIENT_ID: 'mcp-gateway-web',
@@ -172,7 +228,6 @@ export class RegistryServiceStack extends cdk.Stack {
       HOME: '/tmp',
       GATEWAY_ADDITIONAL_SERVER_NAMES: registryDomain,
       EC2_PUBLIC_DNS: registryDomain || alb.alb.loadBalancerDnsName,
-      KEYCLOAK_ENABLED: authStack.keycloakDomain !== '' ? 'true' : 'false',
       KEYCLOAK_ADMIN: 'admin',
       EMBEDDINGS_PROVIDER: config.embeddings.provider,
       EMBEDDINGS_MODEL_NAME: config.embeddings.modelName,
