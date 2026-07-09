@@ -129,13 +129,31 @@ def test_render_real_ip_config_empty_when_blank():
 
 
 @pytest.mark.unit
-def test_render_real_ip_config_single_cidr():
-    """A single VPC CIDR renders set_real_ip_from + recursive directives."""
+def test_render_real_ip_config_single_cidr_no_recursion():
+    """A single VPC CIDR renders set_real_ip_from + header, but NOT recursion.
+
+    One trusted hop needs no recursion — nginx takes the single right-most entry
+    (what that proxy appended). Recursion is reserved for stacked proxies.
+    """
     with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16"}):
         out = nginx_module._render_real_ip_config()
 
     assert "set_real_ip_from 10.0.0.0/16;" in out
     assert "real_ip_header X-Forwarded-For;" in out
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_multiple_enables_recursion():
+    """More than one trusted CIDR (stacked proxies) enables real_ip_recursive on."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16, 130.176.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "set_real_ip_from 130.176.0.0/16;" in out
     assert "real_ip_recursive on;" in out
 
 
@@ -172,6 +190,65 @@ def test_render_real_ip_config_all_invalid_emits_nothing():
     """When every entry is malformed, emit nothing rather than a broken directive."""
     with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "garbage, also-bad"}):
         assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv4_catch_all():
+    """0.0.0.0/0 is rejected (would trust every peer -> spoofable, fail-open)."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv6_catch_all():
+    """::/0 is rejected for the same reason as the IPv4 catch-all."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "::/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_drops_catch_all_keeps_valid():
+    """A catch-all mixed with a valid CIDR drops only the catch-all."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0, 10.0.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "0.0.0.0/0" not in out
+    # Only one valid CIDR survived -> no recursion.
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_warns_but_honours_broad_range(caplog):
+    """A broad non-catch-all range (e.g. /1) is warned about but still emitted.
+
+    Unlike /0 (rejected outright), a /1 is honoured — an operator may have a
+    reason — but a warning flags that it trusts an implausibly large peer range.
+    """
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/1"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 0.0.0.0/1;" in out
+    assert any("very broad" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_normal_v6_subnet_no_broad_warning(caplog):
+    """A normal IPv6 proxy subnet (/48) must NOT trip the broad-range warning."""
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "2001:db8::/48"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 2001:db8::/48;" in out
+    assert not any("very broad" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
