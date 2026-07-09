@@ -1895,30 +1895,88 @@ def test_conf_applies_edge_limit_on_general_api_location(conf_path):
     assert "limit_conn mcp_gateway_conn 100;" in body
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
-def test_conf_rate_limits_exact_match_auth_me_location(conf_path):
-    """The exact-match /api/auth/me location fans out to /validate too.
+def _assert_all_locations_rate_limited(
+    text: str,
+    marker: str,
+    expected_count: int,
+) -> None:
+    """Assert every occurrence of a location marker carries the edge limits.
 
-    Being an exact match it does NOT fall through to the rate-limited /api/
-    prefix, so every instance must carry its own edge limit.
+    Uses an EXACT expected count (not ``>= 1``) so that deleting one of the
+    duplicated server blocks in the http+https template — which has two listeners
+    (:8080 and :8443) — fails the test instead of silently passing on the survivor.
     """
-    text = conf_path.read_text()
-    marker = "location = {{ROOT_PATH}}/api/auth/me {"
-    assert marker in text
-    # Every occurrence must have the edge limit inside its body.
+    assert (
+        text.count(marker) == expected_count
+    ), f"expected {expected_count} occurrence(s) of {marker!r}, found {text.count(marker)}"
     start = 0
-    occurrences = 0
+    seen = 0
     while True:
         idx = text.find(marker, start)
         if idx == -1:
             break
-        occurrences += 1
-        body = text[idx : idx + 500]
-        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
-        assert "limit_conn mcp_gateway_conn 100;" in body
+        seen += 1
+        body = text[idx : idx + 800]
+        assert (
+            "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+        ), f"{marker!r} occurrence {seen} is missing the edge rate limit"
+        assert (
+            "limit_conn mcp_gateway_conn 100;" in body
+        ), f"{marker!r} occurrence {seen} is missing the connection limit"
         start = idx + len(marker)
-    assert occurrences >= 1
+    assert seen == expected_count
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_exact_match_auth_me_location(conf_path, expected_count):
+    """The exact-match /api/auth/me location fans out to /validate too.
+
+    Being an exact match it does NOT fall through to the rate-limited /api/
+    prefix, so every instance must carry its own edge limit. The http+https
+    template renders it twice (one per listener); assert the exact count so a
+    dropped instance is caught.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location = {{ROOT_PATH}}/api/auth/me {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_ard_location(conf_path, expected_count):
+    """The ^~ /api/ard/ location has its own auth_request /validate fan-out.
+
+    It uses ^~ priority over the general /api/ prefix, so it does not inherit the
+    /api/ limits and must carry its own.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location ^~ {{ROOT_PATH}}/api/ard/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_anthropic_api_location(conf_path, expected_count):
+    """The Anthropic-API version location fans out to /validate and must be capped."""
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location {{ROOT_PATH}}/{{ANTHROPIC_API_VERSION}}/ {",
+        expected_count,
+    )
 
 
 @pytest.mark.unit

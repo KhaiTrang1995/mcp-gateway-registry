@@ -123,8 +123,14 @@ module "mcp_gateway" {
   cors_allowed_origins   = var.cors_allowed_origins
   trusted_proxy_hops     = var.trusted_proxy_hops
   trusted_external_hosts = var.trusted_external_hosts
-  trusted_real_ip_cidrs  = var.trusted_real_ip_cidrs
-  bind_host              = var.bind_host
+  # ECS is always behind an ALB, so default the nginx realip trust to the VPC CIDR
+  # when the operator has not set it explicitly. This makes the inbound rate-limit
+  # zones (which key on the connection peer) throttle per real client IP instead of
+  # collapsing to a single global bucket at the ALB's ENI IP, and makes the audited
+  # client_ip the real end user. Falls back to empty (direct-peer behaviour) only if
+  # the VPC CIDR cannot be resolved (e.g. an existing-VPC lookup that returned none).
+  trusted_real_ip_cidrs = var.trusted_real_ip_cidrs != "" ? var.trusted_real_ip_cidrs : local.selected_vpc_cidr_block
+  bind_host             = var.bind_host
 
   # DocumentDB configuration
   storage_backend = var.storage_backend
