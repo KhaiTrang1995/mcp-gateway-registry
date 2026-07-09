@@ -82,7 +82,7 @@ When startup finishes, open:
 - Registry UI: http://localhost
 - Keycloak Admin: http://localhost:8080
 
-Credentials are printed at the end of the script (from `.env`). Typical local users are `admin` and `testuser`.
+Typical local usernames are `admin` and `testuser`. Passwords are generated into the local untracked `.env` file; the start script prints the **variable names**, not the secret values. Do not commit `.env` or paste secrets into issues or pull requests.
 
 ---
 

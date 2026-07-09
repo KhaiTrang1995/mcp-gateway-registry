@@ -58,10 +58,11 @@ Assert-True ($args -notcontains "docker-compose.override.yml") "does not use aut
 $prevHome = $env:HOME
 $prevProfile = $env:USERPROFILE
 try {
-    $env:USERPROFILE = "C:\Users\TestUserWin"
+    # Synthetic profile path (not a user-profile directory) so the tree never looks like a real home path
+    $env:USERPROFILE = "C:\mcp-gw-test-home"
     $result = Set-McpGatewayHomeEnv
-    Assert-Equal "C:\Users\TestUserWin" $result "HOME set from USERPROFILE"
-    Assert-equal "C:\Users\TestUserWin" $env:HOME "env:HOME updated"
+    Assert-equal "C:\mcp-gw-test-home" $result "HOME set from USERPROFILE"
+    Assert-equal "C:\mcp-gw-test-home" $env:HOME "env:HOME updated"
 }
 finally {
     $env:HOME = $prevHome
@@ -221,6 +222,10 @@ Assert-True ($startText -match 'if \(\$ResetData\)') "ResetData gates destructiv
 # Plain-text policy: no emoji / party-popper from the prototype script
 Assert-True ($startText -notmatch "SUCCESS!") "start.ps1 success banner is plain SUCCESS"
 Assert-True ($startText -notmatch "Autostart") "start.ps1 uses professional title (not Autostart prototype)"
+# Security: success banner must not interpolate secret env values into the console
+Assert-True ($startText -notmatch 'admin\s*/\s*\$finalAdmin') "start.ps1 does not echo admin password value"
+Assert-True ($startText -match 'passwords are in \.env') "start.ps1 points operators at .env for secrets"
+Assert-True ($startText -notmatch '(?i)Users\\[A-Za-z0-9._-]+') "start.ps1 has no user-profile path literals"
 
 $overlayPath = Join-Path $RepoRoot "docker-compose.windows.yml"
 Assert-True (Test-Path -LiteralPath $overlayPath) "docker-compose.windows.yml exists"

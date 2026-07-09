@@ -280,8 +280,6 @@ if ($SkipDockerStart) {
 Write-Host "[5/6] Starting stack..."
 Invoke-McpGatewayCompose -RepoRoot $repoRoot -ResetData:$ResetData
 
-$finalAdmin = Get-McpGatewayEnvVar -Path $envFile -Key "KEYCLOAK_ADMIN_PASSWORD"
-$finalUser = Get-McpGatewayEnvVar -Path $envFile -Key "INITIAL_USER_PASSWORD"
 $composeArgs = Get-McpGatewayComposeArgs
 
 Write-Host ""
@@ -291,9 +289,11 @@ Write-Host "=========================================================="
 Write-Host "Web Dashboard:     http://localhost"
 Write-Host "Keycloak Admin UI: http://localhost:8080"
 Write-Host ""
-Write-Host "Credentials (from .env):"
-Write-Host "  admin / $finalAdmin"
-Write-Host "  testuser / $finalUser"
+# Do not echo secret values to the console (terminal logs / screen shares).
+# Read passwords locally from the untracked .env file only.
+Write-Host "Local usernames (passwords are in .env - do not commit .env):"
+Write-Host "  admin     -> KEYCLOAK_ADMIN_PASSWORD / INITIAL_ADMIN_PASSWORD"
+Write-Host "  testuser  -> INITIAL_USER_PASSWORD"
 Write-Host ""
 Write-Host "Useful commands:"
 Write-Host ("  docker compose {0} ps" -f ($composeArgs -join " "))
