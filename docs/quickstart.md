@@ -2,6 +2,8 @@
 
 This guide walks you through setting up the MCP Gateway & Registry using pre-built Docker images. For other deployment options, see the [Installation Guide](installation.md).
 
+**On Windows?** Prefer the native PowerShell entrypoint in the [Windows Setup Guide](windows-setup-guide.md) (`.\start.ps1`). The steps below assume a Unix-like shell (Linux, macOS, or WSL2).
+
 ## Prerequisites
 
 <details>

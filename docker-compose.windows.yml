@@ -1,0 +1,27 @@
+# Windows-specific compose overlay for prebuilt (and compatible) stacks.
+#
+# On Linux/macOS the main compose files bind-mount:
+#   /var/log/containers/ai-registry
+# That host path is not available on native Windows. This overlay replaces
+# those binds with a named Docker volume so containers can write logs without
+# requiring WSL paths or Administrator-created host directories.
+#
+# Opt-in only — never auto-loaded. Invoke explicitly:
+#   docker compose -f docker-compose.prebuilt.yml -f docker-compose.windows.yml up -d
+#
+# Pair with start.ps1 on Windows, or set HOME to your user profile so
+# ${HOME}/mcp-gateway/* binds resolve correctly.
+
+services:
+  registry:
+    volumes:
+      - ai_registry_logs:/var/log/containers/ai-registry
+  auth-server:
+    volumes:
+      - ai_registry_logs:/var/log/containers/ai-registry
+  mcpgw-server:
+    volumes:
+      - ai_registry_logs:/var/log/containers/ai-registry
+
+volumes:
+  ai_registry_logs:

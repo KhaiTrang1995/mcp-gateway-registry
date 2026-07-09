@@ -81,7 +81,7 @@ More walkthroughs are in the [demo videos](docs/demo-videos.md).
 
 | You are a... | Start here |
 |---|---|
-| **Developer** | Start with the [Complete Setup Guide](docs/complete-setup-guide.md); you can also try the [macOS setup skill](.claude/skills/macos-setup/SKILL.md) to get it running on your MacBook. Then connect your AI coding assistant with the [AI Coding Assistant Integration guide](docs/ai-coding-assistants-setup.md). For programmatic access, see the [OpenAPI spec](api/openapi.json) plus a Python registration client ([`registry_client.py`](api/registry_client.py)) and CLI ([`registry_management.py`](api/registry_management.py)). |
+| **Developer** | Start with the [Complete Setup Guide](docs/complete-setup-guide.md); you can also try the [macOS setup skill](.claude/skills/macos-setup/SKILL.md) on a MacBook or the [Windows Setup Guide](docs/windows-setup-guide.md) (`.\start.ps1`) on Docker Desktop. Then connect your AI coding assistant with the [AI Coding Assistant Integration guide](docs/ai-coding-assistants-setup.md). For programmatic access, see the [OpenAPI spec](api/openapi.json) plus a Python registration client ([`registry_client.py`](api/registry_client.py)) and CLI ([`registry_management.py`](api/registry_management.py)). |
 | **Platform / security / ops team** | See the deployment guides for [Amazon EKS (Helm)](charts/README.md), [Amazon ECS (Terraform)](terraform/aws-ecs/README.md), and [Docker Compose](docs/installation.md); the [authentication guide](docs/auth.md); the [configuration reference](docs/configuration.md); and [access control & scopes](docs/scopes.md). |
 | **Decision-maker evaluating adoption** | Read the [Executive Brief](docs/overview/executive-brief.md), watch the [demo videos](docs/demo-videos.md), and try the [AWS Workshop](https://catalog.us-east-1.prod.workshops.aws/workshops/0c3265a6-1a4a-467b-ae56-e4d019184b0e/en-US). |
 
@@ -105,6 +105,17 @@ nano .env
 open http://localhost        # macOS  (Linux: xdg-open http://localhost)
 ```
 
+**Windows (PowerShell + Docker Desktop):**
+
+```powershell
+git clone https://github.com/agentic-community/mcp-gateway-registry.git
+cd mcp-gateway-registry
+.\start.ps1
+# Open http://localhost
+```
+
+See the [Windows Setup Guide](docs/windows-setup-guide.md) for prerequisites, stop/logs, and WSL2 fallback. The Windows path uses `docker-compose.prebuilt.yml` plus the opt-in `docker-compose.windows.yml` overlay and does not wipe named volumes by default.
+
 The [Complete Installation Guide](docs/installation.md) has the full walkthrough for **Amazon EC2** (prerequisites, MongoDB and Keycloak initialization, first user and service account, registering a server, and testing the gateway).
 
 **Deploying somewhere else?**
@@ -112,6 +123,7 @@ The [Complete Installation Guide](docs/installation.md) has the full walkthrough
 - **Amazon ECS**: see the [Terraform stack README](terraform/aws-ecs/README.md), or better, use the [Terraform setup skill](.claude/skills/terraform-setup/SKILL.md) to have your AI coding assistant run the deployment for you.
 - **Amazon EKS**: see the [Helm charts](charts/README.md).
 - **Just want to try it on macOS?**: use the [macOS setup skill](.claude/skills/macos-setup/SKILL.md) to get it running on your MacBook end to end.
+- **Running on Windows?**: see the [Windows Setup Guide](docs/windows-setup-guide.md).
 
 ## What's in the box
 

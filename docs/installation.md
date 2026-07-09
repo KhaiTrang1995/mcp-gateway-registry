@@ -2,6 +2,8 @@
 
 Complete installation instructions for the MCP Gateway & Registry on various platforms.
 
+**Platform guides:** [macOS Setup Guide](macos-setup-guide.md) | [Windows Setup Guide](windows-setup-guide.md) | [Quick Start](quickstart.md)
+
 ## Prerequisites
 
 - **Node.js 16+**: Required for building the React frontend (not needed with `--prebuilt` flag)

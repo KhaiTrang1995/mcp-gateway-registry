@@ -1,0 +1,23 @@
+# Default: normalize text to LF in the repository
+* text=auto eol=lf
+
+# Shell scripts must stay LF so they run on Linux/macOS and in containers
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows entry scripts keep CRLF for native PowerShell / cmd tools
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
