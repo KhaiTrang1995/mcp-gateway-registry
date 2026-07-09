@@ -5,6 +5,7 @@ Tests the NginxConfigService for configuration generation and reload.
 """
 
 import asyncio
+import re
 from unittest.mock import AsyncMock, MagicMock, mock_open, patch
 from urllib.parse import urlparse
 
@@ -129,13 +130,31 @@ def test_render_real_ip_config_empty_when_blank():
 
 
 @pytest.mark.unit
-def test_render_real_ip_config_single_cidr():
-    """A single VPC CIDR renders set_real_ip_from + recursive directives."""
+def test_render_real_ip_config_single_cidr_no_recursion():
+    """A single VPC CIDR renders set_real_ip_from + header, but NOT recursion.
+
+    One trusted hop needs no recursion — nginx takes the single right-most entry
+    (what that proxy appended). Recursion is reserved for stacked proxies.
+    """
     with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16"}):
         out = nginx_module._render_real_ip_config()
 
     assert "set_real_ip_from 10.0.0.0/16;" in out
     assert "real_ip_header X-Forwarded-For;" in out
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_multiple_enables_recursion():
+    """More than one trusted CIDR (stacked proxies) enables real_ip_recursive on."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "10.0.0.0/16, 130.176.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "set_real_ip_from 130.176.0.0/16;" in out
     assert "real_ip_recursive on;" in out
 
 
@@ -172,6 +191,65 @@ def test_render_real_ip_config_all_invalid_emits_nothing():
     """When every entry is malformed, emit nothing rather than a broken directive."""
     with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "garbage, also-bad"}):
         assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv4_catch_all():
+    """0.0.0.0/0 is rejected (would trust every peer -> spoofable, fail-open)."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_rejects_ipv6_catch_all():
+    """::/0 is rejected for the same reason as the IPv4 catch-all."""
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "::/0"}):
+        assert nginx_module._render_real_ip_config() == ""
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_drops_catch_all_keeps_valid():
+    """A catch-all mixed with a valid CIDR drops only the catch-all."""
+    with patch.dict(
+        "os.environ",
+        {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/0, 10.0.0.0/16"},
+    ):
+        out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 10.0.0.0/16;" in out
+    assert "0.0.0.0/0" not in out
+    # Only one valid CIDR survived -> no recursion.
+    assert "real_ip_recursive" not in out
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_warns_but_honours_broad_range(caplog):
+    """A broad non-catch-all range (e.g. /1) is warned about but still emitted.
+
+    Unlike /0 (rejected outright), a /1 is honoured — an operator may have a
+    reason — but a warning flags that it trusts an implausibly large peer range.
+    """
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "0.0.0.0/1"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 0.0.0.0/1;" in out
+    assert any("very broad" in r.message for r in caplog.records)
+
+
+@pytest.mark.unit
+def test_render_real_ip_config_normal_v6_subnet_no_broad_warning(caplog):
+    """A normal IPv6 proxy subnet (/48) must NOT trip the broad-range warning."""
+    import logging
+
+    with patch.dict("os.environ", {"TRUSTED_REAL_IP_CIDRS": "2001:db8::/48"}):
+        with caplog.at_level(logging.WARNING, logger="registry.core.nginx_service"):
+            out = nginx_module._render_real_ip_config()
+
+    assert "set_real_ip_from 2001:db8::/48;" in out
+    assert not any("very broad" in r.message for r in caplog.records)
 
 
 @pytest.mark.unit
@@ -1468,6 +1546,27 @@ def test_generated_protected_api_block_carries_internal_token():
     assert "proxy_set_header X-Internal-Token-Registry $auth_internal_token_registry;" in src
 
 
+def test_unprotected_api_block_still_rate_limited():
+    """When auth_request is bypassed (NGINX_DISABLE_API_AUTH_REQUEST=true), the
+    replacement /api/ block must STILL carry the inbound rate limits — /api/ is
+    the highest-volume surface and dropping the edge/registration caps here would
+    reopen the flood path the limits exist to close.
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[3] / "registry" / "core" / "nginx_service.py"
+    ).read_text()
+    # Isolate the unprotected replacement block so we assert on IT, not the
+    # protected block elsewhere in the file.
+    marker = "unprotected_api_block = "
+    assert marker in src
+    unprotected = src[src.index(marker) : src.index('"""', src.index(marker) + len(marker) + 4) + 3]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in unprotected
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in unprotected
+    assert "limit_conn mcp_gateway_conn 100;" in unprotected
+
+
 @pytest.mark.unit
 class TestResolveMcpProxyReadTimeout:
     """Tests for the nginx MCP proxy_read_timeout derivation helper.
@@ -1777,3 +1876,203 @@ async def test_scheduler_rejects_invalid_config_and_keeps_last_good(monkeypatch,
     assert scheduler._last_config_hash == ""
     reload_mock.assert_not_called()
     assert scheduler._dirty is True
+
+
+# =============================================================================
+# Inbound rate limiting (DoS protection for the shared /validate subrequest)
+# =============================================================================
+
+from pathlib import Path  # noqa: E402
+
+_DOCKER_DIR = Path(__file__).resolve().parents[3] / "docker"
+_HTTP_ONLY_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_only.conf"
+_HTTP_AND_HTTPS_CONF = _DOCKER_DIR / "nginx_rev_proxy_http_and_https.conf"
+
+
+@pytest.mark.unit
+def test_generated_mcp_proxy_block_is_rate_limited(nginx_service):
+    """Generated /mcp-proxy/ location blocks must carry the inbound edge limits.
+
+    Every MCP request fans out to the shared /validate auth subrequest; without
+    an inbound limit_req/limit_conn a flood on one server's path exhausts
+    /validate for all servers.
+    """
+    for transport in ("streamable-http", "sse", "direct"):
+        block = nginx_service._create_location_block(
+            "/test", "http://localhost:8000/mcp", transport
+        )
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in block, transport
+        assert "limit_conn mcp_gateway_conn 100;" in block, transport
+        # The limit must sit inside the location, before auth_request (so the
+        # fan-out is bounded), never on the /validate subrequest itself.
+        assert block.index("limit_req") < block.index("auth_request /validate")
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_generated_virtual_server_block_is_rate_limited(nginx_service):
+    """Client-facing virtual-server blocks must also carry the inbound limits."""
+
+    class _VS:
+        path = "/virtual/dev-essentials"
+        server_name = "Dev Essentials"
+
+    repo = MagicMock()
+    repo.list_enabled = AsyncMock(return_value=[_VS()])
+    with patch(
+        "registry.repositories.factory.get_virtual_server_repository",
+        return_value=repo,
+    ):
+        blocks = await nginx_service._generate_virtual_server_blocks()
+
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in blocks
+    assert "limit_conn mcp_gateway_conn 100;" in blocks
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_declares_rate_limit_zones(conf_path):
+    """Both nginx conf templates must declare the rate-limit zones at http scope."""
+    text = conf_path.read_text()
+    assert "limit_req_zone $binary_remote_addr zone=mcp_gateway_edge:10m rate=50r/s;" in text
+    assert (
+        "limit_req_zone $mcp_gateway_register_key zone=mcp_gateway_register:10m rate=5r/s;" in text
+    )
+    assert "limit_conn_zone $binary_remote_addr zone=mcp_gateway_conn:10m;" in text
+    # Registration classifier map + fail-safe empty default (skip when non-register).
+    assert "map $uri $mcp_gateway_register_key {" in text
+    assert re.search(r'default\s+"";', text)
+    # Registration patterns must allow an optional trailing slash so a request to
+    # /api/register/ cannot bypass the stricter registration cap (only the generous
+    # edge limit would apply). Match must be anchored to the register path suffix.
+    for register_path in ("register", "servers/register", "internal/register"):
+        assert f'"~*/api/{register_path}/?$"' in text, (
+            f"register classifier for /api/{register_path} must accept an optional "
+            "trailing slash to prevent a trailing-slash throttle bypass"
+        )
+    # 429 status so clients back off.
+    assert "limit_req_status 429;" in text
+    assert "limit_conn_status 429;" in text
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_applies_edge_limit_on_general_api_location(conf_path):
+    """The general /api/ location (covers registration) must carry both limits."""
+    text = conf_path.read_text()
+    # Locate the general /api/ location body and assert the limits are inside it.
+    marker = "location {{ROOT_PATH}}/api/ {"
+    assert marker in text
+    idx = text.index(marker)
+    body = text[idx : idx + 800]
+    assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body
+    # Registration endpoints (/api/register, /api/servers/register,
+    # /api/internal/register) fall through this location and get the tighter cap.
+    assert "limit_req zone=mcp_gateway_register burst=10 nodelay;" in body
+    assert "limit_conn mcp_gateway_conn 100;" in body
+
+
+def _assert_all_locations_rate_limited(
+    text: str,
+    marker: str,
+    expected_count: int,
+) -> None:
+    """Assert every occurrence of a location marker carries the edge limits.
+
+    Uses an EXACT expected count (not ``>= 1``) so that deleting one of the
+    duplicated server blocks in the http+https template — which has two listeners
+    (:8080 and :8443) — fails the test instead of silently passing on the survivor.
+    """
+    assert text.count(marker) == expected_count, (
+        f"expected {expected_count} occurrence(s) of {marker!r}, found {text.count(marker)}"
+    )
+    start = 0
+    seen = 0
+    while True:
+        idx = text.find(marker, start)
+        if idx == -1:
+            break
+        seen += 1
+        body = text[idx : idx + 800]
+        assert "limit_req zone=mcp_gateway_edge burst=100 nodelay;" in body, (
+            f"{marker!r} occurrence {seen} is missing the edge rate limit"
+        )
+        assert "limit_conn mcp_gateway_conn 100;" in body, (
+            f"{marker!r} occurrence {seen} is missing the connection limit"
+        )
+        start = idx + len(marker)
+    assert seen == expected_count
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_exact_match_auth_me_location(conf_path, expected_count):
+    """The exact-match /api/auth/me location fans out to /validate too.
+
+    Being an exact match it does NOT fall through to the rate-limited /api/
+    prefix, so every instance must carry its own edge limit. The http+https
+    template renders it twice (one per listener); assert the exact count so a
+    dropped instance is caught.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location = {{ROOT_PATH}}/api/auth/me {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_ard_location(conf_path, expected_count):
+    """The ^~ /api/ard/ location has its own auth_request /validate fan-out.
+
+    It uses ^~ priority over the general /api/ prefix, so it does not inherit the
+    /api/ limits and must carry its own.
+    """
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location ^~ {{ROOT_PATH}}/api/ard/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("conf_path", "expected_count"),
+    [(_HTTP_ONLY_CONF, 1), (_HTTP_AND_HTTPS_CONF, 2)],
+)
+def test_conf_rate_limits_anthropic_api_location(conf_path, expected_count):
+    """The Anthropic-API version location fans out to /validate and must be capped."""
+    _assert_all_locations_rate_limited(
+        conf_path.read_text(),
+        "location {{ROOT_PATH}}/{{ANTHROPIC_API_VERSION}}/ {",
+        expected_count,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("conf_path", [_HTTP_ONLY_CONF, _HTTP_AND_HTTPS_CONF])
+def test_conf_does_not_rate_limit_validate_subrequest(conf_path):
+    """The internal /validate subrequest must NOT be rate-limited directly.
+
+    Limiting the fan-out target would throttle legitimate authenticated traffic;
+    the bound belongs on the inbound edge locations instead.
+    """
+    text = conf_path.read_text()
+    marker = "location = /validate {"
+    assert marker in text
+    idx = text.index(marker)
+    # /validate body ends at the next top-level 4-space-indented closing brace;
+    # grab a generous window and assert no limit_req/limit_conn inside it.
+    body = text[idx : idx + 1600]
+    # Trim at the block's closing to avoid spilling into the next location.
+    end = body.find("\n    }")
+    body = body[: end if end != -1 else len(body)]
+    assert "limit_req" not in body
+    assert "limit_conn" not in body

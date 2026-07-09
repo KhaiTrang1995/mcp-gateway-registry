@@ -379,7 +379,7 @@ variable "trusted_external_hosts" {
 }
 
 variable "trusted_real_ip_cidrs" {
-  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP AND so the inbound rate-limit zones throttle per real client IP instead of collapsing to one global bucket at the ALB's IP. Leave EMPTY (the default) to auto-populate with this stack's VPC CIDR: ECS is always behind an ALB, so the module defaults set_real_ip_from to the VPC CIDR for you. Set it explicitly only to override (e.g. CloudFront in front of an ALB: list the VPC CIDR AND CloudFront's origin-facing ranges), or to a narrower range. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
   type        = string
   default     = ""
 }
@@ -1233,6 +1233,12 @@ variable "audit_log_ttl_days" {
   }
 }
 
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines that can be lost on restart and are not queryable for forensics. Set to false only in environments where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
+}
+
 # =============================================================================
 # APPLICATION LOG CONFIGURATION
 # =============================================================================
@@ -1720,7 +1726,7 @@ variable "github_api_base_url" {
 # =============================================================================
 
 variable "enable_waf" {
-  description = "Enable WAFv2 Web ACLs for ALBs. Requires wafv2:* IAM permissions. Set to false if IAM permissions are not available."
+  description = "Enable WAFv2 Web ACLs for ALBs (AWS managed rule sets + WAF-level rate rules) as optional defense-in-depth. NOT required for per-client-IP rate limiting: the container nginx already rate-limits the auth-validation fan-out per real client IP (trusted_real_ip_cidrs defaults to the VPC CIDR, so nginx's realip module rewrites the limit key from the ALB IP to the real client out of the box). Defaults to false as a cost decision (WAFv2 has a per-Web-ACL and per-request cost and requires wafv2:* IAM permissions); set to true for an extra managed-rules layer (see terraform/aws-ecs/README.md)."
   type        = bool
   default     = false
 }

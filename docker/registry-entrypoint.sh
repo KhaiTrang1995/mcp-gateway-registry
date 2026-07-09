@@ -331,12 +331,22 @@ BIND_HOST="${BIND_HOST:-127.0.0.1}"
 
 # Only trust proxy headers (X-Forwarded-For / X-Forwarded-Proto) when the peer is
 # loopback. nginx is the sole client and reaches uvicorn over 127.0.0.1:7860 in
-# this same container, so scoping trust to loopback means uvicorn NEVER derives
-# request.client from a header supplied by a non-local caller. Using "*" made
-# uvicorn overwrite request.client with the left-most (client-controlled)
-# X-Forwarded-For entry, poisoning the direct-peer fallback in get_client_ip();
-# loopback-only keeps that fallback non-spoofable (defense-in-depth for the
-# audit client-IP resolver). ::1 covers the BIND_HOST=:: dual-stack case.
+# this same container. Scope of this setting: it governs ONLY whether uvicorn
+# overwrites request.client from a forwarded header. Using "*" made uvicorn set
+# request.client from the left-most (client-controlled) X-Forwarded-For entry;
+# loopback-only stops that. It is NOT what makes get_client_ip() safe — that
+# resolver reads X-Real-IP / X-Forwarded-For from the request headers directly
+# (tiers 1-2, whose trustworthiness depends on nginx overwriting those headers,
+# not on this flag) and only falls back to request.client as tier 3. So this is
+# a narrow hardening of that tier-3 fallback, not the primary control. ::1
+# covers the BIND_HOST=:: dual-stack case.
+#
+# NOTE: assumes nginx shares this container's network namespace (reaches uvicorn
+# over loopback). If nginx is ever run in a separate pod/container, its peer is
+# no longer loopback: request.client reverts to the nginx peer (still not
+# client-controlled) and uvicorn drops --proxy-headers scheme handling, but the
+# audit IP survives via X-Real-IP and scheme via the X-Forwarded-Proto header,
+# so it degrades gracefully. Revisit this value if that topology is adopted.
 FORWARDED_ALLOW_IPS="127.0.0.1,::1"
 
 echo "Starting MCP Registry in the background..."

@@ -420,7 +420,7 @@ variable "trusted_external_hosts" {
 }
 
 variable "trusted_real_ip_cidrs" {
-  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP. Leave empty (default) for edge deployments where nginx is reached directly. Behind an ALB (EC2/ECS/EKS) set your VPC CIDR (e.g. 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's origin-facing ranges. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored. Note: the ECS root module (terraform/aws-ecs/main.tf) defaults this to the VPC CIDR when unset, since ECS is always behind an ALB."
   type        = string
   default     = ""
 }
@@ -1221,6 +1221,12 @@ variable "audit_log_ttl_days" {
   description = "Audit log retention period in days."
   type        = number
   default     = 7
+}
+
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines. Set to false only where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
 }
 
 # =============================================================================

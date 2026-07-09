@@ -27,6 +27,16 @@ ingress_cidr_blocks = [
   "YOUR.EC2.INSTANCE.IP/32",   # Your EC2 instance or NAT Gateway IP
 ]
 
+# WAFv2 Web ACLs on the ALBs (AWS managed rule sets + WAF-level rate rules) as
+# optional defense-in-depth. NOT required for per-client-IP rate limiting: the
+# container nginx already rate-limits the auth-validation fan-out, and behind an
+# ALB you get true per-client-IP limiting out of the box because trusted_real_ip_cidrs
+# defaults to the VPC CIDR (nginx's realip module then rewrites the rate-limit key
+# from the ALB's IP to the real client). WAF is OFF by default as a cost decision (WAFv2 has a
+# per-Web-ACL and per-request cost and needs wafv2:* IAM permissions). Turn it on
+# for an extra managed-rules layer on internet-facing deployments:
+# enable_waf = true
+
 # ============================================================================
 # DOMAIN CONFIGURATION
 # ============================================================================
@@ -260,6 +270,17 @@ session_cookie_domain = ""
 # client-controlled left-most one). On ECS behind an ALB (+ optional CloudFront),
 # raise this to match the number of trusted proxies. Default 1.
 # trusted_proxy_hops = 2
+
+# Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front
+# of the bundled nginx. nginx's realip module recovers the real client IP from
+# X-Forwarded-For for peers in these ranges. This does double duty: the audited
+# client IP becomes the end user (not the ALB), AND the inbound rate-limit zones —
+# which key on the connection peer — then throttle per real client IP instead of
+# collapsing to a single global bucket at the ALB's IP. LEAVE EMPTY (default): ECS
+# is always behind an ALB, so the module auto-populates this with your VPC CIDR.
+# Override only for a stacked proxy (CloudFront in front of an ALB: list the VPC
+# CIDR AND CloudFront's origin ranges) or to narrow the trusted range.
+# trusted_real_ip_cidrs = "10.0.0.0/16"
 
 # ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
 # when building OAuth external URLs. Your primary domain is ALREADY covered — the
@@ -632,6 +653,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Common values: 7 (dev), 30 (standard), 90 (compliance)
 # Default: 7
 # audit_log_ttl_days = 7
+
+# Require a durable audit sink (fail closed)
+# When true (default), the registry refuses to start if audit logging is enabled
+# but no durable store (DocumentDB/MongoDB) is available, instead of silently
+# degrading to non-durable JSON log lines that can be lost on restart and are not
+# queryable for forensics. Set to false only where a non-durable trail is acceptable.
+# Default: true
+# audit_log_require_durable = true
 
 # ============================================================================
 # APPLICATION LOG CONFIGURATION

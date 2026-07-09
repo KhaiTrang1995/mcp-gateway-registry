@@ -38,6 +38,16 @@ DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS: int = 30
 
 
+# Minimum sane prefix length for a TRUSTED_REAL_IP_CIDRS entry. A prefix shorter
+# than this (e.g. 0.0.0.0/1, 10.0.0.0/4) trusts an implausibly large peer range
+# for a proxy subnet and edges toward the catch-all footgun, so we warn (but still
+# honour it — unlike a /0, which is rejected outright). IPv4-scale; IPv6 prefixes
+# are compared on their IPv4-equivalent host-bit width so a normal /48–/64 proxy
+# subnet does not trip the warning.
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V4: int = 8
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V6: int = 32
+
+
 def _resolve_mcp_proxy_read_timeout_seconds() -> int:
     """Resolve nginx's proxy_read_timeout (seconds) for MCP location blocks.
 
@@ -80,16 +90,25 @@ def _render_real_ip_config() -> str:
     directives are emitted, which is the correct behaviour for edge deployments
     (compose / single host) where nginx's peer already IS the client.
 
-    ``real_ip_recursive on`` walks the forwarded chain right-to-left skipping the
-    trusted CIDRs, stopping at the first untrusted address (the real client), so a
-    stacked-proxy topology (e.g. CloudFront in front of an ALB, once both ranges
-    are listed) resolves correctly. A spoofed left-most entry can never win
-    because it is not appended by a trusted hop.
+    ``real_ip_recursive`` walks the forwarded chain right-to-left skipping the
+    trusted CIDRs, stopping at the first untrusted address (the real client). It
+    is emitted as ``on`` ONLY when more than one trusted CIDR is configured (a
+    stacked-proxy topology, e.g. CloudFront in front of an ALB). For the common
+    single-hop case (one ALB) recursion is left off: nginx takes the single
+    right-most entry, which is what the one trusted proxy appended, and a spoofed
+    left-most entry can never win. Recursion + an over-broad trusted range would
+    let a client whose own source falls inside that range inject a left-most
+    entry, so we don't enable it unless the topology actually needs it.
+
+    Catch-all ranges (``0.0.0.0/0`` / ``::/0``) are rejected: they would make
+    nginx trust EVERY peer and take the spoofable left-most XFF entry — a
+    fail-open misconfiguration — so they are dropped with a warning like any other
+    invalid entry. Narrow the trust to the load balancer's specific subnet(s).
 
     Returns:
         The nginx directive block (``set_real_ip_from`` lines + ``real_ip_header``
-        + ``real_ip_recursive on``), or an empty string when no valid CIDRs are
-        configured.
+        + optional ``real_ip_recursive on``), or an empty string when no valid
+        CIDRs are configured.
     """
     raw = os.environ.get("TRUSTED_REAL_IP_CIDRS", "").strip()
     if not raw:
@@ -104,9 +123,36 @@ def _render_real_ip_config() -> str:
             # strict=False so a host address (e.g. 10.1.3.39) is accepted as a
             # /32 rather than rejected for having host bits set.
             network = ipaddress.ip_network(candidate, strict=False)
-            valid_cidrs.append(str(network))
         except ValueError:
             logger.warning("Ignoring malformed entry in TRUSTED_REAL_IP_CIDRS: %r", candidate)
+            continue
+        # Reject a catch-all range: trusting every peer defeats the guard and
+        # makes the spoofable left-most XFF entry win (fail-open). prefixlen == 0
+        # is 0.0.0.0/0 or ::/0.
+        if network.prefixlen == 0:
+            logger.warning(
+                "Refusing catch-all range %r in TRUSTED_REAL_IP_CIDRS "
+                "(would trust every peer); narrow it to the proxy's subnet",
+                candidate,
+            )
+            continue
+        # Warn (but honour) an implausibly broad, non-catch-all range. A proxy
+        # subnet is realistically a /16-/28 (v4) or /48-/64 (v6); anything much
+        # broader trusts far more peers than a real LB tier occupies and edges
+        # toward the same spoofing risk as a catch-all.
+        floor = (
+            MIN_TRUSTED_REAL_IP_PREFIXLEN_V6
+            if network.version == 6
+            else MIN_TRUSTED_REAL_IP_PREFIXLEN_V4
+        )
+        if network.prefixlen < floor:
+            logger.warning(
+                "TRUSTED_REAL_IP_CIDRS entry %r is very broad (/%d); trusting this "
+                "many peers is risky — narrow it to the proxy's actual subnet",
+                candidate,
+                network.prefixlen,
+            )
+        valid_cidrs.append(str(network))
 
     if not valid_cidrs:
         logger.warning(
@@ -118,7 +164,10 @@ def _render_real_ip_config() -> str:
     logger.info("Configuring nginx realip trust for CIDRs: %s", ", ".join(valid_cidrs))
     lines = [f"set_real_ip_from {cidr};" for cidr in valid_cidrs]
     lines.append("real_ip_header X-Forwarded-For;")
-    lines.append("real_ip_recursive on;")
+    # Only recurse for stacked proxies (>1 trusted hop). A single trusted CIDR
+    # needs no recursion — the right-most entry is the one that proxy appended.
+    if len(valid_cidrs) > 1:
+        lines.append("real_ip_recursive on;")
     return "\n".join(lines)
 
 
@@ -757,6 +806,15 @@ class NginxConfigService:
 
                 unprotected_api_block = """    # API endpoints - FastAPI handles authentication (session cookie / bearer)
     location {{ROOT_PATH}}/api/ {
+        # Inbound rate limits still apply even though auth_request is bypassed:
+        # /api/ is the highest-volume surface and must stay bounded at the edge,
+        # and the registration endpoints keep their stricter per-source cap (the
+        # register zone key is empty for non-registration URIs, so it is a no-op
+        # for the rest of /api/).
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_req zone=mcp_gateway_register burst=10 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # Proxy to FastAPI service
         proxy_pass http://127.0.0.1:7860/api/;
         proxy_http_version 1.1;
@@ -1416,6 +1474,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 block = f"""
     # Virtual MCP Server: {safe_name}
     location {{{{ROOT_PATH}}}}{safe_vs_path} {{
+        # Inbound rate limiting: this path fans out to the shared /validate auth
+        # subrequest, so bound it at the edge (zones declared at http scope in
+        # docker/nginx_rev_proxy_*.conf) to keep a flood from exhausting /validate.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         set $virtual_server_id "{safe_id}";
         auth_request /validate;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
@@ -1861,6 +1925,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Common proxy settings
         common_settings = f"""
+        # Inbound rate limiting: every MCP request fans out to the shared
+        # /validate auth subrequest, so bound it at the edge (zones + rationale
+        # are declared at http scope in docker/nginx_rev_proxy_*.conf). Keeps a
+        # flood on one server's /mcp-proxy/ path from exhausting /validate for
+        # all servers. burst+nodelay give bursty MCP clients headroom.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # DNS resolver for dynamic proxy_pass upstreams.
         # Default: 8.8.8.8 8.8.4.4 (public DNS).
         # Override with NGINX_DNS_RESOLVER env var for environments where
