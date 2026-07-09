@@ -108,17 +108,18 @@ tests:
       # CODING_ASSISTANTS is env[9]; UI_TITLE is env[10]; the tool-level access
       # control pair (issue #1026) is env[11]/env[12]; MCP_ADVERTISED_SCOPES is
       # env[13]; the SSRF-guard allowlist pair (SSRF_ALLOWED_HOSTS/
-      # SSRF_ALLOWED_CIDRS) is env[14]/env[15]; the IDE OAuth login pair
-      # (PR #1224) IDE_OAUTH_CLIENT_ID/IDE_OAUTH_CALLBACK_PORT is env[16]/env[17];
+      # SSRF_ALLOWED_CIDRS) is env[14]/env[15]; A2A_REVERSE_PROXY_ENABLED is
+      # env[16]; the IDE OAuth login pair
+      # (PR #1224) IDE_OAUTH_CLIENT_ID/IDE_OAUTH_CALLBACK_PORT is env[17]/env[18];
       # the custom-entity-types quartet (CUSTOM_ENTITY_TYPES_ENABLED,
       # CUSTOM_TYPE_CACHE_TTL_SECONDS, MAX_CUSTOM_RECORDS_PER_TYPE,
-      # MAX_CUSTOM_TYPES) is env[18]/env[19]/env[20]/env[21]; the internal-token
+      # MAX_CUSTOM_TYPES) is env[19]/env[20]/env[21]/env[22]; the internal-token
       # pair (INTERNAL_TOKEN_TTL_SECONDS, INTERNAL_TOKEN_LEEWAY_SECONDS) is
-      # env[22]/env[23];
-      # KEYCLOAK_ADMIN_PASSWORD (conditional on keycloak provider) is env[24];
+      # env[23]/env[24];
+      # KEYCLOAK_ADMIN_PASSWORD (conditional on keycloak provider) is env[25];
       # PF_ADMIN_URL/PF_ADMIN_USER (registry-only, always rendered) are
-      # env[25]/env[26]; UPDATE_CHECK_ENABLED/UPDATE_CHECK_INTERVAL_HOURS
-      # (always rendered) are env[27]/env[28]; user extraEnv entries are
+      # env[26]/env[27]; UPDATE_CHECK_ENABLED/UPDATE_CHECK_INTERVAL_HOURS
+      # (always rendered) are env[28]/env[29]; user extraEnv entries are
       # appended at the end.
       #
       # NOTE: The indices below assume global.authProvider.type=keycloak
@@ -164,48 +165,51 @@ tests:
           value: SSRF_ALLOWED_CIDRS
       - equal:
           path: spec.template.spec.containers[0].env[16].name
-          value: IDE_OAUTH_CLIENT_ID
+          value: A2A_REVERSE_PROXY_ENABLED
       - equal:
           path: spec.template.spec.containers[0].env[17].name
-          value: IDE_OAUTH_CALLBACK_PORT
+          value: IDE_OAUTH_CLIENT_ID
       - equal:
           path: spec.template.spec.containers[0].env[18].name
-          value: CUSTOM_ENTITY_TYPES_ENABLED
+          value: IDE_OAUTH_CALLBACK_PORT
       - equal:
           path: spec.template.spec.containers[0].env[19].name
-          value: CUSTOM_TYPE_CACHE_TTL_SECONDS
+          value: CUSTOM_ENTITY_TYPES_ENABLED
       - equal:
           path: spec.template.spec.containers[0].env[20].name
-          value: MAX_CUSTOM_RECORDS_PER_TYPE
+          value: CUSTOM_TYPE_CACHE_TTL_SECONDS
       - equal:
           path: spec.template.spec.containers[0].env[21].name
-          value: MAX_CUSTOM_TYPES
+          value: MAX_CUSTOM_RECORDS_PER_TYPE
       - equal:
           path: spec.template.spec.containers[0].env[22].name
-          value: INTERNAL_TOKEN_TTL_SECONDS
+          value: MAX_CUSTOM_TYPES
       - equal:
           path: spec.template.spec.containers[0].env[23].name
-          value: INTERNAL_TOKEN_LEEWAY_SECONDS
+          value: INTERNAL_TOKEN_TTL_SECONDS
       - equal:
           path: spec.template.spec.containers[0].env[24].name
-          value: KEYCLOAK_ADMIN_PASSWORD
+          value: INTERNAL_TOKEN_LEEWAY_SECONDS
       - equal:
           path: spec.template.spec.containers[0].env[25].name
-          value: PF_ADMIN_URL
+          value: KEYCLOAK_ADMIN_PASSWORD
       - equal:
           path: spec.template.spec.containers[0].env[26].name
-          value: PF_ADMIN_USER
+          value: PF_ADMIN_URL
       - equal:
           path: spec.template.spec.containers[0].env[27].name
-          value: UPDATE_CHECK_ENABLED
+          value: PF_ADMIN_USER
       - equal:
           path: spec.template.spec.containers[0].env[28].name
-          value: UPDATE_CHECK_INTERVAL_HOURS
+          value: UPDATE_CHECK_ENABLED
       - equal:
           path: spec.template.spec.containers[0].env[29].name
-          value: MY_FLAG
+          value: UPDATE_CHECK_INTERVAL_HOURS
       - equal:
           path: spec.template.spec.containers[0].env[30].name
+          value: MY_FLAG
+      - equal:
+          path: spec.template.spec.containers[0].env[31].name
           value: MY_SECRET_VAR
 
   - it: appends extraEnvFrom entries after chart-managed envFrom sources
@@ -509,6 +513,15 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: "\"MCP_ADVERTISED_SCOPES\" is a reserved variable"
+
+  - it: fails when extraEnv contains A2A_REVERSE_PROXY_ENABLED
+    set:
+      extraEnv:
+        - name: A2A_REVERSE_PROXY_ENABLED
+          value: "true"
+    asserts:
+      - failedTemplate:
+          errorPattern: "\"A2A_REVERSE_PROXY_ENABLED\" is a reserved variable"
 
   - it: fails on duplicate names within extraEnv
     set:

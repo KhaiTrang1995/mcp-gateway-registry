@@ -959,6 +959,22 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Default: "full" (uncomment to change)
 # registry_mode = "full"
 
+# A2A reverse-proxy gateway (opt-in; default false). When true, each enabled A2A
+# agent gets nginx location blocks proxying its card + JSON-RPC through the
+# gateway for centralized auth and metrics. Requires deployment_mode =
+# "with-gateway".
+# a2a_reverse_proxy_enabled = false
+
+# SSRF guard allowlist for internal MCP-server / A2A-agent upstreams. The health
+# checker and proxy validate every upstream URL through an SSRF guard that blocks
+# private/loopback/metadata addresses by default, so internal upstreams (private
+# IPs / service-discovery hostnames) are marked unhealthy unless listed here. The
+# cloud metadata address (169.254.169.254) is never permitted by either.
+#   ssrf_allowed_hosts: comma-separated exact hostnames or IPs (least privilege).
+#   ssrf_allowed_cidrs: comma-separated CIDR ranges for whole internal subnets.
+# ssrf_allowed_hosts = "flight-booking-agent.mcp-gateway-v2.local"
+# ssrf_allowed_cidrs = ""
+
 # Internal/workshop deployment classification (telemetry labels only; issue #1216).
 # Tags a deployment as one of our own internal/workshop installs so it can be
 # distinguished from community installs in telemetry. Does NOT change access control.

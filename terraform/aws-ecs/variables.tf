@@ -1488,6 +1488,24 @@ variable "registry_mode" {
   }
 }
 
+variable "a2a_reverse_proxy_enabled" {
+  description = "Enable A2A agent reverse-proxy generation (opt-in; default off). When true, each enabled A2A agent gets nginx location blocks proxying its card + JSON-RPC through the gateway for centralized auth and metrics."
+  type        = bool
+  default     = false
+}
+
+variable "ssrf_allowed_hosts" {
+  description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
+  type        = string
+  default     = ""
+}
+
+variable "ssrf_allowed_cidrs" {
+  description = "Comma-separated CIDR ranges the SSRF guard accepts for MCP-server / A2A-agent upstreams even though they are private. The cloud metadata address 169.254.169.254 is never permitted."
+  type        = string
+  default     = ""
+}
+
 variable "internal_only_deployment" {
   description = <<-EOT
     Marks this as one of our own internal/workshop deployments (not a community

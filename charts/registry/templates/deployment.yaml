@@ -137,6 +137,11 @@ spec:
               value: {{ .Values.app.ssrfAllowedHosts | default "" | quote }}
             - name: SSRF_ALLOWED_CIDRS
               value: {{ .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # A2A reverse-proxy gateway (opt-in; default off). When true, each
+            # enabled A2A agent gets nginx location blocks proxying its card +
+            # JSON-RPC through the gateway for centralized auth and metrics.
+            - name: A2A_REVERSE_PROXY_ENABLED
+              value: {{ .Values.app.a2aReverseProxyEnabled | default false | toString | quote }}
             # IDE OAuth login (PR #1224): public client_id + fixed callback port
             - name: IDE_OAUTH_CLIENT_ID
               value: {{ .Values.app.ideOauthClientId | default "" | quote }}

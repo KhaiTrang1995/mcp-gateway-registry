@@ -1292,6 +1292,24 @@ module "ecs_service_registry" {
           name  = "REGISTRY_MODE"
           value = var.registry_mode
         },
+        # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+        # A2A agent gets nginx location blocks proxying its card + JSON-RPC.
+        {
+          name  = "A2A_REVERSE_PROXY_ENABLED"
+          value = tostring(var.a2a_reverse_proxy_enabled)
+        },
+        # SSRF guard bypass for internal upstreams at private IPs. The health
+        # checker and proxy validate each MCP-server / A2A-agent upstream URL
+        # through the SSRF guard, which blocks private IPs by default. List exact
+        # hosts or CIDR ranges; the cloud metadata address is never permitted.
+        {
+          name  = "SSRF_ALLOWED_HOSTS"
+          value = var.ssrf_allowed_hosts
+        },
+        {
+          name  = "SSRF_ALLOWED_CIDRS"
+          value = var.ssrf_allowed_cidrs
+        },
         # Internal/workshop deployment classification (telemetry labels; issue #1216)
         {
           name  = "INTERNAL_ONLY_DEPLOYMENT"
