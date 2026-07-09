@@ -35,10 +35,17 @@ end
 -- Gateway base for this agent is the request URI minus the agent-card suffix,
 -- e.g. /agent/travel/.well-known/agent-card.json -> /agent/travel
 local base = ngx.var.uri:gsub("/%.well%-known/agent%-card%.json$", "")
+-- Prefer the client-facing scheme from X-Forwarded-Proto (set by a
+-- TLS-terminating proxy like CloudFront/ALB, which forwards to nginx over plain
+-- http so ngx.var.scheme would wrongly be "http"); fall back to ngx.var.scheme
+-- for direct-TLS deployments (local/compose) where the header is absent. Only
+-- accept the exact values http/https so a spoofed header cannot inject junk.
+local xfp = ngx.var.http_x_forwarded_proto
+local scheme = (xfp == "https" or xfp == "http") and xfp or ngx.var.scheme
 -- http_host preserves a non-default port (e.g. :8443); ngx.var.host strips it.
 -- Trailing slash so the advertised URL matches the JSON-RPC endpoint, which is
 -- the prefix location {ROOT_PATH}/agent/<path>/ (a no-slash URL would not match).
-local gateway_url = ngx.var.scheme .. "://" .. ngx.var.http_host .. base .. "/"
+local gateway_url = scheme .. "://" .. ngx.var.http_host .. base .. "/"
 
 -- Collect the exact backend URL strings to rewrite (top-level url + any
 -- advertised interface urls across A2A versions: additionalInterfaces (0.2.x)
