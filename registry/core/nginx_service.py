@@ -983,10 +983,12 @@ class NginxConfigService:
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", "")
 
             # Generate A2A agent reverse-proxy blocks. Opt-in via
-            # A2A_REVERSE_PROXY_ENABLED. In registry-only mode they are also
-            # skipped: the registry-only 503 block already returns 503 for any
-            # /agent/* path that is not an API route.
-            if settings.nginx_updates_enabled and settings.a2a_reverse_proxy_enabled:
+            # A2A_REVERSE_PROXY_ENABLED, and only effective in with-gateway mode
+            # (a2a_reverse_proxy_effective is the shared flag-AND-with-gateway
+            # gate). In registry-only mode they are skipped: the registry-only
+            # 503 block already returns 503 for any /agent/* path that is not an
+            # API route.
+            if settings.a2a_reverse_proxy_effective:
                 agent_blocks = await self._generate_agent_location_blocks()
             else:
                 agent_blocks = ""

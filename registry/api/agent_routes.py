@@ -937,7 +937,15 @@ async def register_agent(
         # is redacted from non-admin reads (registry/services/visibility.py) and
         # the nginx generator proxies to it. When the flag is off, the card is
         # stored exactly as registered (no proxy_pass_url) -- backwards compatible.
-        if settings.a2a_reverse_proxy_enabled and (agent_card.supported_protocol or "").lower() == "a2a":
+        #
+        # Gated on a2a_reverse_proxy_effective (flag AND with-gateway), NOT the
+        # raw flag: in registry-only mode there is no gateway to route through, so
+        # we must NOT advertise a gateway url that would 503. url and
+        # proxy_pass_url stay identical (backend) in that case.
+        if (
+            settings.a2a_reverse_proxy_effective
+            and (agent_card.supported_protocol or "").lower() == "a2a"
+        ):
             agent_card.proxy_pass_url = agent_card.url
             agent_card.url = _gateway_agent_url(path)
             logger.info(

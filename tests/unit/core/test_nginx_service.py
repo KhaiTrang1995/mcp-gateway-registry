@@ -372,6 +372,7 @@ async def test_a2a_blocks_emitted_when_flag_enabled(
     with patch("registry.core.nginx_service.settings") as mock_settings:
         mock_settings.nginx_updates_enabled = True
         mock_settings.a2a_reverse_proxy_enabled = True
+        mock_settings.a2a_reverse_proxy_effective = True
         mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
         mock_settings.auth_server_url = "http://auth-server:8888"
         with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
@@ -405,6 +406,7 @@ async def test_a2a_blocks_skipped_when_flag_disabled(
     with patch("registry.core.nginx_service.settings") as mock_settings:
         mock_settings.nginx_updates_enabled = True
         mock_settings.a2a_reverse_proxy_enabled = False
+        mock_settings.a2a_reverse_proxy_effective = False
         mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
         mock_settings.auth_server_url = "http://auth-server:8888"
         with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
