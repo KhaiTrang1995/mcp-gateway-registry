@@ -122,11 +122,21 @@ AUTH_LISTEN_PORT="${AUTH_LISTEN_PORT:-8888}"
 echo "Starting Auth Server (host=$BIND_HOST, port=$AUTH_LISTEN_PORT)..."
 cd /app
 source .venv/bin/activate
+# Only trust proxy headers when the peer is loopback. The auth-server is reached
+# solely via nginx (the /validate subrequest and OAuth callbacks), whose peer is
+# NOT loopback, so uvicorn will not derive request.client from a forwarded header
+# at all — request.client stays the real (non-spoofable) nginx peer. The real
+# client IP still reaches get_client_ip via nginx's X-Real-IP header (tier 1),
+# and HTTPS/OAuth detection reads the X-Forwarded-Proto header directly, so both
+# are unaffected. Using "*" let uvicorn overwrite request.client with the
+# left-most (client-controlled) X-Forwarded-For entry, poisoning the tier-3
+# fallback in get_client_ip(). ::1 covers the BIND_HOST=:: dual-stack case.
+FORWARDED_ALLOW_IPS="127.0.0.1,::1"
 if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ] && command -v opentelemetry-instrument >/dev/null 2>&1; then
     echo "Using OTEL_EXPORTER_OTLP_ENDPOINT at ${OTEL_EXPORTER_OTLP_ENDPOINT}"
-    UVICORN_CMD="opentelemetry-instrument uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="opentelemetry-instrument uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 else
     echo "OTEL_EXPORTER_OTLP_ENDPOINT not found, not using OTEL"
-    UVICORN_CMD="uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 fi
 exec $UVICORN_CMD

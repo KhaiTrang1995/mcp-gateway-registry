@@ -220,6 +220,15 @@ sanitizer that isn't called) is equivalent to no check.
   emit a distinct audit event on any admin-tier grant. Derive "who is admin" from
   the SAME privileged-scope rule the request-time check uses, not a separate
   notion.
+- **A config/secrets export must be deny-by-default for sensitive values.** An
+  admin "export configuration" endpoint that can emit secrets (SECRET_KEY, IdP
+  client secrets, DB passwords, API keys) concentrates the whole system's
+  credentials into one response — a single over-broad export is a full compromise.
+  One `include_sensitive` flag is not enough: it is easily set by habit, a copied
+  script, or a CSRF/confused-deputy request. Gate the sensitive payload behind a
+  SEPARATE explicit acknowledgement (e.g. `confirm_sensitive_export`) in addition
+  to `include_sensitive`, reject (fail closed) when the acknowledgement is absent,
+  and redact the sensitive values otherwise. Audit every sensitive export.
 - **Honor the disabled/inactive flag everywhere access is derived, on EVERY
   request.** A user/group/client marked disabled must contribute no
   groups/scopes and be denied — enforce it at the group→scope enrichment / session
@@ -374,6 +383,39 @@ sanitizer that isn't called) is equivalent to no check.
   specific actor (per-instance/per-purpose `sub`), not a shared service identity.
   Tamper-evidence (append-only / HMAC chain) is best served by an immutable
   external store — infra, deferrable.
+- **Client IP for audit/attribution: derive from a non-spoofable source, and
+  scope the ASGI proxy-header trust to the real peer.** The left-most
+  `X-Forwarded-For` entry is fully client-controlled — never use it. Resolve via
+  the shared `get_client_ip()` (`registry/utils/request_utils.py`): prefer nginx's
+  `X-Real-IP`, else the `TRUSTED_PROXY_HOPS`-th entry counted from the RIGHT (the
+  hop a trusted proxy appended), else the direct socket peer; validate every
+  candidate as a well-formed IP and fail toward the peer. Separately, the ASGI
+  server's own forwarded-header trust must be scoped to the actual upstream:
+  launch uvicorn with `--forwarded-allow-ips` set to the real peer (loopback
+  `127.0.0.1,::1` when nginx sits in the same pod/container), **never `*`**. With
+  `*`, uvicorn's `ProxyHeadersMiddleware` overwrites `request.client` with the
+  left-most (spoofable) XFF entry, poisoning the direct-peer fallback in
+  `get_client_ip()` and any other code that reads `request.client`. This is
+  defense-in-depth for the resolver above (which already ignores the left-most
+  entry) — but the two must agree, or a code path that falls through to
+  `request.client` silently trusts a forged value. Scoping to loopback is safe:
+  the real client IP still arrives via `X-Real-IP`, and scheme/HTTPS detection
+  reads the `X-Forwarded-Proto` header directly (not uvicorn's scheme rewrite), so
+  OAuth redirect construction is unaffected.
+- **An nginx `auth_request` subrequest does NOT inherit the parent location's
+  `proxy_set_header` directives.** Headers the outer location sets for its own
+  `proxy_pass` (e.g. `X-Real-IP $remote_addr`, a sanitized `X-Forwarded-For`) are
+  absent on the `/validate`-style subrequest unless set again INSIDE the
+  subrequest's own `location` block. A subrequest with `proxy_pass_request_headers
+  on` therefore forwards the raw, client-supplied headers verbatim to the auth
+  backend — so the backend can see a spoofed `X-Forwarded-For` even when the outer
+  location "sanitized" it. When an auth/validate backend derives a client IP or
+  any trusted value from headers, set (and overwrite) those headers explicitly in
+  the subrequest's `location` block; do not assume outer-block sanitization
+  reaches it. Corollary for reviewers: a `1.2.3.4:0` line in the ASGI *access log*
+  proves `request.client` was set from a forged header, but says NOTHING about the
+  *audit* value — those come from two different resolvers; check the durable audit
+  record before concluding a spoof succeeded.
 
 ## Canonical helpers — use these, never reinvent or copy-paste
 

@@ -3146,6 +3146,22 @@ def _mcp_proxy_token_headers(
     return {"X-Internal-Token": token}
 
 
+def _obo_ingress_jwt(sub: str = "test-user") -> str:
+    """Build a decodable ingress JWT whose principal matches the internal token.
+
+    The obo branch binds the OBO subject token to the /validate-authorized
+    principal (_obo_subject_matches_principal): the subject token's
+    ``preferred_username``/``sub`` must equal the internal mcp-proxy token's
+    ``sub``. _mcp_proxy_token_headers mints the internal token with sub="test-user",
+    so the raw ingress JWT the client presents must carry the same principal. The
+    signature is irrelevant here (the binding check does an unverified decode; the
+    real signature was already checked by /validate), so a throwaway secret is fine.
+    """
+    import jwt as _jwt
+
+    return _jwt.encode({"sub": sub, "preferred_username": sub}, "test-secret", algorithm="HS256")
+
+
 def _patch_scope_repo_allow_all():
     """Patch get_scope_repository so ``admin:all`` grants any server/method.
 
@@ -3626,6 +3642,340 @@ class TestMcpProxyEndpointHeaderPassthrough:
         assert response.status_code == 401
         assert response.headers.get("www-authenticate", "").startswith("Bearer")
         assert response.headers.get("retry-after") == "15"
+
+
+# =============================================================================
+# OBO EXCHANGE EGRESS MODE TESTS (Phase 3)
+# =============================================================================
+
+
+def _capture_upstream_headers():
+    """Patch httpx.AsyncClient.stream to record the headers forwarded upstream.
+
+    Returns (patch_cm, captured) where captured['headers'] holds the dict passed
+    to client.stream(...) once a request reaches the upstream-call branch.
+    """
+    captured: dict = {}
+    upstream_resp = _build_mock_upstream_response(
+        status_code=200,
+        headers={"content-type": "application/json"},
+        body=b'{"jsonrpc":"2.0","id":1,"result":{}}',
+    )
+
+    mock_stream_cm = AsyncMock()
+    mock_stream_cm.__aenter__ = AsyncMock(return_value=upstream_resp)
+    mock_stream_cm.__aexit__ = AsyncMock(return_value=False)
+
+    def _stream(method, url, **kwargs):
+        captured["headers"] = kwargs.get("headers", {})
+        captured["url"] = url
+        return mock_stream_cm
+
+    mock_client = AsyncMock()
+    mock_client.stream = MagicMock(side_effect=_stream)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    return patch("auth_server.server.httpx.AsyncClient", return_value=mock_client), captured
+
+
+class _FakeEntraProvider:
+    client_id = "gw-client"
+    client_secret = "gw-secret"
+    token_url = "https://login.microsoftonline.com/t/oauth2/v2.0/token"
+
+
+class TestMcpProxyOboExchange:
+    """Phase 3 seam: obo_exchange branch in mcp_proxy.
+
+    The registry vend returns an OBO DIRECTIVE (mode + target_audience), not a
+    token; auth_server runs the exchange locally and injects the result, after
+    stripping the user's gateway credentials.
+    """
+
+    @staticmethod
+    async def _obo_directive_vend(token, server):
+        return {
+            "mode": "obo_exchange",
+            "obo_target_audience": "api://outlook-mcp-server",
+            "obo_scopes": [],
+        }
+
+    def test_obo_success_strips_creds_and_injects_exchanged_token(self, monkeypatch):
+        import auth_server.server as server_module
+
+        ingress_jwt = _obo_ingress_jwt("test-user")
+
+        async def _fake_exchange(provider, subject_token, target_audience, scopes=None):
+            assert subject_token == ingress_jwt
+            assert target_audience == "api://outlook-mcp-server"
+            return "exchanged-obo-token"
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+            patch.object(server_module, "get_auth_provider", lambda *a, **k: _FakeEntraProvider()),
+            patch.object(server_module, "obo_exchange", _fake_exchange),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/outlook",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "read_inbox"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="outlook"),
+                    "X-Authorization": f"Bearer {ingress_jwt}",
+                    "Cookie": "session=secret",
+                },
+            )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        # Exchanged token injected.
+        assert sent["authorization"] == "Bearer exchanged-obo-token"
+        # User gateway creds / internal identity stripped.
+        assert "x-authorization" not in sent
+        assert "cookie" not in sent
+        assert "x-internal-token" not in sent
+
+    def test_obo_no_bearer_jwt_is_terminal_no_consent(self, monkeypatch):
+        """Session-cookie / M2M caller (no bearer ingress JWT) -> terminal error,
+        never a consent affordance."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/outlook",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 7,
+                    "method": "tools/call",
+                    "params": {"name": "read_inbox"},
+                },
+                # No X-Authorization / Authorization bearer on the request.
+                headers=_mcp_proxy_token_headers(server_name="outlook"),
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["id"] == 7
+        assert body["error"]["message"] == "obo_exchange_failed"
+        # No URL-mode elicitation / consent affordance.
+        assert body["error"]["code"] != -32042
+        assert "elicitations" not in body["error"].get("data", {})
+
+    def test_obo_subject_token_principal_mismatch_is_rejected(self, monkeypatch):
+        """If the raw ingress JWT's principal differs from the /validate-authorized
+        principal (internal token sub=test-user), the exchange is refused terminally
+        and no exchange/forward happens -- closing the subject-token binding gap."""
+        import auth_server.server as server_module
+
+        exchange_called = {"n": 0}
+
+        async def _fake_exchange(provider, subject_token, target_audience, scopes=None):
+            exchange_called["n"] += 1
+            return "should-not-be-reached"
+
+        # A JWT for a DIFFERENT principal than the internal token's sub (test-user).
+        mismatched_jwt = _obo_ingress_jwt("attacker-user")
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+            patch.object(server_module, "get_auth_provider", lambda *a, **k: _FakeEntraProvider()),
+            patch.object(server_module, "obo_exchange", _fake_exchange),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/outlook",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "read_inbox"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="outlook"),
+                    "X-Authorization": f"Bearer {mismatched_jwt}",
+                },
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"]["message"] == "obo_exchange_failed"
+        # The exchange must NOT have run and NOTHING was forwarded upstream.
+        assert exchange_called["n"] == 0
+        assert "headers" not in captured
+
+    def test_obo_exchange_failure_is_terminal_no_consent(self, monkeypatch):
+        import auth_server.server as server_module
+
+        # Raise via the same OboExchangeError identity server.py imported (the
+        # module is import-path sensitive; OboReauthRequired is a subclass of it).
+        async def _failing_exchange(provider, subject_token, target_audience, scopes=None):
+            raise server_module.OboExchangeError("token expired")
+
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+            patch.object(server_module, "get_auth_provider", lambda *a, **k: _FakeEntraProvider()),
+            patch.object(server_module, "obo_exchange", _failing_exchange),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/outlook",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "tools/call",
+                    "params": {"name": "read_inbox"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="outlook"),
+                    "X-Authorization": f"Bearer {_obo_ingress_jwt('test-user')}",
+                },
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["error"]["message"] == "obo_exchange_failed"
+        assert "token expired" in body["error"]["data"]["detail"]
+        assert body["error"]["code"] != -32042
+
+    def test_mode_none_does_not_inject_obo_token(self):
+        """Egress feature OFF: the obo branch never fires (no exchanged token is
+        injected). Client ingress auth headers are still stripped on egress by the
+        unconditional ingress-only strip (#1369), so the upstream sees neither the
+        raw ingress JWT nor an obo token."""
+        import auth_server.server as server_module
+
+        async def _disabled_vend(token, server):
+            return {"consent_required": True}
+
+        patch_httpx, captured = _capture_upstream_headers()
+        with (
+            # Egress feature OFF entirely -> the whole egress block is skipped.
+            patch.object(server_module.settings, "egress_auth_enabled", False),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+            patch_httpx,
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/plain",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "x"}},
+                headers={
+                    **_mcp_proxy_token_headers(server_name="plain"),
+                    "X-Authorization": "Bearer raw-ingress-jwt",
+                },
+            )
+
+        assert response.status_code == 200
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        # Ingress-only auth headers are stripped on egress (#1369): the raw
+        # ingress JWT is never forwarded to the upstream MCP server...
+        assert "x-authorization" not in sent
+        # ...and with the feature off, the obo branch never injects a token.
+        assert "authorization" not in sent
+
+    def test_obo_integration_real_exchange_only_idp_mocked(self, monkeypatch):
+        """Full pipeline through mcp_proxy with the REAL obo_exchange engine;
+        only the IdP token HTTP endpoint is mocked. Proves the wiring: directive
+        -> subject extraction -> exchange -> strip -> inject -> forward.
+
+        The engine (httpx .post) and the upstream proxy (httpx .stream) share the
+        global httpx.AsyncClient, so a SINGLE unified mock client serves both and
+        httpx is patched exactly once (two patches would collide on the same name).
+        """
+        from contextlib import asynccontextmanager
+
+        import auth_server.server as server_module
+
+        class _IdpResp:
+            status_code = 200
+
+            def json(self):
+                return {"access_token": "real-exchanged-token"}
+
+        idp_post = AsyncMock(return_value=_IdpResp())
+
+        upstream_resp = _build_mock_upstream_response(
+            status_code=200,
+            headers={"content-type": "application/json"},
+            body=b'{"jsonrpc":"2.0","id":1,"result":{}}',
+        )
+        upstream_cm = AsyncMock()
+        upstream_cm.__aenter__ = AsyncMock(return_value=upstream_resp)
+        upstream_cm.__aexit__ = AsyncMock(return_value=False)
+        captured: dict = {}
+
+        def _stream(method, url, **kwargs):
+            captured["headers"] = kwargs.get("headers", {})
+            return upstream_cm
+
+        @asynccontextmanager
+        async def _unified_client(*a, **k):
+            c = MagicMock()
+            c.post = idp_post  # engine's IdP token call
+            c.stream = MagicMock(side_effect=_stream)  # upstream proxy call
+            yield c
+
+        ingress_jwt = _obo_ingress_jwt("test-user")
+
+        # The engine's IdP token POST now goes through the SSRF-guarded client
+        # (registry.utils.url_guard.guarded_async_client), imported lazily inside
+        # egress_obo.obo_exchange, so patch it at its source module. The upstream
+        # proxy hop still uses server_module.httpx.AsyncClient. Both are pointed at
+        # the same unified mock client so a single fake serves the two calls.
+        with (
+            patch.object(server_module.settings, "egress_auth_enabled", True),
+            patch.object(server_module, "_vend_egress_token", self._obo_directive_vend),
+            patch.object(server_module, "get_auth_provider", lambda *a, **k: _FakeEntraProvider()),
+            patch.object(server_module.httpx, "AsyncClient", _unified_client),
+            patch("registry.utils.url_guard.guarded_async_client", _unified_client),
+            patch.object(server_module, "_read_mcp_filter_enabled", return_value=False),
+            _patch_scope_repo_allow_all(),
+        ):
+            client = TestClient(server_module.app)
+            response = client.post(
+                "/mcp-proxy/outlook",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "read_inbox"},
+                },
+                headers={
+                    **_mcp_proxy_token_headers(server_name="outlook"),
+                    "X-Authorization": f"Bearer {ingress_jwt}",
+                },
+            )
+
+        assert response.status_code == 200
+        # The engine built the Entra jwt-bearer body from the directive + subject.
+        idp_body = idp_post.call_args.kwargs["data"]
+        assert idp_body["grant_type"] == "urn:ietf:params:oauth:grant-type:jwt-bearer"
+        assert idp_body["assertion"] == ingress_jwt
+        assert idp_body["scope"] == "api://outlook-mcp-server/.default"
+        # The exchanged token reached the upstream Authorization header.
+        sent = {k.lower(): v for k, v in captured["headers"].items()}
+        assert sent["authorization"] == "Bearer real-exchanged-token"
 
 
 # =============================================================================

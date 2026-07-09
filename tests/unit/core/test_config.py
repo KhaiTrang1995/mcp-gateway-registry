@@ -1312,3 +1312,45 @@ class TestAppLogFileFormatValidator:
     def test_default_is_json(self) -> None:
         settings = Settings()
         assert settings.app_log_file_format == "json"
+
+
+@pytest.mark.unit
+@pytest.mark.core
+class TestTrustedExternalHosts:
+    """Tests for the trusted_external_hosts_set allowlist resolver."""
+
+    def test_derives_from_registry_url(self) -> None:
+        settings = Settings(
+            secret_key="test-key-for-defaults-at-least-32-bytes-long",
+            registry_url="https://app.example.com",
+            trusted_external_hosts="",
+        )
+        hosts = settings.trusted_external_hosts_set
+        assert "app.example.com" in hosts
+
+    def test_includes_registry_url_port(self) -> None:
+        settings = Settings(
+            secret_key="test-key-for-defaults-at-least-32-bytes-long",
+            registry_url="https://app.example.com:8443",
+            trusted_external_hosts="",
+        )
+        hosts = settings.trusted_external_hosts_set
+        assert "app.example.com:8443" in hosts
+
+    def test_explicit_hosts_are_included_and_lowercased(self) -> None:
+        settings = Settings(
+            secret_key="test-key-for-defaults-at-least-32-bytes-long",
+            registry_url="https://app.example.com",
+            trusted_external_hosts="Vanity.Example.COM, other.example.com:9000",
+        )
+        hosts = settings.trusted_external_hosts_set
+        assert "vanity.example.com" in hosts
+        assert "other.example.com:9000" in hosts
+
+    def test_does_not_trust_arbitrary_host(self) -> None:
+        settings = Settings(
+            secret_key="test-key-for-defaults-at-least-32-bytes-long",
+            registry_url="https://app.example.com",
+            trusted_external_hosts="",
+        )
+        assert "evil.attacker.example" not in settings.trusted_external_hosts_set

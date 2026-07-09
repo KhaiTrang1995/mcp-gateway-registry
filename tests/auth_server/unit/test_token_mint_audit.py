@@ -144,3 +144,44 @@ async def test_audit_sink_failure_is_swallowed(_mock_metric, mock_emit, _mock_lo
         **_COMMON,
     )
     assert result is None
+
+
+@patch("auth_server.server.get_audit_logger", return_value=None)
+@patch("auth_server.server.emit_audit_event")
+@patch("auth_server.server.token_mint_total")
+async def test_display_username_stored_raw_and_hash_still_populated(
+    _mock_metric, mock_emit, _mock_logger
+):
+    # The raw human-readable field is stored verbatim while the deprecated
+    # username_hash keeps being derived from `username` (back-compat).
+    await _emit_token_mint_audit(
+        token_kind="user",
+        resource_type=None,
+        resource_id=None,
+        token_path="self_signed",
+        outcome="success",
+        display_username="alice@example.com",
+        **_COMMON,
+    )
+    record = mock_emit.call_args.args[0]
+    assert record.username == "alice@example.com"  # raw, human-readable
+    assert record.username_hash == hash_username("alice@example.com")  # still hashed
+    assert record.username_hash.startswith("user_")
+
+
+@patch("auth_server.server.get_audit_logger", return_value=None)
+@patch("auth_server.server.emit_audit_event")
+@patch("auth_server.server.token_mint_total")
+async def test_display_username_falls_back_to_username(_mock_metric, mock_emit, _mock_logger):
+    # When no display identity is supplied, the raw field falls back to the
+    # (possibly opaque) username so a record is never left blank.
+    await _emit_token_mint_audit(
+        token_kind="user",
+        resource_type=None,
+        resource_id=None,
+        token_path="self_signed",
+        outcome="success",
+        **_COMMON,
+    )
+    record = mock_emit.call_args.args[0]
+    assert record.username == "alice@example.com"

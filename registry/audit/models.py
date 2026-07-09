@@ -357,13 +357,19 @@ class TokenMintAuditRecord(BaseModel):
 
     Captures every mint (self-signed and M2M, success and failure) so reviewers
     can answer "which servers were scoped to a token, for whom, and did it succeed".
-    No raw token material is ever stored; the username is pre-hashed by the caller.
+    No raw token material is ever stored.
 
-    Note on ``username_hash``: the caller hashes with SHA-256 and keeps only the
-    first 8 hex chars (32 bits, ``user_<8hex>``). This is deliberate for privacy,
-    but it is a low-entropy hash: distinct usernames can collide once the audit
-    population grows into the tens of thousands (birthday bound ~2^16). Treat the
-    hash as a privacy-preserving grouping key for analytics, not a unique user id.
+    Identity: ``username`` holds the raw, human-readable identity (email ->
+    preferred_username -> sub), so an operator reading a mint record knows who to
+    contact without an IdP reverse lookup -- consistent with the raw identity the
+    Registry-API and MCP-access records already store.
+
+    ``username_hash`` is DEPRECATED and retained only for backward compatibility
+    with existing queries/dashboards/alerts that key on it; new consumers should
+    use ``username``. It is a low-entropy hash (SHA-256, first 8 hex / 32 bits,
+    ``user_<8hex>``): distinct users collide once the population reaches the tens
+    of thousands (birthday bound ~2^16), so it was never a unique id -- only a
+    grouping key. It will be removed in a later release once consumers migrate.
     """
 
     timestamp: datetime = Field(
@@ -385,9 +391,19 @@ class TokenMintAuditRecord(BaseModel):
     )
 
     # Who
+    username: str = Field(
+        default="anonymous",
+        description=(
+            "Raw human-readable identity of the requesting user "
+            "(email -> preferred_username -> sub). Preferred over username_hash."
+        ),
+    )
     username_hash: str = Field(
         ...,
-        description="SHA-256 (8 hex) hash of the requesting user; never the raw name",
+        description=(
+            "DEPRECATED (kept for back-compat): SHA-256 (8 hex) hash of the "
+            "requesting user. Use `username` instead."
+        ),
     )
     auth_method: str = Field(
         ...,

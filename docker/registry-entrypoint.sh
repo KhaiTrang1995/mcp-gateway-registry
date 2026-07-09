@@ -329,15 +329,25 @@ export EMBEDDINGS_MODEL_DIMENSIONS=$EMBEDDINGS_MODEL_DIMENSIONS
 # docs/TELEMETRY.md for the net.ipv6.bindv6only=0 host-side requirement.
 BIND_HOST="${BIND_HOST:-127.0.0.1}"
 
+# Only trust proxy headers (X-Forwarded-For / X-Forwarded-Proto) when the peer is
+# loopback. nginx is the sole client and reaches uvicorn over 127.0.0.1:7860 in
+# this same container, so scoping trust to loopback means uvicorn NEVER derives
+# request.client from a header supplied by a non-local caller. Using "*" made
+# uvicorn overwrite request.client with the left-most (client-controlled)
+# X-Forwarded-For entry, poisoning the direct-peer fallback in get_client_ip();
+# loopback-only keeps that fallback non-spoofable (defense-in-depth for the
+# audit client-IP resolver). ::1 covers the BIND_HOST=:: dual-stack case.
+FORWARDED_ALLOW_IPS="127.0.0.1,::1"
+
 echo "Starting MCP Registry in the background..."
 cd /app
 source /app/.venv/bin/activate
 if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ] && command -v opentelemetry-instrument >/dev/null 2>&1; then
     echo "Using OTEL_EXPORTER_OTLP_ENDPOINT at ${OTEL_EXPORTER_OTLP_ENDPOINT}"
-    UVICORN_CMD="opentelemetry-instrument uvicorn registry.main:app --host $BIND_HOST --port 7860 --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="opentelemetry-instrument uvicorn registry.main:app --host $BIND_HOST --port 7860 --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 else
     echo "OTEL_EXPORTER_OTLP_ENDPOINT not found, not using OTEL"
-    UVICORN_CMD="uvicorn registry.main:app --host $BIND_HOST --port 7860 --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="uvicorn registry.main:app --host $BIND_HOST --port 7860 --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 fi
 $UVICORN_CMD &
 UVICORN_PID=$!

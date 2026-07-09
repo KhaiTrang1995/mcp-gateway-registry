@@ -1,9 +1,12 @@
 """Unit tests for the token_mint branch of the audit query builder (#1308).
 
-The token_mint stream stores a hashed username at the top level
-(``username_hash``) and flat resource fields (not nested under ``action.*``),
-so ``_build_query`` must route filters differently than the other streams.
+The token_mint stream stores the raw, human-readable identity at the top level
+(``username``; ``username_hash`` is deprecated) and flat resource fields (not
+nested under ``action.*``), so ``_build_query`` must route filters differently
+than the other streams.
 """
+
+import re
 
 from registry.audit.routes import _build_query
 
@@ -30,11 +33,15 @@ class TestTokenMintQuery:
     def test_stream_maps_to_token_mint_log_type(self):
         assert _q() == {"log_type": "token_mint"}
 
-    def test_username_filters_on_hash_not_identity(self):
-        query = _q(username="user_abcd1234")
-        assert "username_hash" in query
-        assert query["username_hash"]["$regex"] == "user_abcd1234"
-        assert query["username_hash"]["$options"] == "i"
+    def test_username_filters_on_raw_username_not_identity(self):
+        query = _q(username="alice@example.com")
+        # Filters on the raw, human-readable `username` field (not the
+        # deprecated `username_hash`, and not the nested identity field).
+        # The value is regex-escaped (the "." in an email is a metachar).
+        assert "username" in query
+        assert query["username"]["$regex"] == re.escape("alice@example.com")
+        assert query["username"]["$options"] == "i"
+        assert "username_hash" not in query
         # Must NOT use the registry_api/mcp_access identity field.
         assert "identity.username" not in query
 
@@ -53,8 +60,8 @@ class TestTokenMintQuery:
         assert "action.resource_id" not in query
 
     def test_combined_filters(self):
-        query = _q(username="user_dead", operation="user", resource_type="agent")
+        query = _q(username="alice@example.com", operation="user", resource_type="agent")
         assert query["log_type"] == "token_mint"
-        assert query["username_hash"]["$regex"] == "user_dead"
+        assert query["username"]["$regex"] == re.escape("alice@example.com")
         assert query["token_kind"] == "user"
         assert query["resource_type"] == "agent"

@@ -263,6 +263,21 @@ session_cookie_secure = true
 # Default: Empty (cookie scoped to exact host only - safest option)
 session_cookie_domain = ""
 
+# Number of trusted reverse-proxy hops in front of the app. The audit client IP
+# is taken from the Nth-from-the-right X-Forwarded-For entry (never the
+# client-controlled left-most one). On ECS behind an ALB (+ optional CloudFront),
+# raise this to match the number of trusted proxies. Default 1.
+# trusted_proxy_hops = 2
+
+# ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+# when building OAuth external URLs. Your primary domain is ALREADY covered — the
+# allowlist always includes the registry domain — so leave this empty for a normal
+# single-domain deployment. Set it only if the app is ALSO reached at a hostname
+# that differs from the registry domain: most commonly an ECS deployment fronted by
+# BOTH a custom domain and the CloudFront domain (REGISTRY_URL names only one, so
+# list the other here). A Host not on the allowlist falls back to the configured host.
+# trusted_external_hosts = "dxxxx.cloudfront.net"
+
 # Control whether OAuth provider tokens are stored in session cookies
 # ============================================================================
 # EMBEDDINGS CONFIGURATION
@@ -1182,6 +1197,11 @@ aws_registry_federation_enabled = true
 # egress_oauth_callback_base_url     = "https://mcpgateway.example.com"
 # egress_token_refresh_skew_seconds  = 300
 # egress_state_ttl_seconds           = 600
+# obo_exchange target_audience allowlist (whitespace-separated). When set, an obo
+# server may only use a listed audience; when empty a shape rule applies (api://
+# App ID URI / bare client-id only, no https host URLs or GUIDs), so shared
+# first-party APIs (Graph/ARM/Key Vault) are rejected at registration.
+# egress_obo_allowed_audiences       = "api://outlook-mcp-server api://calendar-mcp-server"
 # egress_registry_internal_url       = "http://registry:8080"
 # egress_secrets_manager_kms_key_id  = ""   # optional CMK; empty uses the AWS-managed key
 # egress_secrets_manager_path_prefix = "mcp/egress"

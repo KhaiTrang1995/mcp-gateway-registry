@@ -1,0 +1,86 @@
+suite: trusted request-source secret rendering
+release:
+  name: test
+  namespace: default
+templates:
+  - secret.yaml
+tests:
+  - it: renders TRUSTED_PROXY_HOPS default (1) when unset
+    set:
+      app:
+        secretKey: "test-key-not-for-prod"  # pragma: allowlist secret
+      egressAuth:
+        markerSecret: "test-marker-not-for-prod"  # pragma: allowlist secret
+      global:
+        authProvider:
+          type: keycloak
+        ingress:
+          routingMode: path
+          tls: false
+          paths:
+            registry: /registry
+    asserts:
+      - equal:
+          path: data.TRUSTED_PROXY_HOPS
+          value: "1"
+          decodeBase64: true
+
+  - it: renders a raised TRUSTED_PROXY_HOPS when configured
+    set:
+      app:
+        secretKey: "test-key-not-for-prod"  # pragma: allowlist secret
+        trustedProxyHops: 2
+      egressAuth:
+        markerSecret: "test-marker-not-for-prod"  # pragma: allowlist secret
+      global:
+        authProvider:
+          type: keycloak
+        ingress:
+          routingMode: path
+          tls: false
+          paths:
+            registry: /registry
+    asserts:
+      - equal:
+          path: data.TRUSTED_PROXY_HOPS
+          value: "2"
+          decodeBase64: true
+
+  - it: omits TRUSTED_EXTERNAL_HOSTS when unset (fail closed to configured host)
+    set:
+      app:
+        secretKey: "test-key-not-for-prod"  # pragma: allowlist secret
+      egressAuth:
+        markerSecret: "test-marker-not-for-prod"  # pragma: allowlist secret
+      global:
+        authProvider:
+          type: keycloak
+        ingress:
+          routingMode: path
+          tls: false
+          paths:
+            registry: /registry
+    asserts:
+      - notExists:
+          path: data.TRUSTED_EXTERNAL_HOSTS
+
+  - it: renders TRUSTED_EXTERNAL_HOSTS when configured
+    set:
+      app:
+        secretKey: "test-key-not-for-prod"  # pragma: allowlist secret
+        trustedExternalHosts: "auth.example.com"
+      egressAuth:
+        markerSecret: "test-marker-not-for-prod"  # pragma: allowlist secret
+      global:
+        authProvider:
+          type: keycloak
+        ingress:
+          routingMode: path
+          tls: false
+          paths:
+            registry: /registry
+    asserts:
+      - equal:
+          path: data.TRUSTED_EXTERNAL_HOSTS
+          value: "auth.example.com"
+          decodeBase64: true

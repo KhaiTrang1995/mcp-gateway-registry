@@ -775,10 +775,18 @@ working in those areas.
   enforce audience against a config allowlist, fail closed. Never auto-grant
   groups/admin from a code-shipped mapping (config-driven, fail closed).
 - **Admin ops:** refuse self-delete + last-admin removal/demotion (fail closed if
-  the admin population can't be counted); audit admin-tier grants.
+  the admin population can't be counted); audit admin-tier grants. A config/secrets
+  export must deny sensitive values by default — gate them behind a SEPARATE
+  explicit acknowledgement (not just `include_sensitive`) and fail closed.
 - **Never put a secret on subprocess argv** (world-readable via `ps`) — pass via
   `env=`/stdin. **Trust forwarded metadata only from the proxy hop:** rightmost/
   trusted XFF (not leftmost), allowlist `Host` before building a redirect_uri.
+  Scope the ASGI server's `--forwarded-allow-ips` to the real peer (loopback when
+  nginx is co-located), NEVER `*` — `*` lets uvicorn set `request.client` from the
+  spoofable leftmost XFF. An nginx `auth_request` subrequest does NOT inherit the
+  parent location's `proxy_set_header`, so re-set trusted headers inside the
+  subrequest block. A `1.2.3.4:0` ASGI *access-log* line ≠ a spoofed *audit* value
+  (different resolvers) — check the durable record before concluding a breach.
 - **One entity type's access grant must never gate a different entity type** (a
   skill filter keyed on agent access = bypass); filter each resource by its own
   access check, admin-only universal bypass.

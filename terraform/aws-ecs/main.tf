@@ -118,10 +118,13 @@ module "mcp_gateway" {
   keycloak_admin_password = var.keycloak_admin_password
 
   # Session cookie security configuration
-  session_cookie_secure = var.session_cookie_secure
-  session_cookie_domain = var.session_cookie_domain
-  cors_allowed_origins  = var.cors_allowed_origins
-  bind_host             = var.bind_host
+  session_cookie_secure  = var.session_cookie_secure
+  session_cookie_domain  = var.session_cookie_domain
+  cors_allowed_origins   = var.cors_allowed_origins
+  trusted_proxy_hops     = var.trusted_proxy_hops
+  trusted_external_hosts = var.trusted_external_hosts
+  trusted_real_ip_cidrs  = var.trusted_real_ip_cidrs
+  bind_host              = var.bind_host
 
   # DocumentDB configuration
   storage_backend = var.storage_backend
@@ -368,6 +371,7 @@ module "mcp_gateway" {
   egress_oauth_callback_base_url     = var.egress_oauth_callback_base_url
   egress_token_refresh_skew_seconds  = var.egress_token_refresh_skew_seconds
   egress_state_ttl_seconds           = var.egress_state_ttl_seconds
+  egress_obo_allowed_audiences       = var.egress_obo_allowed_audiences
   egress_registry_internal_url       = var.egress_registry_internal_url
   egress_nginx_marker_secret         = var.egress_nginx_marker_secret
   egress_secrets_manager_kms_key_id  = var.egress_secrets_manager_kms_key_id
