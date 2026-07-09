@@ -792,7 +792,8 @@ async def _audit_cloud_hint_set(
             timestamp=datetime.now(UTC),
             request_id=str(_uuid.uuid4()),
             identity=Identity(
-                username=user_context.get("username", "unknown"),
+                # Prefer human-readable email for the audit record.
+                username=user_context.get("email") or user_context.get("username", "unknown"),
                 auth_method=user_context.get("auth_method", "unknown"),
                 is_admin=True,
                 credential_type="session_cookie",

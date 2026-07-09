@@ -438,10 +438,14 @@ def _save_ingress_tokens(token_data: dict[str, Any]) -> str:
                 }
             )
 
-        with open(ingress_path, "w") as f:
+        # Create atomically with owner-only (0600) permissions; the payload
+        # carries the ingress access token and must never be briefly
+        # world/group-readable between create and chmod.
+        fd = os.open(str(ingress_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(save_data, f, indent=2)
 
-        # Secure the file
+        # Enforce 0600 even if the file pre-existed
         ingress_path.chmod(0o600)
         logger.info(f"Saved ingress tokens to: {ingress_path}")
 

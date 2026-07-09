@@ -301,6 +301,14 @@ module "ecs_service_auth" {
           value = var.session_cookie_domain
         },
         {
+          name  = "TRUSTED_PROXY_HOPS"
+          value = tostring(var.trusted_proxy_hops)
+        },
+        {
+          name  = "TRUSTED_EXTERNAL_HOSTS"
+          value = var.trusted_external_hosts
+        },
+        {
           name  = "REGISTRY_STATIC_TOKEN_AUTH_ENABLED"
           value = tostring(var.registry_static_token_auth_enabled)
         },
@@ -1050,6 +1058,22 @@ module "ecs_service_registry" {
           value = var.session_cookie_domain
         },
         {
+          name  = "TRUSTED_PROXY_HOPS"
+          value = tostring(var.trusted_proxy_hops)
+        },
+        {
+          name  = "TRUSTED_EXTERNAL_HOSTS"
+          value = var.trusted_external_hosts
+        },
+        {
+          # Trusted proxy CIDRs for nginx real-IP recovery (set_real_ip_from).
+          # nginx runs in the registry container, so this is registry-only. Empty
+          # by default; set to the VPC CIDR when behind an ALB to record the real
+          # client IP instead of the load balancer's internal address.
+          name  = "TRUSTED_REAL_IP_CIDRS"
+          value = var.trusted_real_ip_cidrs
+        },
+        {
           name  = "CORS_ALLOWED_ORIGINS"
           value = var.cors_allowed_origins
         },
@@ -1566,6 +1590,14 @@ module "ecs_service_registry" {
         {
           name  = "EGRESS_STATE_TTL_SECONDS"
           value = tostring(var.egress_state_ttl_seconds)
+        },
+        # obo_exchange target_audience allowlist (whitespace-separated). When set,
+        # the authoritative positive control; when empty a shape rule applies
+        # (api:// App ID URI / bare client-id only, no https host URLs), so shared
+        # first-party APIs (Graph/ARM/Key Vault) are rejected at registration.
+        {
+          name  = "EGRESS_OBO_ALLOWED_AUDIENCES"
+          value = var.egress_obo_allowed_audiences
         },
         # AUTH_SERVER_NGINX_MARKER_SECRET is injected via secrets/valueFrom below
         # (required unconditionally, not just for egress).

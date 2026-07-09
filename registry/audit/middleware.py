@@ -189,6 +189,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         return {
             "username": data["username"],
+            "email": data.get("email") or "",
             "auth_method": "session-cookie-fallback",
             "provider": data.get("provider"),
         }
@@ -212,7 +213,15 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
         if user_context and isinstance(user_context, dict):
             return Identity(
-                username=user_context.get("username", "anonymous"),
+                # Human-readable identity for the audit record: prefer the
+                # email so an operator knows who to contact without an IdP
+                # reverse lookup. `username` may be the OIDC sub on some auth
+                # paths; email is threaded through user_context for this.
+                username=(
+                    user_context.get("email")
+                    or user_context.get("username")
+                    or "anonymous"
+                ),
                 auth_method=user_context.get("auth_method", "anonymous"),
                 provider=user_context.get("provider"),
                 groups=user_context.get("groups", []),
@@ -227,7 +236,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
         fallback = await self._best_effort_session_identity(request)
         if fallback:
             return Identity(
-                username=fallback["username"],
+                username=fallback.get("email") or fallback["username"],
                 auth_method=fallback["auth_method"],
                 provider=fallback.get("provider"),
                 credential_type=self._get_credential_type(request),

@@ -1404,5 +1404,8 @@ if __name__ == "__main__":
         reload=True,
         log_level="info",
         proxy_headers=True,
-        forwarded_allow_ips="*",
+        # Loopback-only: trust forwarded headers only from a local peer so
+        # request.client can never be set from a caller-supplied X-Forwarded-For.
+        # See docker/registry-entrypoint.sh for the full rationale.
+        forwarded_allow_ips="127.0.0.1,::1",
     )

@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 # Constants
 DEFAULT_ANALYZERS = "yara"
 LLM_API_KEY_ENV = "MCP_SCANNER_LLM_API_KEY"
+# Bearer token for authenticating to the scanned MCP server. Preferred over any
+# command-line delivery because process arguments are world-readable via `ps` /
+# /proc/<pid>/cmdline while the scan runs; the environment of another user's
+# process is not.
+BEARER_TOKEN_ENV = "MCP_SCAN_BEARER_TOKEN"  # nosec B105 - env var name, not a secret value
 # Use absolute path relative to project root
 PROJECT_ROOT = Path(__file__).parent.parent
 OUTPUT_DIR = PROJECT_ROOT / "security_scans"
@@ -70,6 +75,50 @@ def _get_llm_api_key(cli_value: str | None = None) -> str:
     raise ValueError(f"LLM API key must be provided via --api-key or {LLM_API_KEY_ENV} env var")
 
 
+def _get_bearer_token(headers: str | None = None) -> str | None:
+    """Resolve the MCP server bearer token, preferring the environment.
+
+    The token is read from ``MCP_SCAN_BEARER_TOKEN`` first so callers can hand it
+    off without ever placing it on this process's command line (argv is readable
+    by any local user via ``ps`` / ``/proc/<pid>/cmdline``). A ``--headers`` JSON
+    string carrying ``X-Authorization: Bearer <token>`` is still honored for
+    backward compatibility, but it is a discouraged path for the same reason.
+
+    Args:
+        headers: Optional JSON string of request headers (legacy delivery).
+
+    Returns:
+        The bearer token, or None if neither source supplies one.
+
+    Raises:
+        ValueError: If ``headers`` is provided but is not valid JSON.
+    """
+    env_token = os.getenv(BEARER_TOKEN_ENV)
+    if env_token:
+        return env_token
+
+    if not headers:
+        return None
+
+    try:
+        headers_dict = json.loads(headers)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse headers JSON: {e}")
+        raise ValueError("Invalid headers JSON") from e
+
+    auth_header = headers_dict.get("X-Authorization", "")
+    if auth_header.startswith("Bearer "):
+        logger.warning(
+            "Bearer token supplied via --headers; prefer the %s environment "
+            "variable so the token is not exposed on the command line.",
+            BEARER_TOKEN_ENV,
+        )
+        return auth_header[len("Bearer ") :]
+
+    logger.warning("Headers provided but no Bearer token found in X-Authorization header")
+    return None
+
+
 def _ensure_output_directory() -> Path:
     """Ensure output directory exists."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -80,15 +129,23 @@ def _run_mcp_scanner(
     server_url: str,
     analyzers: str = DEFAULT_ANALYZERS,
     api_key: str | None = None,
-    headers: str | None = None,
+    bearer_token: str | None = None,
 ) -> dict:
     """Run mcp-scanner command and return raw output.
+
+    The LLM API key is handed to the external scanner via its environment so it
+    never lands on the command line. The bearer token is passed to the external
+    ``mcp-scanner`` on argv because that tool only accepts it as an argument and
+    exposes no environment-variable path; this is a documented residual that is
+    scoped to the short-lived child process (see module docstring / SECURITY
+    guidelines). We keep the token off *this* process's argv by resolving it from
+    the environment upstream.
 
     Args:
         server_url: URL of the MCP server to scan
         analyzers: Comma-separated list of analyzers to use
         api_key: OpenAI API key for LLM-based analysis
-        headers: JSON string of headers to include in requests
+        bearer_token: Bearer token for authenticating to the scanned server
 
     Returns:
         Dictionary containing raw scanner output
@@ -110,24 +167,13 @@ def _run_mcp_scanner(
         server_url,
     ]
 
-    # Add headers if provided - parse JSON and extract bearer token
-    if headers:
-        logger.info("Adding custom headers for scanning")
-        try:
-            headers_dict = json.loads(headers)
-            # Check for X-Authorization header with Bearer token
-            auth_header = headers_dict.get("X-Authorization", "")
-            if auth_header.startswith("Bearer "):
-                bearer_token = auth_header.replace("Bearer ", "")
-                cmd.extend(["--bearer-token", bearer_token])
-                logger.info("Using bearer token authentication")
-            else:
-                logger.warning(
-                    "Headers provided but no Bearer token found in X-Authorization header"
-                )
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse headers JSON: {e}")
-            raise ValueError(f"Invalid headers JSON: {headers}") from e
+    # The external mcp-scanner accepts the bearer token only as a command-line
+    # argument (no env-var path exists in its `remote` subcommand). This is the
+    # single unavoidable argv exposure and is limited to the scanner child's
+    # lifetime; every hop we control keeps the token in the environment instead.
+    if bearer_token:
+        cmd.extend(["--bearer-token", bearer_token])
+        logger.info("Using bearer token authentication")
 
     # Set environment variable for API key if provided
     env = os.environ.copy()
@@ -373,7 +419,7 @@ def scan_server(
     api_key: str | None = None,
     output_json: bool = False,
     auto_disable: bool = False,
-    headers: str | None = None,
+    bearer_token: str | None = None,
 ) -> SecurityScanResult:
     """Scan an MCP server for security vulnerabilities.
 
@@ -383,14 +429,14 @@ def scan_server(
         api_key: OpenAI API key for LLM-based analysis
         output_json: If True, output raw mcp-scanner JSON directly
         auto_disable: If True, automatically disable servers that fail security scan
-        headers: JSON string of headers to include in requests
+        bearer_token: Bearer token for authenticating to the scanned server
 
     Returns:
         SecurityScanResult containing scan results
     """
     # Run scanner
     try:
-        raw_output = _run_mcp_scanner(server_url, analyzers, api_key, headers)
+        raw_output = _run_mcp_scanner(server_url, analyzers, api_key, bearer_token)
     except subprocess.CalledProcessError as e:
         # Scanner failed - create error output and save it
         logger.error(f"Scanner failed with exit code {e.returncode}")
@@ -515,8 +561,9 @@ Example usage:
     # Scan with LLM only, passing API key directly
     uv run cli/mcp_security_scanner.py --server-url https://example.com/mcp --analyzers llm --api-key sk-...
 
-    # Scan with custom headers (e.g., authentication)
-    uv run cli/mcp_security_scanner.py --server-url https://example.com/mcp --headers '{"X-Authorization": "Bearer token123"}'
+    # Authenticate to the target server (token via environment, not argv)
+    export MCP_SCAN_BEARER_TOKEN=eyJhbGci...
+    uv run cli/mcp_security_scanner.py --server-url https://example.com/mcp
 
     # Output as JSON
     uv run cli/mcp_security_scanner.py --server-url https://example.com/mcp --json
@@ -548,7 +595,11 @@ Example usage:
 
     parser.add_argument(
         "--headers",
-        help='JSON string of headers to include in requests (e.g., \'{"X-Authorization": "token"}\')',
+        help=(
+            "DEPRECATED and insecure: JSON string of headers carrying an "
+            f"X-Authorization Bearer token. Prefer the {BEARER_TOKEN_ENV} "
+            "environment variable so the token is never placed on the command line."
+        ),
     )
 
     args = parser.parse_args()
@@ -563,6 +614,10 @@ Example usage:
         if "llm" in args.analyzers.lower():
             api_key = _get_llm_api_key(args.api_key)
 
+        # Resolve the bearer token, preferring the environment over --headers so
+        # it does not appear on this process's argv.
+        bearer_token = _get_bearer_token(args.headers)
+
         # Run scan
         result = scan_server(
             server_url=args.server_url,
@@ -570,7 +625,7 @@ Example usage:
             api_key=api_key,
             output_json=args.json,
             auto_disable=args.auto_disable,
-            headers=args.headers,
+            bearer_token=bearer_token,
         )
 
         # Exit with non-zero code if unsafe

@@ -170,9 +170,13 @@ def _save_token_file(
     json_file = os.path.join(output_dir, f"{identity_name}.json")
 
     try:
-        with open(json_file, "w") as f:
+        # Create atomically with owner-only (0600) permissions; the JSON payload
+        # carries the access token so it must not be briefly world/group-readable
+        # between create and chmod (a plain open() honors the process umask).
+        fd = os.open(json_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(token_json, f, indent=2)
-        os.chmod(json_file, 0o600)
+        os.chmod(json_file, 0o600)  # enforce 0600 even if the file pre-existed
     except Exception as e:
         print(f"{Colors.RED}[ERROR]{Colors.NC} Failed to save token file: {e}")
         return False

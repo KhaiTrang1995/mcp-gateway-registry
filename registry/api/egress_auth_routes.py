@@ -34,6 +34,7 @@ from registry.auth.dependencies import nginx_proxied_auth
 from registry.auth.internal import validate_internal_auth
 from registry.auth.proxied_token import verify_mcp_proxy_token
 from registry.core.config import settings
+from registry.core.schemas import _is_gateway_own_audience
 from registry.egress_auth.factory import get_egress_auth_service
 from registry.egress_auth.providers import list_provider_names, resolve_provider
 from registry.egress_auth.service import EgressAuthError, is_per_user_auth_method
@@ -154,6 +155,21 @@ class EgressTokenResponse(BaseModel):
         description="Provider key (github/google/entra/...) for the human-readable "
         "elicitation message.",
     )
+    # obo_exchange directive (returned instead of a token; the exchange runs in
+    # auth_server, which holds the gateway's IdP creds and the raw ingress JWT).
+    mode: str | None = Field(
+        default=None,
+        description="Egress mode for this server: 'obo_exchange' when the caller "
+        "should perform a same-IdP OBO token exchange instead of a vault vend.",
+    )
+    obo_target_audience: str | None = Field(
+        default=None,
+        description="obo_exchange: the 'aud' the auth_server requests in the OBO exchange.",
+    )
+    obo_scopes: list[str] | None = Field(
+        default=None,
+        description="obo_exchange: audience-scoped scopes for the exchange request.",
+    )
 
 
 def _base_url(url: str) -> str:
@@ -203,7 +219,13 @@ async def vend_egress_token(
     # Independently re-verify the mcp-proxy token; identity is the verified
     # claim, never an asserted body field.
     claims = verify_mcp_proxy_token(x_internal_token)
-    sub = claims.get("sub") or ""
+    # Egress vault user id: the canonical OIDC-sub-based ``egress_user`` claim,
+    # which /validate stamps identically into the consent-write and vend tokens
+    # so one human maps to one bucket across providers (see _canonical_egress_user
+    # in auth_server; the browser-consent and bearer-vend paths otherwise diverged
+    # when an IdP omits preferred_username from access tokens, e.g. Entra). Fall
+    # back to ``sub`` for tokens minted before this claim existed.
+    sub = claims.get("egress_user") or claims.get("sub") or ""
     auth_method = claims.get("auth_method") or ""
     token_upstream = claims.get("upstream_url") or ""
 
@@ -223,10 +245,13 @@ async def vend_egress_token(
         return EgressTokenResponse(consent_required=True)
 
     # Per-server enablement: a misconfigured/half-deleted server never vends.
-    if server.get("egress_auth_mode") != "oauth_user" or not server.get("egress_oauth"):
+    egress_mode = server.get("egress_auth_mode")
+    if egress_mode not in ("oauth_user", "obo_exchange") or not server.get("egress_oauth"):
         return EgressTokenResponse(consent_required=True)
 
-    # The bound upstream MUST match a registered upstream for this server.
+    # The bound upstream MUST match a registered upstream for this server. This
+    # cross-check applies to BOTH egress modes: an OBO directive must only be
+    # handed out for a legitimately-bound upstream, same as a vault vend.
     legal = _registered_upstreams(server)
     if _base_url(token_upstream) not in legal:
         logger.warning(
@@ -240,6 +265,18 @@ async def vend_egress_token(
         )
 
     egress_oauth = server["egress_oauth"]
+
+    # obo_exchange: return the exchange DIRECTIVE, not a token. The actual IdP
+    # token exchange runs in auth_server (which holds the gateway's own IdP
+    # credentials and the raw ingress JWT); the registry never sees the JWT and
+    # holds no per-user token for this mode. Stateless -- no vault lookup.
+    if egress_mode == "obo_exchange":
+        return EgressTokenResponse(
+            mode="obo_exchange",
+            obo_target_audience=egress_oauth.get("target_audience"),
+            obo_scopes=egress_oauth.get("scopes") or [],
+        )
+
     svc = get_egress_auth_service()
     access_token = await svc.get_valid_token(
         auth_method=auth_method,
@@ -296,9 +333,9 @@ async def vend_egress_token(
 
 
 class EgressConfigRequest(BaseModel):
-    """Configure per-user egress OAuth on a server (admin/registrant)."""
+    """Configure egress auth on a server (admin/registrant)."""
 
-    egress_auth_mode: str = "oauth_user"  # "none" | "oauth_user"
+    egress_auth_mode: str = "oauth_user"  # "none" | "oauth_user" | "obo_exchange"
     egress_provider: str = ""
     client_id: str = ""
     client_secret: str | None = None  # write-only; encrypted, never echoed
@@ -307,6 +344,8 @@ class EgressConfigRequest(BaseModel):
     custom_token_url: str | None = None
     custom_scope_separator: str | None = None
     custom_token_auth_style: str | None = None
+    # obo_exchange only: the internal MCP server's audience (IdP-shaped).
+    target_audience: str | None = None
 
 
 def _egress_config_view(server: dict) -> dict:
@@ -317,6 +356,7 @@ def _egress_config_view(server: dict) -> dict:
         "egress_auth_mode": server.get("egress_auth_mode", "none"),
         "egress_provider": eo.get("provider"),
         "scopes": eo.get("scopes", []),
+        "target_audience": eo.get("target_audience"),
         "callback_url": _callback_url(),
         "custom_authorize_url": eo.get("custom_authorize_url"),
         "custom_token_url": eo.get("custom_token_url"),
@@ -409,6 +449,25 @@ async def configure_egress_auth(
             raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="client_secret required")
         server["egress_auth_mode"] = "oauth_user"
         server["egress_oauth"] = eo
+    elif body.egress_auth_mode == "obo_exchange":
+        target = (body.target_audience or "").strip()
+        if not target:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="obo_exchange requires target_audience",
+            )
+        if _is_gateway_own_audience(target):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                detail="target_audience must differ from the gateway's own IdP client id",
+            )
+        # Same-IdP exchange: no per-server provider/client_id/secret. Only the
+        # target audience and (optional) audience-scoped scopes are stored.
+        server["egress_auth_mode"] = "obo_exchange"
+        server["egress_oauth"] = {
+            "target_audience": target,
+            "scopes": body.scopes,
+        }
     else:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="invalid egress_auth_mode")
 
@@ -479,6 +538,42 @@ async def list_available_egress_servers(
     return results
 
 
+@router.get("/egress/obo-identifier-uris")
+async def get_obo_identifier_uris(
+    user_context: Annotated[dict, Depends(nginx_proxied_auth)],
+):
+    """List the Entra Application ID URIs the operator must register.
+
+    Each server that logs the client in at the gateway via a per-server PRM
+    (``obo_exchange`` and the 3LO vault's ``oauth_user`` ingress leg) has a
+    per-server resource URL -- the value the gateway advertises in its PRM and
+    validates as the ingress ``aud``. On Entra, every one of those URLs must be
+    present in the gateway app's ``identifierUris`` list. This endpoint returns
+    the exact set so the operator can keep Entra in sync as such servers are
+    added/removed -- the registry side is automatic; only this list is manual.
+
+    Admin only. Returns ``{"identifier_uris": [...], "count": N}``.
+    """
+    _feature_enabled_or_404()
+    _require_admin(user_context)
+
+    from registry.api.wellknown_routes import server_needs_per_server_prm
+    from registry.auth.oauth_metadata import build_per_server_resource_url
+    from registry.core.config import settings
+
+    servers = await server_service.get_all_servers(include_inactive=True)
+    uris: list[str] = []
+    for path, info in (servers or {}).items():
+        if not server_needs_per_server_prm((info or {}).get("egress_auth_mode")):
+            continue
+        append_mcp = info.get("append_mcp_path") is not False
+        uris.append(
+            build_per_server_resource_url(settings.registry_url, path, append_mcp=append_mcp)
+        )
+    uris = sorted(set(uris))
+    return {"identifier_uris": uris, "count": len(uris)}
+
+
 class InitiateRequest(BaseModel):
     server_path: str
 
@@ -513,7 +608,10 @@ async def initiate_consent(
 
     url = get_egress_auth_service().build_consent_url(
         auth_method=auth_method,
-        user_id=user_context.get("username") or "",
+        # Canonical egress user (OIDC sub, else username): must match the id the
+        # vend path derives from the mcp-proxy token so one human maps to one
+        # vault bucket regardless of token type / provider. See #933.
+        user_id=user_context.get("egress_user") or user_context.get("username") or "",
         client_id_audit=user_context.get("client_id") or "",
         session_id=user_context.get("session_id") or "",
         server_path=server_path,
@@ -566,7 +664,9 @@ async def egress_callback(
             # a direct call without it always sees session=None (the account-swap
             # guard would silently never engage).
             ctx = await nginx_proxied_auth(request, session=session_cookie)
-            current_user = ctx.get("username")
+            # Compare on the canonical egress user (OIDC sub, else username) so the
+            # account-swap guard matches the id the consent state was built with.
+            current_user = ctx.get("egress_user") or ctx.get("username")
             current_method = ctx.get("auth_method")
         except Exception:
             pass
@@ -610,7 +710,7 @@ async def list_connections(
     _feature_enabled_or_404()
     conns = await get_egress_auth_service().list_connections(
         auth_method=user_context.get("auth_method") or "",
-        user_id=user_context.get("username") or "",
+        user_id=user_context.get("egress_user") or user_context.get("username") or "",
     )
     return [c.model_dump() for c in conns]
 
@@ -629,7 +729,7 @@ async def disconnect(
         server_path = "/" + server_path
     await get_egress_auth_service().disconnect(
         auth_method=user_context.get("auth_method") or "",
-        user_id=user_context.get("username") or "",
+        user_id=user_context.get("egress_user") or user_context.get("username") or "",
         provider=provider,
         server_path=server_path,
     )

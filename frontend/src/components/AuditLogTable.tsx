@@ -74,6 +74,11 @@ export interface AuditEvent {
     error_code?: number;
     error_message?: string;
   };
+  // Token-mint-specific fields (token_mint stream has no `identity` block).
+  // `username` is the raw human-readable identity (email -> preferred_username
+  // -> sub); `username_hash` is DEPRECATED, kept only for old records.
+  username?: string;
+  username_hash?: string;
 }
 
 interface AuditLogTableProps {
@@ -329,7 +334,9 @@ const AuditLogTable: React.FC<AuditLogTableProps> = ({
                   <td className="px-4 py-3 text-sm">
                     <div className="flex items-center gap-1">
                       <span className="text-gray-900 dark:text-gray-100">
-                        {isTokenMintStream ? event.username_hash : event.identity?.username || '-'}
+                        {isTokenMintStream
+                          ? event.username || event.username_hash || '-'
+                          : event.identity?.username || '-'}
                       </span>
                       {!isTokenMintStream && event.identity?.is_admin && (
                         <span className="px-1.5 py-0.5 text-xs font-medium bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-300 rounded">

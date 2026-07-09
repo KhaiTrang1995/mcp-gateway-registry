@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 
 from ..auth.oauth_metadata import (
     build_canonical_resource_url,
+    build_per_server_resource_url,
     build_resource_documentation_url,
     derive_supported_scopes,
     enforce_https,
@@ -13,14 +14,22 @@ from ..core.config import settings
 from ..repositories.factory import get_registry_card_repository
 from ..schemas.registry_card import RegistryCard, RegistryContact
 from ..services import ard_service
+from ..services.server_service import server_service
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
 
+# OAuth discovery metadata (RFC 8414 authorization-server and RFC 9728
+# protected-resource documents) points clients at the authorization server and
+# token endpoint. It must never be served from a shared/intermediary/CDN cache:
+# a poisoned cached copy would redirect every client to an attacker-controlled
+# authorization server for the cache lifetime. Force "no-store" so only the
+# origin ever answers these endpoints (no public/CDN caching, no revalidation
+# window).
 OAUTH_DISCOVERY_CACHE_HEADERS: dict[str, str] = {
-    "Cache-Control": "public, max-age=300",
+    "Cache-Control": "no-store",
     "Content-Type": "application/json",
 }
 
@@ -183,6 +192,30 @@ def _get_active_auth_provider():
     return get_auth_provider()
 
 
+def server_needs_per_server_prm(egress_auth_mode: str | None) -> bool:
+    """Whether a server should advertise a per-server RFC 9728 PRM (vs the global one).
+
+    The per-server PRM exists to satisfy Entra's strict resource/scope alignment
+    (the ingress login must target a path-qualified App ID URI, not the bare
+    origin). It applies to:
+
+    - ``obo_exchange`` on any provider (the same-IdP exchange always logs the user
+      in at the gateway against a per-server resource), and
+    - ``oauth_user`` ONLY on Entra. The 3LO vault's ingress leg is a gateway login
+      too, but lenient IdPs (Keycloak/Cognito) accept the gateway-wide root PRM's
+      bare origin + OIDC scopes, which is how Keycloak 3LO works today. We must NOT
+      route those through the per-server PRM, or we'd change that working path (and
+      force an exact connection-URL match they don't need). Only Entra requires it.
+
+    Everything else uses the gateway-wide PRM (unchanged behavior).
+    """
+    if egress_auth_mode == "obo_exchange":
+        return True
+    if egress_auth_mode == "oauth_user":
+        return (settings.auth_provider or "").lower() == "entra"
+    return False
+
+
 @router.get("/oauth-protected-resource")
 async def get_oauth_protected_resource() -> JSONResponse:
     """
@@ -232,6 +265,91 @@ async def get_oauth_protected_resource() -> JSONResponse:
         raise HTTPException(
             status_code=502,
             detail="Could not build Protected Resource Metadata",
+        ) from exc
+
+    return JSONResponse(content=document, headers=OAUTH_DISCOVERY_CACHE_HEADERS)
+
+
+def _normalize_prm_server_path(server_path: str) -> str:
+    """Reduce a path-aware PRM suffix to the registered server path.
+
+    MCP clients doing RFC 9728 path-aware discovery request
+    ``/.well-known/oauth-protected-resource/<server>/mcp`` (the connection URL's
+    path). Strip a trailing ``/mcp`` transport segment and normalize to the
+    leading-slash registered path (e.g. ``obo-echo/mcp`` -> ``/obo-echo``).
+    """
+    p = "/" + server_path.strip("/")
+    if p.endswith("/mcp"):
+        p = p[: -len("/mcp")]
+    return p or "/"
+
+
+@router.get("/oauth-protected-resource/{server_path:path}")
+async def get_oauth_protected_resource_for_server(
+    server_path: str,
+) -> JSONResponse:
+    """Per-server RFC 9728 PRM for egress servers (path-aware discovery).
+
+    Spec-compliant MCP clients (Claude Code, etc.) try the path-suffixed
+    well-known URL first, derived from the per-server connection URL. We serve a
+    document only for servers that need it (see ``server_needs_per_server_prm``):
+    ``obo_exchange`` on any provider, and ``oauth_user`` on Entra only. Everything
+    else -- including Keycloak/Cognito 3LO, which works with the gateway-wide root
+    PRM -- 404s here so the client falls back to the global PRM (unchanged
+    behavior).
+
+    The advertised ``resource`` is the **per-server connection URL** (e.g.
+    ``https://gw/github/mcp``). This is the ONLY value that satisfies all three
+    constraints simultaneously:
+      - RFC 9728 §3.3: the client only accepts a PRM ``resource`` equal to the
+        connection URL it is accessing (or the origin); a made-up shared path is
+        rejected.
+      - RFC 8707 canonicalization: a bare origin gets a trailing ``/`` on the
+        wire, which Entra App ID URIs cannot match -- a path-qualified per-server
+        URL is sent verbatim.
+      - Entra: the sent ``resource`` must equal a registered App ID URI exactly.
+    The trade-off: each such server's per-server URL must be an App ID URI on the
+    gateway app (operator maintains the ``identifierUris`` list; see
+    GET /api/egress/obo-identifier-uris for the exact list to register). The
+    registry side is fully dynamic -- this is derived from the server entry, no
+    per-server env config. Lenient IdPs (Keycloak/Cognito) do not hit these
+    constraints; this per-server PRM is what makes Entra ingress login work.
+    """
+    normalized = _normalize_prm_server_path(server_path)
+    info = await server_service.get_server_info(normalized)
+    if not info or not server_needs_per_server_prm(info.get("egress_auth_mode")):
+        # No per-server PRM for this server -> client falls back to the global PRM.
+        raise HTTPException(status_code=404, detail="no per-server resource metadata")
+
+    # Per-server connection-URL resource: the only value that satisfies the
+    # client's RFC 9728 §3.3 match, RFC 8707 canonicalization, and Entra's exact
+    # App ID URI match simultaneously (see the docstring).
+    append_mcp = info.get("append_mcp_path") is not False
+    resource = build_per_server_resource_url(
+        settings.registry_url, normalized, append_mcp=append_mcp
+    )
+    scopes_supported = [f"{resource}/user_impersonation"]
+    enforce_https(resource, https_required=settings.mcp_https_required)
+
+    try:
+        provider = _get_active_auth_provider()
+        document = provider.protected_resource_metadata(
+            resource=resource,
+            scopes_supported=scopes_supported,
+            resource_documentation=build_resource_documentation_url(),
+        )
+    except NotImplementedError as exc:
+        raise HTTPException(
+            status_code=501,
+            detail="OAuth discovery not implemented for the configured auth provider",
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("Failed to build per-server PRM document")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not build Protected Resource Metadata: {exc}",
         ) from exc
 
     return JSONResponse(content=document, headers=OAUTH_DISCOVERY_CACHE_HEADERS)

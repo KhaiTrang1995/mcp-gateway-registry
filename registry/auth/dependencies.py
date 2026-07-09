@@ -468,6 +468,8 @@ async def _derive_user_context(
     provider: str,
     session_id: str | None = None,
     client_id: str = "",
+    egress_user: str = "",
+    email: str = "",
 ) -> dict[str, Any]:
     """Build the canonical user_context dict from authenticated identity inputs.
 
@@ -488,11 +490,13 @@ async def _derive_user_context(
     if auth_method == "federation-static":
         return {
             "username": username,
+            "email": email,
             "client_id": client_id,
             "groups": groups,
             "scopes": scopes,
             "auth_method": auth_method,
             "provider": provider,
+            "egress_user": egress_user or username,
             "session_id": session_id,
             "accessible_servers": [],
             "accessible_tools": {},
@@ -509,11 +513,18 @@ async def _derive_user_context(
 
     return {
         "username": username,
+        # Human-readable email for audit records (preferred over username, which
+        # is the OIDC sub on some paths). Empty when the source carried none.
+        "email": email,
         "client_id": client_id,
         "groups": groups,
         "scopes": scopes,
         "auth_method": auth_method,
         "provider": provider,
+        # egress_user is the canonical per-user egress vault id (OIDC sub when
+        # available, else username). The consent-write path keys the vault on
+        # it so it matches the vend path's egress_user claim. See #933.
+        "egress_user": egress_user or username,
         # session_id is the opaque server-side identifier — used by template
         # callers to mint CSRF tokens via generate_csrf_token(session_id).
         "session_id": session_id,
@@ -535,6 +546,8 @@ async def _resolve_context_from_groups(
     provider: str,
     session_id: str | None = None,
     client_id: str = "",
+    egress_user: str = "",
+    email: str = "",
 ) -> dict[str, Any]:
     """Derive the canonical user_context from groups, server-side.
 
@@ -558,6 +571,8 @@ async def _resolve_context_from_groups(
         provider=provider,
         session_id=session_id,
         client_id=client_id,
+        egress_user=egress_user,
+        email=email,
     )
 
 
@@ -601,6 +616,11 @@ async def _context_from_internal_token(
             provider=session_data.get("provider", "local"),
             session_id=session_id,
             client_id=claims.get("client_id") or "",
+            # The auth_server stamps the canonical egress user (OIDC sub) into
+            # the token; prefer it so the consent-write vault key matches vend.
+            egress_user=claims.get("egress_user") or "",
+            # Human-readable email for audit records (from the session or claim).
+            email=session_data.get("email") or claims.get("email") or "",
         )
 
     # No session row (bearer / IdP-JWT / static-token caller): trust the claim's
@@ -612,6 +632,9 @@ async def _context_from_internal_token(
         auth_method=auth_method,
         provider=auth_method,
         client_id=claims.get("client_id") or "",
+        egress_user=claims.get("egress_user") or "",
+        # Human-readable email for audit records when the claim carries it.
+        email=claims.get("email") or "",
     )
 
 
@@ -640,6 +663,12 @@ async def enhanced_auth(
         auth_method=auth_method,
         provider=session_data.get("provider", "local"),
         session_id=session_data.get("session_id"),
+        # Canonical egress vault id (OIDC sub persisted at login). Keeps the
+        # consent-write path (which reaches enhanced_auth via the callback's
+        # cookie, no internal token) keyed the same as the vend path. See #933.
+        egress_user=session_data.get("subject") or "",
+        # Human-readable email for audit records (session store persists it).
+        email=session_data.get("email") or "",
     )
 
     # Set user context on request state for audit logging middleware
