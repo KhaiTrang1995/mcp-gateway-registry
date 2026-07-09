@@ -23,8 +23,12 @@ _read_outputs() {
     exit 1
   fi
 
+  # Keycloak/Registry URLs are HTTPS URLs when CloudFront is enabled (published
+  # by Auth/Service stacks after they front their ALBs). sslRequired=external
+  # on Keycloak realms blocks admin API calls over plain HTTP, so post-deploy
+  # admin ops MUST run against the HTTPS front.
   eval "$(jq -r '@sh "
-    KEYCLOAK_URL=\(."Registry-Service".KeycloakUrl // ."Registry-Auth".KeycloakUrl // "")
+    KEYCLOAK_URL=\(."Registry-Auth".KeycloakUrl // ."Registry-Service".KeycloakUrl // "")
     REGISTRY_URL=\(."Registry-Service".RegistryUrl // "")
     GRADIO_URL=\(."Registry-Service".GradioUiUrl // "")
     GRAFANA_URL=\(."Registry-Service".GrafanaUrl // "")"' "$outputs_file")"
@@ -43,13 +47,15 @@ _read_outputs() {
 # ---------------------------------------------------------------------------
 
 _wait_for_keycloak() {
-  _log_info "Waiting for Keycloak to be ready..."
-  local max_attempts=60
+  _log_info "Waiting for Keycloak to be ready at ${KEYCLOAK_URL}..."
+  # 180 attempts × 5s = 15 min. CloudFront distribution creation can take
+  # ~5-15 min to propagate to all edge locations after CDK reports COMPLETE.
+  local max_attempts=180
   local attempt=0
 
   while [ $attempt -lt $max_attempts ]; do
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "${KEYCLOAK_URL}/" 2>/dev/null || echo "000")
+    http_code=$(curl -sk -o /dev/null -w "%{http_code}" "${KEYCLOAK_URL}/" 2>/dev/null || echo "000")
     if [ "$http_code" = "200" ] || [ "$http_code" = "302" ] || [ "$http_code" = "303" ]; then
       _log_success "Keycloak is ready (HTTP $http_code)"
       return 0
@@ -58,7 +64,7 @@ _wait_for_keycloak() {
     attempt=$((attempt + 1))
   done
 
-  _log_error "Keycloak did not become ready within 5 minutes"
+  _log_error "Keycloak did not become ready within 15 minutes"
   exit 1
 }
 
@@ -301,17 +307,29 @@ _validate_endpoints() {
 
   local all_ok=true
 
+  # Auth-server and Gradio are proxied by the registry container's nginx on
+  # port 8080 (behind CloudFront/ALB). Nginx paths:
+  #   /oauth2/* → auth-server via Service Connect
+  #   /       → gradio (uvicorn on 127.0.0.1:7860, via nginx default location)
+  # There are no separate 8888/7860 ALB listeners anymore (TF parity). The
+  # auth-server has no plain probe endpoint through nginx; a successful
+  # OAuth login flow (post-deploy step 4) is the real integration test.
   for url_label in \
     "Registry|${REGISTRY_URL}/health" \
-    "Gradio UI|${GRADIO_URL:-${REGISTRY_URL}:7860}/health" \
-    "Auth Server|${REGISTRY_URL}:8888/health" \
+    "Gradio UI|${REGISTRY_URL}/" \
     "Keycloak|${KEYCLOAK_URL}/" \
     "Keycloak Realm|${KEYCLOAK_URL}/realms/mcp-gateway/.well-known/openid-configuration"; do
 
     local label="${url_label%%|*}"
     local url="${url_label##*|}"
+    if [ -z "$url" ]; then
+      echo -e "  ${YELLOW}[SKIP]${NC} $label (URL unset)"
+      continue
+    fi
     local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
+    # -k: CloudFront default cert is valid but the ALB HTTP URLs are naked.
+    # -L: follow redirects when CloudFront viewer-protocol-policy issues 301.
+    http_code=$(curl -skL -o /dev/null -w "%{http_code}" "$url" 2>/dev/null || echo "000")
 
     if [ "$http_code" = "200" ] || [ "$http_code" = "302" ] || [ "$http_code" = "303" ]; then
       echo -e "  ${GREEN}[PASS]${NC} $label ($http_code)"
@@ -344,9 +362,10 @@ _print_summary() {
   Service URLs
   ------------
   Registry:          ${GREEN}${REGISTRY_URL}${NC}
-  Registry API:      ${GREEN}${REGISTRY_URL}/api/v1${NC}
-  Gradio UI:         ${GREEN}${GRADIO_URL:-${REGISTRY_URL}:7860}${NC}
-  Auth Server:       ${GREEN}${REGISTRY_URL}:8888${NC}
+  Registry OpenAPI:  ${GREEN}${REGISTRY_URL}/docs${NC}
+  Registry API:      ${GREEN}${REGISTRY_URL}/api/agents${NC}  (also /api/audit/*, /api/admin/*, /api/register)
+  Gradio UI:         ${GREEN}${REGISTRY_URL}${NC}
+  OAuth callback:    ${GREEN}${REGISTRY_URL}/oauth2/callback/keycloak${NC}
   Keycloak:          ${GREEN}${KEYCLOAK_URL}${NC}
   Keycloak Admin:    ${GREEN}${KEYCLOAK_URL}/admin${NC}${GRAFANA_URL:+
   Grafana:           ${GREEN}${GRAFANA_URL}${NC}}
