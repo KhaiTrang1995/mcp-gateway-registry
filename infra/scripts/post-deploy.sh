@@ -96,7 +96,7 @@ _disable_ssl_required() {
     -X PUT "${KEYCLOAK_URL}/admin/realms/${realm}" \
     -H "Authorization: Bearer ${token}" \
     -H "Content-Type: application/json" \
-    -d '{"sslRequired":"NONE"}')
+    -d '{"sslRequired":"EXTERNAL"}')
 
   if [ "$http_code" = "204" ]; then
     _log_success "Disabled sslRequired on realm: ${realm}"
@@ -127,7 +127,7 @@ _disable_ssl_via_ecs_exec() {
   local task_id="${task_arn##*/}"
 
   local kcadm_cmd="/opt/keycloak/bin/kcadm.sh"
-  local script="$kcadm_cmd config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} 2>&1 && $kcadm_cmd update realms/master -s sslRequired=NONE 2>&1 && echo SSL_DISABLED_OK"
+  local script="$kcadm_cmd config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} 2>&1 && $kcadm_cmd update realms/master -s sslRequired=EXTERNAL 2>&1 && echo SSL_DISABLED_OK"
 
   local output
   output=$(aws ecs execute-command --cluster keycloak --task "$task_id" \
@@ -143,28 +143,31 @@ _disable_ssl_via_ecs_exec() {
   _log_warn "ECS Exec output: $output"
   _log_warn "ECS Exec may have timed out but the command may still succeed. Verifying..."
 
+  # Verify by reading realm config via kcadm on loopback (sslRequired=external
+  # blocks external HTTP requests, so we cannot verify via the ALB). The
+  # inline echo runs only when grep matches, so absence of VERIFY_DONE means
+  # sslRequired has not yet been flipped.
+  local verify_script="/opt/keycloak/bin/kcadm.sh config credentials --server http://localhost:8080 --realm master --user ${KC_ADMIN_USER} --password ${KC_ADMIN_PASSWORD} >/dev/null 2>&1 && /opt/keycloak/bin/kcadm.sh get realms/master 2>/dev/null | grep -q 'sslRequired.*external' && echo VERIFY_DONE"
+
   local verify_attempt=0
-  local max_verify=12
+  local max_verify=6
   while [ $verify_attempt -lt $max_verify ]; do
     sleep 5
-    local http_code
-    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
-      -X POST "${KEYCLOAK_URL}/realms/master/protocol/openid-connect/token" \
-      -H "Content-Type: application/x-www-form-urlencoded" \
-      -d "username=${KC_ADMIN_USER}" \
-      -d "password=${KC_ADMIN_PASSWORD}" \
-      -d "grant_type=password" \
-      -d "client_id=admin-cli" 2>/dev/null || echo "000")
+    local verify_out
+    verify_out=$(aws ecs execute-command --cluster keycloak --task "$task_id" \
+      --container keycloak --interactive \
+      --command "sh -c '${verify_script}'" \
+      --region "$AWS_REGION" 2>&1) || true
 
-    if [ "$http_code" = "200" ]; then
-      _log_success "Verified: master realm SSL is now disabled (token request returned 200)"
+    if echo "$verify_out" | grep -q "VERIFY_DONE"; then
+      _log_success "Verified: master realm sslRequired is EXTERNAL"
       return 0
     fi
-    _log_info "Waiting for SSL disable to take effect (attempt $((verify_attempt + 1))/$max_verify, HTTP $http_code)..."
+    _log_info "Waiting for SSL flip to verify (attempt $((verify_attempt + 1))/$max_verify)..."
     verify_attempt=$((verify_attempt + 1))
   done
 
-  _log_error "Failed to disable SSL on master realm after ${max_verify} attempts"
+  _log_error "Failed to verify sslRequired=external on master realm after ${max_verify} attempts"
   return 1
 }
 
