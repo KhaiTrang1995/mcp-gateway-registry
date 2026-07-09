@@ -5,6 +5,7 @@
   "description": "Intelligent travel planning and assistance agent",
   "url": "http://travel-assistant-agent.mcp-gateway-v2.local:9000",
   "version": "0.0.1",
+  "status": "active",
   "capabilities": {
     "streaming": true
   },

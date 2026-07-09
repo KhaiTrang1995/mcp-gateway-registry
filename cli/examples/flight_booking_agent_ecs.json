@@ -5,6 +5,7 @@
   "description": "Flight booking and reservation management agent",
   "url": "http://flight-booking-agent.mcp-gateway-v2.local:9000",
   "version": "0.0.1",
+  "status": "active",
   "capabilities": {
     "streaming": true
   },

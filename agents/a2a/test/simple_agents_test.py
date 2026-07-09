@@ -7,6 +7,7 @@ Usage: python simple_agents_test.py --endpoint local|live [--debug]
 import argparse
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -49,6 +50,12 @@ class AgentTester:
     ) -> None:
         self.endpoints = endpoints
         self.is_live = is_live
+        # Bearer for the agent's own JWT middleware. The agents authenticate every
+        # request; in a presence-only test sandbox any non-empty bearer is
+        # accepted, so read AGENT_BEARER_TOKEN (or REGISTRY_JWT_TOKEN) if set.
+        self.agent_bearer = os.environ.get("AGENT_BEARER_TOKEN") or os.environ.get(
+            "REGISTRY_JWT_TOKEN"
+        )
         if is_live:
             self.bedrock_client = boto3.client("bedrock-agentcore", region_name=AWS_REGION)
 
@@ -91,9 +98,10 @@ class AgentTester:
             logger.debug(f"[REQUEST] Payload:\n{json.dumps(payload, indent=2)}")
 
             start_time = time.time()
-            response = requests.post(
-                endpoint, json=payload, headers={"Content-Type": "application/json"}, timeout=60
-            )
+            headers = {"Content-Type": "application/json"}
+            if self.agent_bearer:
+                headers["Authorization"] = f"Bearer {self.agent_bearer}"
+            response = requests.post(endpoint, json=payload, headers=headers, timeout=60)
             response_time = time.time() - start_time
 
             response_json = response.json()
@@ -204,10 +212,13 @@ class AgentTester:
         logger.debug(f"[API REQUEST] Method: {method}, Params: {params}")
 
         start_time = time.time()
+        api_headers = {}
+        if self.agent_bearer:
+            api_headers["Authorization"] = f"Bearer {self.agent_bearer}"
         if method.upper() == "GET":
-            response = requests.get(url, params=params, timeout=60)
+            response = requests.get(url, params=params, headers=api_headers, timeout=60)
         else:
-            response = requests.post(url, params=params, timeout=60)
+            response = requests.post(url, params=params, headers=api_headers, timeout=60)
         response_time = time.time() - start_time
 
         response_json = response.json()
