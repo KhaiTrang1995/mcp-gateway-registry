@@ -806,6 +806,15 @@ class NginxConfigService:
 
                 unprotected_api_block = """    # API endpoints - FastAPI handles authentication (session cookie / bearer)
     location {{ROOT_PATH}}/api/ {
+        # Inbound rate limits still apply even though auth_request is bypassed:
+        # /api/ is the highest-volume surface and must stay bounded at the edge,
+        # and the registration endpoints keep their stricter per-source cap (the
+        # register zone key is empty for non-registration URIs, so it is a no-op
+        # for the rest of /api/).
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_req zone=mcp_gateway_register burst=10 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # Proxy to FastAPI service
         proxy_pass http://127.0.0.1:7860/api/;
         proxy_http_version 1.1;
@@ -1465,6 +1474,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 block = f"""
     # Virtual MCP Server: {safe_name}
     location {{{{ROOT_PATH}}}}{safe_vs_path} {{
+        # Inbound rate limiting: this path fans out to the shared /validate auth
+        # subrequest, so bound it at the edge (zones declared at http scope in
+        # docker/nginx_rev_proxy_*.conf) to keep a flood from exhausting /validate.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         set $virtual_server_id "{safe_id}";
         auth_request /validate;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
@@ -1910,6 +1925,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Common proxy settings
         common_settings = f"""
+        # Inbound rate limiting: every MCP request fans out to the shared
+        # /validate auth subrequest, so bound it at the edge (zones + rationale
+        # are declared at http scope in docker/nginx_rev_proxy_*.conf). Keeps a
+        # flood on one server's /mcp-proxy/ path from exhausting /validate for
+        # all servers. burst+nodelay give bursty MCP clients headroom.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # DNS resolver for dynamic proxy_pass upstreams.
         # Default: 8.8.8.8 8.8.4.4 (public DNS).
         # Override with NGINX_DNS_RESOLVER env var for environments where
