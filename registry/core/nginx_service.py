@@ -80,16 +80,25 @@ def _render_real_ip_config() -> str:
     directives are emitted, which is the correct behaviour for edge deployments
     (compose / single host) where nginx's peer already IS the client.
 
-    ``real_ip_recursive on`` walks the forwarded chain right-to-left skipping the
-    trusted CIDRs, stopping at the first untrusted address (the real client), so a
-    stacked-proxy topology (e.g. CloudFront in front of an ALB, once both ranges
-    are listed) resolves correctly. A spoofed left-most entry can never win
-    because it is not appended by a trusted hop.
+    ``real_ip_recursive`` walks the forwarded chain right-to-left skipping the
+    trusted CIDRs, stopping at the first untrusted address (the real client). It
+    is emitted as ``on`` ONLY when more than one trusted CIDR is configured (a
+    stacked-proxy topology, e.g. CloudFront in front of an ALB). For the common
+    single-hop case (one ALB) recursion is left off: nginx takes the single
+    right-most entry, which is what the one trusted proxy appended, and a spoofed
+    left-most entry can never win. Recursion + an over-broad trusted range would
+    let a client whose own source falls inside that range inject a left-most
+    entry, so we don't enable it unless the topology actually needs it.
+
+    Catch-all ranges (``0.0.0.0/0`` / ``::/0``) are rejected: they would make
+    nginx trust EVERY peer and take the spoofable left-most XFF entry — a
+    fail-open misconfiguration — so they are dropped with a warning like any other
+    invalid entry. Narrow the trust to the load balancer's specific subnet(s).
 
     Returns:
         The nginx directive block (``set_real_ip_from`` lines + ``real_ip_header``
-        + ``real_ip_recursive on``), or an empty string when no valid CIDRs are
-        configured.
+        + optional ``real_ip_recursive on``), or an empty string when no valid
+        CIDRs are configured.
     """
     raw = os.environ.get("TRUSTED_REAL_IP_CIDRS", "").strip()
     if not raw:
@@ -104,9 +113,20 @@ def _render_real_ip_config() -> str:
             # strict=False so a host address (e.g. 10.1.3.39) is accepted as a
             # /32 rather than rejected for having host bits set.
             network = ipaddress.ip_network(candidate, strict=False)
-            valid_cidrs.append(str(network))
         except ValueError:
             logger.warning("Ignoring malformed entry in TRUSTED_REAL_IP_CIDRS: %r", candidate)
+            continue
+        # Reject a catch-all range: trusting every peer defeats the guard and
+        # makes the spoofable left-most XFF entry win (fail-open). prefixlen == 0
+        # is 0.0.0.0/0 or ::/0.
+        if network.prefixlen == 0:
+            logger.warning(
+                "Refusing catch-all range %r in TRUSTED_REAL_IP_CIDRS "
+                "(would trust every peer); narrow it to the proxy's subnet",
+                candidate,
+            )
+            continue
+        valid_cidrs.append(str(network))
 
     if not valid_cidrs:
         logger.warning(
@@ -118,7 +138,10 @@ def _render_real_ip_config() -> str:
     logger.info("Configuring nginx realip trust for CIDRs: %s", ", ".join(valid_cidrs))
     lines = [f"set_real_ip_from {cidr};" for cidr in valid_cidrs]
     lines.append("real_ip_header X-Forwarded-For;")
-    lines.append("real_ip_recursive on;")
+    # Only recurse for stacked proxies (>1 trusted hop). A single trusted CIDR
+    # needs no recursion — the right-most entry is the one that proxy appended.
+    if len(valid_cidrs) > 1:
+        lines.append("real_ip_recursive on;")
     return "\n".join(lines)
 
 

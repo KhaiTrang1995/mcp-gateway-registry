@@ -104,6 +104,22 @@ class TestResolveAdminGroupNames:
             with pytest.raises(AdminSafetyError):
                 await admin_safety.resolve_admin_group_names()
 
+    async def test_fails_closed_on_empty_admin_group_set(self):
+        # Catalogue lists groups but NONE match the privileged-scope predicate
+        # (predicate/catalogue drift). Must refuse rather than return an empty set
+        # that would silently disable the last-admin guard.
+        groups = {
+            "readers": {"ui_scopes": {"list_service": ["some-server"]}, "mappings": []},
+            "viewers": {"ui_scopes": {"list_service": ["another-server"]}, "mappings": []},
+        }
+        with patch(
+            "registry.services.admin_safety.scope_service.list_groups",
+            new=AsyncMock(return_value=groups),
+        ):
+            with pytest.raises(AdminSafetyError) as exc:
+                await admin_safety.resolve_admin_group_names()
+        assert exc.value.status_code == 503
+
 
 def _iam_mock(users):
     mock = MagicMock()
@@ -145,6 +161,29 @@ class TestListAdminUsernames:
             patch(
                 "registry.services.admin_safety.get_iam_manager",
                 return_value=mock,
+            ),
+        ):
+            with pytest.raises(AdminSafetyError) as exc:
+                await admin_safety.list_admin_usernames()
+        assert exc.value.status_code == 503
+
+    async def test_fails_closed_when_no_admins_found(self):
+        # Admin-conferring groups exist, but the user listing surfaces NO admin
+        # (e.g. an IdP adapter that returned groupless users, or a truncated
+        # listing). Deriving "no admins, nothing to guard" would bypass the
+        # last-admin guard, so this must fail closed instead of returning set().
+        users = [
+            {"username": "regular1", "groups": ["readers"]},
+            {"username": "regular2", "groups": []},
+        ]
+        with (
+            patch(
+                "registry.services.admin_safety.resolve_admin_group_names",
+                new=AsyncMock(return_value={"mcp-registry-admin"}),
+            ),
+            patch(
+                "registry.services.admin_safety.get_iam_manager",
+                return_value=_iam_mock(users),
             ),
         ):
             with pytest.raises(AdminSafetyError) as exc:

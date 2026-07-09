@@ -115,6 +115,23 @@ async def resolve_admin_group_names() -> set[str]:
                 if isinstance(mapped, str):
                     admin_names.add(_normalize(mapped))
 
+    # Fail closed on an empty result. A scope catalogue that lists groups but
+    # matches ZERO admin-conferring scopes means our privileged-scope predicate
+    # has drifted from the catalogue shape (or the catalogue is incomplete) — not
+    # that the deployment genuinely has no admin groups. Proceeding would make
+    # every user look non-admin and silently disable the last-admin guard, so we
+    # refuse rather than derive a lockout decision from an unverifiable picture.
+    if not admin_names:
+        logger.error(
+            "admin_safety: scope catalogue yielded ZERO admin-conferring groups "
+            "(%d groups scanned); refusing to derive admin population",
+            len(groups),
+        )
+        raise AdminSafetyError(
+            status_code=503,
+            detail="Unable to verify administrator population; operation refused",
+        )
+
     logger.debug("admin_safety: resolved %d admin-conferring group names", len(admin_names))
     return admin_names
 
@@ -165,6 +182,24 @@ async def list_admin_usernames() -> set[str]:
             continue
         if groups_confer_admin(user.get("groups"), admin_group_names):
             admins.add(_normalize(username))
+
+    # Fail closed on an empty admin set. We already know at least one
+    # admin-conferring group exists (resolve_admin_group_names raises otherwise),
+    # so finding NO admin users means the user listing didn't surface group
+    # membership (e.g. an IdP adapter that returned groupless users, or a
+    # truncated/empty listing) rather than a genuine zero-admin deployment.
+    # Deriving "target is not an admin, nothing to guard" from that would silently
+    # bypass the last-admin guard, so refuse instead.
+    if not admins:
+        logger.error(
+            "admin_safety: no administrator accounts found despite %d "
+            "admin-conferring group(s); refusing (user listing likely incomplete)",
+            len(admin_group_names),
+        )
+        raise AdminSafetyError(
+            status_code=503,
+            detail="Unable to verify administrator population; operation refused",
+        )
 
     logger.debug("admin_safety: %d administrator account(s) currently present", len(admins))
     return admins
