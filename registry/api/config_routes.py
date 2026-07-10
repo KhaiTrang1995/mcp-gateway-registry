@@ -765,8 +765,19 @@ async def _custom_type_tabs() -> list[dict[str, str]]:
     summary="Get registry configuration",
     description="Returns the current deployment mode, registry mode, and enabled features",
 )
-async def get_config() -> dict[str, Any]:
-    """Get current registry configuration."""
+async def get_config(
+    user_context: Annotated[dict, Depends(enhanced_auth)],
+) -> dict[str, Any]:
+    """Get current registry configuration.
+
+    Requires authentication. This endpoint exposes deployment topology, enabled
+    feature flags, the active auth provider, and other internal configuration
+    that aids reconnaissance, so it is gated behind an authenticated session and
+    fails closed (401) for anonymous callers. Pre-login UI needs (application
+    title, available OAuth providers) are served by the dedicated unauthenticated
+    ``/api/version`` and ``/api/auth/*`` endpoints instead.
+    """
+    del user_context  # Presence enforces authentication; contents unused here.
     # User-group fallback feature flags (issue #1127). These let the frontend
     # decide whether to show the "User Groups" IAM tab and the "Also create in
     # PingFederate" checkbox without baking provider names into the UI.

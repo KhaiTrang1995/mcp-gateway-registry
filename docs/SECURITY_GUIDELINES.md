@@ -229,6 +229,19 @@ sanitizer that isn't called) is equivalent to no check.
   SEPARATE explicit acknowledgement (e.g. `confirm_sensitive_export`) in addition
   to `include_sensitive`, reject (fail closed) when the acknowledgement is absent,
   and redact the sensitive values otherwise. Audit every sensitive export.
+- **Don't disclose deployment topology / feature surface to anonymous callers —
+  it's reconnaissance.** A config/topology read (deployment mode, registry mode,
+  active auth provider, enabled feature flags, proxy-update state) tells an
+  attacker how the system is wired before they authenticate. Gate it behind an
+  authenticated session and fail closed (401) for anonymous callers. Serve the
+  genuinely pre-login needs (app title, available OAuth providers, auth-server
+  URL) from dedicated MINIMAL anonymous endpoints, not a broad config dump — so
+  gating the config endpoint doesn't break the login page. Then sweep the OTHER
+  anonymous endpoints for the same fields: a load-balancer `/health` probe, a
+  `/status`, or an OpenAPI/schema dump commonly re-leaks the exact topology you
+  just gated — trim them to a liveness signal (probes rely on the HTTP status,
+  not the body). RFC-mandated anonymous surfaces (OAuth `.well-known` discovery)
+  are the deliberate exception.
 - **Honor the disabled/inactive flag everywhere access is derived, on EVERY
   request.** A user/group/client marked disabled must contribute no
   groups/scopes and be denied — enforce it at the group→scope enrichment / session
