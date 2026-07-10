@@ -184,9 +184,9 @@ def test_python_dockerfile_has_pip_no_cache(repo_root: Path, dockerfile_path: st
     # Check if it's a Python-based image
     if re.search(r"FROM.*python", content, re.IGNORECASE):
         # Check for PIP_NO_CACHE_DIR
-        assert (
-            "PIP_NO_CACHE_DIR" in content
-        ), f"{dockerfile_path}: Python image missing PIP_NO_CACHE_DIR"
+        assert "PIP_NO_CACHE_DIR" in content, (
+            f"{dockerfile_path}: Python image missing PIP_NO_CACHE_DIR"
+        )
 
 
 def test_docker_compose_has_security_options(repo_root: Path):
@@ -228,12 +228,12 @@ def test_docker_compose_mongodb_cap_add(repo_root: Path):
         content = compose_file.read_text()
 
         assert "cap_add:" in content, f"{compose_filename}: missing cap_add for MongoDB"
-        assert (
-            "- SETUID" in content
-        ), f"{compose_filename}: missing SETUID in cap_add (required by MongoDB gosu)"
-        assert (
-            "- SETGID" in content
-        ), f"{compose_filename}: missing SETGID in cap_add (required by MongoDB gosu)"
+        assert "- SETUID" in content, (
+            f"{compose_filename}: missing SETUID in cap_add (required by MongoDB gosu)"
+        )
+        assert "- SETGID" in content, (
+            f"{compose_filename}: missing SETGID in cap_add (required by MongoDB gosu)"
+        )
 
 
 def test_docker_compose_registry_port_mapping(repo_root: Path):
@@ -456,13 +456,13 @@ class TestBedrockAgentCoreLeastPrivilege:
         assert block, "iam.tf: bedrock_agentcore_access policy resource not found."
 
         # The scoped resource ARN must be present.
-        assert (
-            "arn:${data.aws_partition.current.partition}:bedrock-agentcore:" in block
-        ), "iam.tf: AgentCore read statement must scope Resource to an account-bound ARN."
+        assert "arn:${data.aws_partition.current.partition}:bedrock-agentcore:" in block, (
+            "iam.tf: AgentCore read statement must scope Resource to an account-bound ARN."
+        )
         # The AgentCore policy must not fall back to a bare wildcard resource.
-        assert (
-            'Resource = "*"' not in block
-        ), 'iam.tf: bedrock_agentcore_access must not use Resource = "*".'
+        assert 'Resource = "*"' not in block, (
+            'iam.tf: bedrock_agentcore_access must not use Resource = "*".'
+        )
 
     def test_terraform_sts_not_wildcard(self, repo_root: Path):
         """sts:AssumeRole must target configured role ARNs, never Resource = "*"."""
@@ -470,9 +470,9 @@ class TestBedrockAgentCoreLeastPrivilege:
         content = iam_file.read_text()
 
         # The assume-role resource must reference the configured ARN list.
-        assert (
-            "var.aws_registry_federation_assume_role_arns" in content
-        ), "iam.tf: sts:AssumeRole must scope Resource to the configured role ARNs."
+        assert "var.aws_registry_federation_assume_role_arns" in content, (
+            "iam.tf: sts:AssumeRole must scope Resource to the configured role ARNs."
+        )
 
     def test_cdk_agentcore_resource_scoped(self, repo_root: Path):
         """CDK AgentCore statement must scope resources to the account, not '*'."""
@@ -483,9 +483,9 @@ class TestBedrockAgentCoreLeastPrivilege:
             "registry-service-stack.ts: AgentCore statement must scope resources "
             "to an account-bound ARN."
         )
-        assert (
-            "resources: ['*']" not in content
-        ), "registry-service-stack.ts: no statement may use resources: ['*']."
+        assert "resources: ['*']" not in content, (
+            "registry-service-stack.ts: no statement may use resources: ['*']."
+        )
 
     @pytest.mark.parametrize(
         "vars_path",
