@@ -515,6 +515,7 @@ async def test_a2a_blocks_emitted_when_flag_enabled(
     with patch("registry.core.nginx_service.settings") as mock_settings:
         mock_settings.nginx_updates_enabled = True
         mock_settings.a2a_reverse_proxy_enabled = True
+        mock_settings.a2a_reverse_proxy_effective = True
         mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
         mock_settings.auth_server_url = "http://auth-server:8888"
         with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
@@ -548,6 +549,7 @@ async def test_a2a_blocks_skipped_when_flag_disabled(
     with patch("registry.core.nginx_service.settings") as mock_settings:
         mock_settings.nginx_updates_enabled = True
         mock_settings.a2a_reverse_proxy_enabled = False
+        mock_settings.a2a_reverse_proxy_effective = False
         mock_settings.nginx_config_path = "/etc/nginx/conf.d/nginx_rev_proxy.conf"
         mock_settings.auth_server_url = "http://auth-server:8888"
         with patch.object(nginx_service.nginx_template_path, "exists", return_value=True):
@@ -607,9 +609,19 @@ async def test_enabling_agent_changes_rendered_config_hash(
                             nginx_service, "get_additional_server_names", return_value=""
                         ):
                             with patch.object(nginx_service, "reload_nginx", return_value=True):
-                                with patch(
-                                    "registry.services.agent_service.agent_service"
-                                ) as mock_agent_svc:
+                                with (
+                                    patch(
+                                        "registry.services.agent_service.agent_service"
+                                    ) as mock_agent_svc,
+                                    # The backend DNS resolvability guard is an
+                                    # environmental dependency; stub it True so the
+                                    # test exercises the render path deterministically.
+                                    patch.object(
+                                        type(nginx_service),
+                                        "_agent_backend_resolves",
+                                        AsyncMock(return_value=True),
+                                    ),
+                                ):
                                     mock_agent_svc.get_enabled_agents = AsyncMock(
                                         return_value=enabled_paths
                                     )

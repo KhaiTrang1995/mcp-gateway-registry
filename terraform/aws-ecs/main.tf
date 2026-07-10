@@ -318,6 +318,11 @@ module "mcp_gateway" {
   deployment_mode = var.deployment_mode
   registry_mode   = var.registry_mode
 
+  # A2A reverse-proxy gateway (opt-in) + SSRF guard bypass for internal upstreams
+  a2a_reverse_proxy_enabled = var.a2a_reverse_proxy_enabled
+  ssrf_allowed_hosts        = var.ssrf_allowed_hosts
+  ssrf_allowed_cidrs        = var.ssrf_allowed_cidrs
+
   # Internal/workshop deployment classification (telemetry labels; issue #1216)
   internal_only_deployment = var.internal_only_deployment
   internal_deployment_type = var.internal_deployment_type

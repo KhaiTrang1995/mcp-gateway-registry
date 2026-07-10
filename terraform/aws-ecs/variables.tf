@@ -142,14 +142,34 @@ variable "keycloak_database_username" {
   default     = "keycloak"
 }
 
+variable "allow_unsafe_password_chars" {
+  description = <<-EOT
+    Escape hatch for the URI/RDS-safe password character validation added in
+    #1354. Default false: keycloak_database_password and documentdb_admin_password
+    are rejected if they contain / @ " ' + : ? # & ! = % or spaces (these break
+    RDS/DocumentDB, connection-string/URI parsing, or curl form-encoding).
+
+    Set true ONLY for an EXISTING install whose databases were already created
+    with such a password (rotating a live master password is avoidable churn).
+    This does NOT make those characters safe; it suppresses the fail-fast check
+    so an existing deployment can keep applying without a forced password change.
+    New installs should leave this false and choose a compliant password.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
 
   validation {
-    condition     = !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Safe by default.
+    condition     = var.allow_unsafe_password_chars || !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -408,8 +428,12 @@ variable "documentdb_admin_password" {
   default     = ""
 
   validation {
-    condition     = var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
-    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces."
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Empty is allowed (only required for documentdb
+    # storage backend). Safe by default.
+    condition     = var.allow_unsafe_password_chars || var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
   }
 }
 
@@ -1510,6 +1534,24 @@ variable "registry_mode" {
     condition     = contains(["full", "skills-only", "mcp-servers-only", "agents-only"], var.registry_mode)
     error_message = "registry_mode must be one of: 'full', 'skills-only', 'mcp-servers-only', 'agents-only'"
   }
+}
+
+variable "a2a_reverse_proxy_enabled" {
+  description = "Enable A2A agent reverse-proxy generation (opt-in; default off). When true, each enabled A2A agent gets nginx location blocks proxying its card + JSON-RPC through the gateway for centralized auth and metrics."
+  type        = bool
+  default     = false
+}
+
+variable "ssrf_allowed_hosts" {
+  description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
+  type        = string
+  default     = ""
+}
+
+variable "ssrf_allowed_cidrs" {
+  description = "Comma-separated CIDR ranges the SSRF guard accepts for MCP-server / A2A-agent upstreams even though they are private. The cloud metadata address 169.254.169.254 is never permitted."
+  type        = string
+  default     = ""
 }
 
 variable "internal_only_deployment" {

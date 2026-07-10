@@ -1104,10 +1104,12 @@ class NginxConfigService:
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", "")
 
             # Generate A2A agent reverse-proxy blocks. Opt-in via
-            # A2A_REVERSE_PROXY_ENABLED. In registry-only mode they are also
-            # skipped: the registry-only 503 block already returns 503 for any
-            # /agent/* path that is not an API route.
-            if settings.nginx_updates_enabled and settings.a2a_reverse_proxy_enabled:
+            # A2A_REVERSE_PROXY_ENABLED, and only effective in with-gateway mode
+            # (a2a_reverse_proxy_effective is the shared flag-AND-with-gateway
+            # gate). In registry-only mode they are skipped: the registry-only
+            # 503 block already returns 503 for any /agent/* path that is not an
+            # API route.
+            if settings.a2a_reverse_proxy_effective:
                 agent_blocks = await self._generate_agent_location_blocks()
             else:
                 agent_blocks = ""
@@ -1759,6 +1761,38 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         except Exception as e:
             logger.error(f"Failed to write virtual server mappings: {e}", exc_info=True)
 
+    @staticmethod
+    async def _agent_backend_resolves(
+        hostname: str,
+    ) -> bool:
+        """Return True if the agent backend hostname resolves right now.
+
+        Used to fail safe before emitting a literal ``proxy_pass`` in an agent
+        block: an unresolvable host would make the whole nginx reload fail. Runs
+        the blocking ``getaddrinfo`` in a thread so it does not block the event
+        loop. An IP literal or a resolvable name (including a bare docker/service
+        name valid on this host's network) returns True; a dead name returns
+        False. Fails safe to False on lookup error so a bad host is skipped, not
+        emitted.
+
+        Args:
+            hostname: Upstream host (no scheme or port); may be empty.
+
+        Returns:
+            True if the host resolves, else False.
+        """
+        if not hostname:
+            return False
+        import socket
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
+            return True
+        except (OSError, UnicodeError) as exc:
+            logger.debug(f"Agent backend host {hostname!r} did not resolve: {exc}")
+            return False
+
     async def _generate_agent_location_blocks(self) -> str:
         """Generate nginx reverse-proxy location blocks for enabled A2A agents.
 
@@ -1786,9 +1820,15 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                     logger.warning(f"Enabled agent '{path}' has no card; skipping nginx block")
                     continue
 
-                backend_url = (agent.url or "").rstrip("/")
+                # Proxy to the real backend. In reverse-proxy mode the advertised
+                # url is the gateway-facing address, so the registrant's backend
+                # lives in proxy_pass_url; fall back to url for agents registered
+                # before the flag was on (proxy_pass_url unset).
+                backend_url = (getattr(agent, "proxy_pass_url", None) or agent.url or "").rstrip(
+                    "/"
+                )
                 if not backend_url:
-                    logger.warning(f"Agent '{path}' has no url; skipping nginx block")
+                    logger.warning(f"Agent '{path}' has no backend url; skipping nginx block")
                     continue
 
                 # Only proxy true A2A agents. A non-A2A agent that happens to
@@ -1806,6 +1846,23 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                     logger.debug(
                         f"Agent '{path}' health is {agent.health_status!r} "
                         "(not healthy); skipping nginx block"
+                    )
+                    continue
+
+                # The agent block emits a LITERAL proxy_pass, which nginx resolves
+                # at config-load time; a backend host that does not resolve then
+                # makes the WHOLE nginx reload fail ("host not found in upstream"),
+                # taking every route down, not just this agent. Fail safe: verify
+                # the host resolves now and skip the block with a warning if it
+                # does not (same posture as the health and no-url skips above), so
+                # one dead backend host can never crash the reload. This is a real
+                # DNS check (not the dot heuristic) so a legitimately-resolvable
+                # bare docker/service name is kept and a dead FQDN is caught.
+                backend_host = urlparse(backend_url).hostname or ""
+                if not await self._agent_backend_resolves(backend_host):
+                    logger.warning(
+                        f"Agent '{path}' backend host {backend_host!r} does not "
+                        "resolve; skipping nginx block so the reload cannot fail"
                     )
                     continue
 
@@ -1890,7 +1947,16 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
         proxy_set_header Host {host_header};
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie. The standard Authorization header is left intact: per
+        # the A2A spec, credentials are obtained out-of-band by the calling agent
+        # and passed end-to-end in Authorization for the target agent to
+        # authenticate -- the gateway is not a credential broker here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
         # Rewrite the card's endpoint URLs from the backend to this gateway so
         # clients send JSON-RPC back through the proxy. Body size changes, so
         # Content-Length must be cleared before the rewrite runs.
@@ -1910,6 +1976,10 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $auth_scopes $upstream_http_x_scopes;
         auth_request_set $auth_method $upstream_http_x_auth_method;
 
+        # Attribute metrics to this specific agent. Without this, emit_metrics
+        # derives the name from the first URI segment ("agent"), bucketing every
+        # agent together. agent_path is validated by _NGINX_AGENT_PATH_SAFE.
+        set $metrics_server_name "agent/{agent_path}";
         # Capture the JSON-RPC body (rewrite phase) so emit_metrics can record
         # the A2A method; per-agent invoke is enforced by the auth server via
         # the /validate subrequest above.
@@ -1929,14 +1999,28 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Original-URL $scheme://$host$request_uri;
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie (nginx forwards client request headers by default, so
+        # Cookie must be cleared explicitly). The standard Authorization header is
+        # left intact and forwarded end-to-end: per the A2A spec, the calling
+        # agent obtains the target agent's credential out-of-band and presents it
+        # in Authorization for the target to authenticate. The gateway is a policy
+        # gate, not a credential broker -- it never mints or vends the agent's
+        # credential. /validate authenticates the caller on X-Authorization only
+        # (no Authorization fallback for agent paths) and refuses to forward an
+        # Authorization equal to the validated X-Authorization, so a caller that
+        # duplicates its gateway token into both headers cannot leak it here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
 
         # Forward validated auth context to the agent backend
         proxy_set_header X-User $auth_user;
         proxy_set_header X-Username $auth_username;
         proxy_set_header X-Scopes $auth_scopes;
         proxy_set_header X-Auth-Method $auth_method;
-        proxy_pass_request_headers on;
 
         # message/stream uses SSE; disable buffering for incremental delivery
         proxy_buffering off;

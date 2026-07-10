@@ -787,7 +787,11 @@ class TestValidateEndpoint:
         auth_env_vars,
         mock_scope_repository_with_data,
     ):
-        """An A2A agent proxy request with invoke access passes and skips MCP checks."""
+        """An A2A agent proxy request with invoke access passes and skips MCP checks.
+
+        The gateway credential is presented in X-Authorization (the A2A egress
+        trust model): Authorization is reserved for the target-agent credential.
+        """
         mock_get_provider.return_value = mock_cognito_provider
 
         import auth_server.server as server_module
@@ -806,7 +810,7 @@ class TestValidateEndpoint:
             response = client.get(
                 "/validate",
                 headers={
-                    "Authorization": "Bearer test-token",
+                    "X-Authorization": "Bearer test-token",
                     "X-Original-URL": "https://example.com/agent/travel/",
                 },
             )
@@ -841,12 +845,133 @@ class TestValidateEndpoint:
             response = client.get(
                 "/validate",
                 headers={
-                    "Authorization": "Bearer test-token",
+                    "X-Authorization": "Bearer test-token",
                     "X-Original-URL": "https://example.com/agent/travel/",
                 },
             )
 
         assert response.status_code == 403
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_no_authorization_fallback(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """On an agent path, Authorization is NOT accepted as the gateway credential.
+
+        Authorization carries the target-agent credential (forwarded end-to-end),
+        so a request with only Authorization and no X-Authorization must fail
+        closed as unauthenticated rather than authenticate on -- and leak -- the
+        target-agent credential.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": "Bearer target-agent-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_gateway_credential(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """Duplicating the gateway token into Authorization is refused (fail closed).
+
+        If Authorization equals the validated X-Authorization, the Authorization
+        copy would be forwarded to the registrant-controlled agent backend and
+        could be replayed against the registry. The request is rejected with 401.
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    "Authorization": "Bearer test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
+
+    @patch("auth_server.server.get_auth_provider")
+    def test_validate_a2a_rejects_duplicate_ignoring_scheme_prefix(
+        self,
+        mock_get_provider,
+        mock_cognito_provider,
+        auth_env_vars,
+        mock_scope_repository_with_data,
+    ):
+        """The duplicate-token guard compares token VALUES, not raw headers.
+
+        A caller that sends the same token but with a differing "Bearer " scheme
+        prefix / whitespace in one header must still be refused, or the gateway
+        credential would leak to the backend (PR #1434 finding SF-4).
+        """
+        mock_get_provider.return_value = mock_cognito_provider
+
+        import auth_server.server as server_module
+
+        with (
+            patch(
+                "auth_server.server.get_scope_repository",
+                return_value=mock_scope_repository_with_data,
+            ),
+            patch(
+                "auth_server.server.validate_a2a_agent_access",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "X-Authorization": "Bearer test-token",
+                    # Same token value, no "Bearer " prefix: must still be caught.
+                    "Authorization": "test-token",
+                    "X-Original-URL": "https://example.com/agent/travel/",
+                },
+            )
+
+        assert response.status_code == 401
 
     @patch("auth_server.server.get_auth_provider")
     def test_validate_uninspectable_body_fails_closed(
@@ -4654,9 +4779,11 @@ class TestValidateA2AAgentAccess:
     """Tests for validate_a2a_agent_access structured per-agent gating.
 
     The function resolves each caller scope via the scope repository and looks
-    for an ``invoke_agent`` action whose resources cover the agent path. The
-    repository is mocked to return scope -> server_access config, mirroring the
-    fixtures used by the MCP validate_server_tool_access tests.
+    for a per-agent rule ``{"agent": "<path or *>", "actions": [...]}`` whose
+    ``agent`` matches and whose ``actions`` include ``invoke_agent`` (or a
+    wildcard). The rule shape mirrors a server rule (``agent`` like ``server``,
+    ``actions`` like ``methods``). The repository is mocked to return scope ->
+    server_access config, mirroring the MCP validate_server_tool_access tests.
     """
 
     @staticmethod
@@ -4667,48 +4794,103 @@ class TestValidateA2AAgentAccess:
         async def get_server_scopes(scope_name: str):
             return scope_config.get(scope_name, [])
 
+        async def get_server_scopes_bulk(scope_names: list[str]):
+            # Mirror the real bulk contract: one round-trip returning
+            # {scope_name: rules} for the requested scopes.
+            return {name: scope_config.get(name, []) for name in scope_names}
+
         repo.get_server_scopes.side_effect = get_server_scopes
+        repo.get_server_scopes_bulk.side_effect = get_server_scopes_bulk
         return repo
 
     @staticmethod
-    def _invoke_scope(resources: list[str]) -> list:
-        """A server_access list granting invoke_agent on the given resources."""
-        return [{"agents": {"actions": [{"action": "invoke_agent", "resources": resources}]}}]
+    def _invoke_scope(agent: str) -> list:
+        """A server_access list granting invoke_agent on the given agent (path or *)."""
+        return [{"agent": agent, "actions": ["invoke_agent"]}]
 
-    async def test_invoke_all_resources_allows(self):
+    async def test_admin_scope_allows_regardless_of_doc_shape(self):
+        """An admin is allowed invoke even when their scope doc has NO agent rule
+        (legacy nested shape backwards compat -- no re-seed required)."""
         from auth_server.server import validate_a2a_agent_access
 
-        repo = self._repo({"a2a-invoker": self._invoke_scope(["all"])})
+        # Legacy nested shape: no {agent, actions} rule, so the flattener yields
+        # nothing invoke-relevant; the admin marker must still grant access.
+        repo = self._repo({"registry-admins": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["registry-admins"]) is True
+
+    async def test_admin_group_marker_allows(self):
+        """The admin marker is honored when it arrives as a GROUP, not a scope."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert (
+                await validate_a2a_agent_access(
+                    "/travel", [], user_groups=["mcp-registry-admin"]
+                )
+                is True
+            )
+
+    async def test_non_admin_legacy_shape_still_denied(self):
+        """A non-admin whose doc lacks a {agent, actions} invoke rule is denied
+        (admin bypass must not leak to ordinary users)."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"public-mcp-users": []})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["public-mcp-users"]) is False
+
+    async def test_invoke_wildcard_agent_allows(self):
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("*")})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
+
+    async def test_invoke_all_agent_keyword_allows(self):
+        """The ``all`` keyword works as a wildcard for the agent identifier too."""
+        from auth_server.server import validate_a2a_agent_access
+
+        repo = self._repo({"a2a-invoker": self._invoke_scope("all")})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is True
 
     async def test_invoke_exact_path_allows(self):
         from auth_server.server import validate_a2a_agent_access
 
-        repo = self._repo({"a2a-travel": self._invoke_scope(["/travel"])})
+        repo = self._repo({"a2a-travel": self._invoke_scope("/travel")})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-travel"]) is True
 
     async def test_invoke_different_path_denied(self):
         from auth_server.server import validate_a2a_agent_access
 
-        repo = self._repo({"a2a-hr": self._invoke_scope(["/hr"])})
+        repo = self._repo({"a2a-hr": self._invoke_scope("/hr")})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-hr"]) is False
 
     async def test_sibling_path_not_matched(self):
-        """An exact-path resource for /travel-extended must NOT grant /travel."""
+        """An exact-path rule for /travel-extended must NOT grant /travel."""
         from auth_server.server import validate_a2a_agent_access
 
-        repo = self._repo({"a2a-ext": self._invoke_scope(["/travel-extended"])})
+        repo = self._repo({"a2a-ext": self._invoke_scope("/travel-extended")})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-ext"]) is False
 
-    async def test_non_invoke_action_denied(self):
-        """A scope granting only agent CRUD (no invoke_agent) is denied."""
+    async def test_actions_wildcard_allows(self):
+        """A rule whose actions include the ``all`` wildcard grants invoke."""
         from auth_server.server import validate_a2a_agent_access
 
-        crud = [{"agents": {"actions": [{"action": "get_agent", "resources": ["all"]}]}}]
+        repo = self._repo({"a2a-admin": [{"agent": "/travel", "actions": ["all"]}]})
+        with patch("auth_server.server.get_scope_repository", return_value=repo):
+            assert await validate_a2a_agent_access("/travel", ["a2a-admin"]) is True
+
+    async def test_non_invoke_action_denied(self):
+        """A rule granting only agent CRUD (no invoke_agent) is denied."""
+        from auth_server.server import validate_a2a_agent_access
+
+        crud = [{"agent": "*", "actions": ["get_agent", "list_agents"]}]
         repo = self._repo({"a2a-reader": crud})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-reader"]) is False
@@ -4731,11 +4913,11 @@ class TestValidateA2AAgentAccess:
         assert await validate_a2a_agent_access("/travel", []) is False
 
     async def test_scope_resolution_error_is_skipped_and_denied(self):
-        """A scope whose repository lookup raises is skipped, not fatal; access denied."""
+        """A repository lookup that raises is not fatal; access is denied (fail closed)."""
         from auth_server.server import validate_a2a_agent_access
 
         repo = AsyncMock()
-        repo.get_server_scopes.side_effect = RuntimeError("scope backend down")
+        repo.get_server_scopes_bulk.side_effect = RuntimeError("scope backend down")
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["a2a-invoker"]) is False
 

@@ -115,7 +115,10 @@ class RegistryDiscoveryClient:
 
         token = await self._get_token()
         discovery_url = f"{self.registry_url}/api/agents/discover/semantic"
-        headers = {"Authorization": f"Bearer {token}", "Host": "localhost"}
+        # Do NOT override Host: the client derives it from registry_url. A hardcoded
+        # "localhost" is rejected (403) by a real CDN/ALB (e.g. CloudFront) that
+        # matches on the distribution host.
+        headers = {"Authorization": f"Bearer {token}"}
         # This endpoint uses query parameters, not JSON body
         params = {"query": query, "max_results": max_results}
 

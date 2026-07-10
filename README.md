@@ -137,9 +137,9 @@ Across all of them you get semantic + lexical search, UI, REST, and MCP-native i
 
 <!-- Exactly the 3 most-recent highlights. Older entries live in docs/overview/feature-release-highlights.md; the release-notes skill rotates this list. Do not grow it. -->
 
+- **A2A Reverse-Proxy Mode** - Opt in to route agent-to-agent traffic through the gateway the same way MCP servers are proxied: each enabled agent gets authenticated `/agent/{path}` routes, its real backend stays private (`proxy_pass_url`), discovery advertises the gateway URL, and every call is gated per-agent with `invoke_agent`. [A2A Guide](docs/a2a.md#reverse-proxy-mode-routing-a2a-traffic-through-the-gateway) · [Design](docs/design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic).
 - **Security Hardening Pass (1.26.0)** - A broad security-hardening release across the auth, proxy, data, and frontend layers: MongoDB authenticated by default with loopback-bound ports in local Docker Compose, a weak-secret preflight, internal/user token separation, SSRF and CSRF protections, and access-control fixes. See the [1.26.0 release notes](docs/release-notes/1.26.0.md).
 - **Per-User Egress Auth for Third-Party SaaS MCP Servers (3LO)** - Users connect their own GitHub / Slack / Atlassian accounts once; the gateway runs the OAuth flow out of band, vaults the per-user token, and injects it on egress, so third-party tokens never live on the user's laptop. [How it works](docs/design/egress-auth-design.md).
-- **Agentic Resource Discovery (ARD), full spec support** - The registry implements the ARD v1.0 spec end to end as a Publisher, a Registry, and a federating peer, so any ARD-aware client can discover and cross-reference its assets. [ARD Guide](docs/ard.md).
 
 **Older highlights → [Feature & Release Highlights](docs/overview/feature-release-highlights.md)** · full per-version detail in the [release notes](docs/release-notes/) and on the [GitHub Releases page](https://github.com/agentic-community/mcp-gateway-registry/releases).
 

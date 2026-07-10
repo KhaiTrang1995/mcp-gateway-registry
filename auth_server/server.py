@@ -2165,49 +2165,85 @@ def _get_a2a_agent_path(
     return "/" + "/".join(agent_segments)
 
 
+# Admin scope/group markers that grant A2A invoke regardless of scope-doc shape.
+# Backwards compatibility: scope docs seeded before the {agent, actions} schema
+# (#1434) use the legacy nested {"agents": {"actions": [...]}} shape, which has no
+# invoke_agent action at all, so an admin on such a doc would otherwise be denied
+# invoke. Admins are allowed via these markers so operators need not re-seed their
+# group definitions. Non-admins on the legacy shape must use the new
+# {agent, actions} rule (or re-seed). Keyed only on the admin markers -- never on a
+# broad server grant -- so an MCP server scope never gates agent invoke. The set
+# matches the registry's own admin determination (registry/auth/dependencies.py
+# _user_is_admin): both the "mcp-registry-admin" scope and the "registry-admins"
+# bootstrap group/scope count as admin.
+_A2A_ADMIN_MARKERS: frozenset[str] = frozenset({"mcp-registry-admin", "registry-admins"})
+
+
 async def validate_a2a_agent_access(
     agent_path: str,
     user_scopes: list[str],
+    user_groups: list[str] | None = None,
 ) -> bool:
     """Check per-agent A2A invocation access against structured agent scopes.
 
     Enforced at the ``/validate`` auth subrequest: it answers "may this caller
-    invoke this agent?". Mirrors :func:`validate_server_tool_access`: each of the
-    caller's scopes is resolved via the scope repository, then we look for an
-    ``invoke_agent`` action under the scope's ``agents`` block whose resources
-    cover this agent. Resources support ``all``/``*`` wildcards or an exact agent
-    path (e.g. ``/travel``).
+    invoke this agent?". Mirrors :func:`validate_server_tool_access` and uses the
+    same rule shape as a server rule: each ``server_access`` entry is a per-agent
+    dict ``{"agent": "<path or *>", "actions": [...]}`` -- ``agent`` is the
+    identifier (like ``server``) and ``actions`` are its siblings (like
+    ``methods``). A caller may invoke the agent if any of their scopes has a rule
+    whose ``agent`` matches (exact path, or ``*``/``all`` wildcard) and whose
+    ``actions`` include ``invoke_agent`` (or the ``all``/``*`` wildcard).
+
+    Backwards compatibility: an admin (see ``_A2A_ADMIN_MARKERS``) is always
+    allowed, so a deployment whose admin scope doc still uses the legacy nested
+    ``{"agents": {...}}`` shape (which predates ``invoke_agent``) keeps working
+    without re-seeding.
 
     Args:
         agent_path: Agent path with leading slash (e.g. "/travel").
         user_scopes: Scope names resolved for the caller (from group mappings).
+        user_groups: IdP group names for the caller, used only for the admin
+            marker check (some deployments carry the admin marker as a group).
 
     Returns:
         True if any scope grants ``invoke_agent`` on this agent, else False.
     """
+    # Admin bypass (legacy-schema backwards compatibility -- see _A2A_ADMIN_MARKERS).
+    markers = set(user_scopes or []) | set(user_groups or [])
+    if markers & _A2A_ADMIN_MARKERS:
+        logger.info(f"A2A invoke allowed for admin caller to agent {agent_path}")
+        return True
+
     if not user_scopes:
         return False
 
     scope_repo = get_scope_repository()
-    for scope in user_scopes:
-        try:
-            scope_config = await scope_repo.get_server_scopes(scope)
-        except Exception as exc:
-            logger.warning(f"A2A access: failed to resolve scope '{scope}': {exc}")
-            continue
+    # Single round-trip for all caller scopes (this runs on the /validate auth
+    # subrequest hot path); get_server_scopes_bulk uses an $in query rather than
+    # one find_one per scope.
+    try:
+        scope_rules = await scope_repo.get_server_scopes_bulk(user_scopes)
+    except Exception as exc:
+        logger.warning(f"A2A access: failed to resolve scopes {user_scopes}: {exc}")
+        return False
+
+    for scope_config in scope_rules.values():
         if not scope_config:
             continue
 
         for entry in scope_config:
-            agents_block = entry.get("agents")
-            if not isinstance(agents_block, dict):
+            rule_agent = entry.get("agent")
+            if not isinstance(rule_agent, str):
                 continue
-            for action in agents_block.get("actions", []):
-                if action.get("action") != "invoke_agent":
-                    continue
-                resources = action.get("resources", [])
-                if "all" in resources or "*" in resources or agent_path in resources:
-                    return True
+            # Agent identifier match: exact path, or a wildcard covering any agent.
+            if rule_agent not in ("*", "all") and rule_agent != agent_path:
+                continue
+            actions = entry.get("actions", [])
+            if not isinstance(actions, list):
+                continue
+            if "invoke_agent" in actions or "all" in actions or "*" in actions:
+                return True
     return False
 
 
@@ -2362,16 +2398,66 @@ async def validate_request(request: Request):
 
     try:
         # Extract headers
-        # Check for X-Authorization first (custom header used by this gateway)
-        # Only if X-Authorization is not present, check standard Authorization header
-        authorization = request.headers.get("X-Authorization")
-        if not authorization:
-            authorization = request.headers.get("Authorization")
+        original_url = request.headers.get("X-Original-URL")
+        x_authorization = request.headers.get("X-Authorization")
+        raw_authorization = request.headers.get("Authorization")
+
+        # A2A agent-proxy trust model: on an /agent/... path the standard
+        # Authorization header carries the *target agent's* credential, which the
+        # calling agent obtained out-of-band (per the A2A spec) and which nginx
+        # forwards end-to-end to the agent backend. The gateway credential must
+        # travel in X-Authorization ONLY. So for agent paths we authenticate the
+        # caller on X-Authorization and never fall back to Authorization -- a
+        # fallback would authenticate on (and, since it is forwarded, leak) the
+        # target-agent credential. For every non-agent path the historic
+        # precedence (X-Authorization first, then Authorization) is preserved.
+        a2a_agent_path = _get_a2a_agent_path(original_url)
+        is_a2a_request = a2a_agent_path is not None
+        if x_authorization:
+            authorization = x_authorization
+        elif is_a2a_request:
+            # No gateway credential on an agent path: fail closed as
+            # unauthenticated rather than trusting the target-agent Authorization.
+            authorization = None
+        else:
+            authorization = raw_authorization
+
+        # Defense in depth: if a caller duplicates its gateway token into both
+        # X-Authorization and Authorization on an agent path, the Authorization
+        # copy would be forwarded to the registrant-controlled agent backend and
+        # could be replayed against the registry. Refuse the request (fail closed)
+        # rather than silently leaking the gateway credential. Compare the extracted
+        # token VALUES (strip an optional "Bearer " scheme + surrounding whitespace)
+        # so a duplicate that differs only in scheme prefix or whitespace is caught.
+        def _bearer_token_value(header: str | None) -> str:
+            if not header:
+                return ""
+            value = header.strip()
+            if value.lower().startswith("bearer "):
+                value = value[len("bearer ") :].strip()
+            return value
+
+        if (
+            is_a2a_request
+            and x_authorization
+            and _bearer_token_value(raw_authorization) == _bearer_token_value(x_authorization)
+        ):
+            logger.warning(
+                "A2A request for %s presents identical X-Authorization and "
+                "Authorization; refusing so the gateway credential cannot leak to "
+                "the agent backend.",
+                a2a_agent_path,
+            )
+            return JSONResponse(
+                content={"detail": "Authorization must not duplicate the gateway credential"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer", "Connection": "close"},
+            )
+
         cookie_header = request.headers.get("Cookie", "")
         user_pool_id = request.headers.get("X-User-Pool-Id")
         client_id = request.headers.get("X-Client-Id")
         region = request.headers.get("X-Region", "us-east-1")
-        original_url = request.headers.get("X-Original-URL")
         body = request.headers.get("X-Body")
         # capture_body.lua sets this when the request body was too large to buffer
         # in memory and spilled to a temp file, so no X-Body could be captured.
@@ -2973,9 +3059,12 @@ async def validate_request(request: Request):
         # A2A agent proxy requests: enforce per-agent invoke FGAC here at the
         # auth subrequest, resolving the caller's scopes to an invoke_agent
         # action that covers this agent (see validate_a2a_agent_access).
-        a2a_agent_path = _get_a2a_agent_path(original_url)
+        # a2a_agent_path was resolved once at the top of the handler so the token
+        # precedence and this FGAC check agree on whether the request is A2A.
         if a2a_agent_path is not None:
-            if not await validate_a2a_agent_access(a2a_agent_path, user_scopes):
+            if not await validate_a2a_agent_access(
+                a2a_agent_path, user_scopes, validation_result.get("groups", [])
+            ):
                 logger.warning(
                     f"Access denied for user "
                     f"{hash_username(validation_result.get('username', ''))} "

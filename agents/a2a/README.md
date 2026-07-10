@@ -100,6 +100,10 @@ export AWS_PROFILE=your_profile_name
 
 ## Testing
 
+> **Testing A2A reverse-proxy routing** (agent discovers + invokes another agent entirely
+> through the gateway) has its own runbook covering both Docker Compose and ECS + CloudFront:
+> [TESTING-REVERSE-PROXY.md](TESTING-REVERSE-PROXY.md).
+
 ### Agent Card Endpoint (Local)
 
 Test the agent card endpoint locally to verify agent metadata. The script retrieves and displays agent card information, and saves JSON files locally for reference.

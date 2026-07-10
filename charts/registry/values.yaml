@@ -194,6 +194,12 @@ app:
   deploymentMode: with-gateway
   # Registry mode: full, skills-only, mcp-servers-only, agents-only
   registryMode: full
+  # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled A2A
+  # agent gets nginx location blocks proxying its card + JSON-RPC through the
+  # gateway for centralized auth and metrics. Requires deploymentMode:
+  # with-gateway. Internal agent backends live at private ClusterIPs, so also set
+  # ssrfAllowedHosts / ssrfAllowedCidrs above or they are marked unhealthy.
+  a2aReverseProxyEnabled: false
   # Internal/workshop deployment classification (telemetry labels only; issue #1216).
   # Tags a deployment as one of our own internal/workshop installs so it can be
   # distinguished from community installs in telemetry. Does NOT change access control.

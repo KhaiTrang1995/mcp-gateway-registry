@@ -75,6 +75,7 @@ from registry.core.config import (
     _print_config_warning_banner,
     _validate_mode_combination,
     log_tab_visibility_warnings,
+    print_a2a_reverse_proxy_mode_banner,
     settings,
 )
 from registry.core.metrics import DEPLOYMENT_MODE_INFO
@@ -460,6 +461,11 @@ async def lifespan(app: FastAPI):
 
     # Apply internal-deployment classification default/correction (issue #1216)
     _resolve_internal_deployment_classification()
+
+    # Loudly warn if A2A reverse-proxy is enabled but the (now-finalized)
+    # deployment mode force-disables it (registry-only). Called after mode
+    # correction so it reflects the effective deployment_mode.
+    print_a2a_reverse_proxy_mode_banner(settings)
 
     # Log startup configuration
     _log_startup_configuration()

@@ -105,6 +105,15 @@ keycloak_admin_password = "CHANGE-ME-SECURE-PASSWORD"
 keycloak_database_username = "keycloak"
 keycloak_database_password = "CHANGE-ME-DB-PASSWORD"
 
+# Password character policy (issue #1354). By default keycloak_database_password
+# and documentdb_admin_password may NOT contain / @ " ' + : ? # & ! = % or
+# spaces -- they break RDS/DocumentDB, connection-string/URI parsing, or curl
+# form-encoding. Leave this false and pick a compliant password for new installs.
+# Set true ONLY for an existing install whose databases were already created with
+# such a password, to avoid rotating a live master password. Prints a loud
+# warning at plan/apply when enabled.
+# allow_unsafe_password_chars = false
+
 # ============================================================================
 # CONTAINER IMAGES (Optional - pre-built public ECR images used by default)
 # ============================================================================
@@ -355,11 +364,11 @@ storage_backend = "documentdb"
 # DocumentDB Elastic Cluster credentials (REQUIRED)
 # RECOMMENDED: Set via environment variables instead of tfvars for security:
 #   export TF_VAR_documentdb_admin_username="docdbadmin"
-#   export TF_VAR_documentdb_admin_password="YourSecurePassword123!"
+#   export TF_VAR_documentdb_admin_password="YourSecurePassword123"
 #
 # Alternatively, uncomment below (less secure - credentials in file):
 # documentdb_admin_username = "docdbadmin"
-# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123!"
+# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123"
 
 # DocumentDB Elastic Cluster capacity configuration (OPTIONAL)
 # Uncomment to override defaults
@@ -1002,6 +1011,22 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Note: with-gateway + skills-only is invalid and auto-corrects to registry-only + skills-only
 # Default: "full" (uncomment to change)
 # registry_mode = "full"
+
+# A2A reverse-proxy gateway (opt-in; default false). When true, each enabled A2A
+# agent gets nginx location blocks proxying its card + JSON-RPC through the
+# gateway for centralized auth and metrics. Requires deployment_mode =
+# "with-gateway".
+# a2a_reverse_proxy_enabled = false
+
+# SSRF guard allowlist for internal MCP-server / A2A-agent upstreams. The health
+# checker and proxy validate every upstream URL through an SSRF guard that blocks
+# private/loopback/metadata addresses by default, so internal upstreams (private
+# IPs / service-discovery hostnames) are marked unhealthy unless listed here. The
+# cloud metadata address (169.254.169.254) is never permitted by either.
+#   ssrf_allowed_hosts: comma-separated exact hostnames or IPs (least privilege).
+#   ssrf_allowed_cidrs: comma-separated CIDR ranges for whole internal subnets.
+# ssrf_allowed_hosts = "flight-booking-agent.mcp-gateway-v2.local"
+# ssrf_allowed_cidrs = ""
 
 # Internal/workshop deployment classification (telemetry labels only; issue #1216).
 # Tags a deployment as one of our own internal/workshop installs so it can be

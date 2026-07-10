@@ -56,6 +56,9 @@ coverage.xml
 cover/
 tests/reports/
 frontend/tests/reports/
+# pytest report artifacts from the agents/a2a subproject (its own test runs)
+agents/a2a/tests/reports/
+agents/a2a/src/*/tests/reports/
 
 # Translations
 *.mo
@@ -137,6 +140,9 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+# Allow committed env EXAMPLES (never real .env). Covers variants like
+# .env.ecs.example / .env.local.example that .env.* would otherwise ignore.
+!.env.*.example
 .env.backup
 .env.user
 .env.docker
