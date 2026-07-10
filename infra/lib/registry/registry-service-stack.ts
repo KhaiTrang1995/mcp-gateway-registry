@@ -20,15 +20,17 @@ import { RegistryConfig } from './registry-config';
 import { RegistryNetworkStack } from './registry-network-stack';
 import { RegistryDataStack } from './registry-data-stack';
 import { RegistryAuthStack } from './registry-auth-stack';
-import * as path from 'path';
 import { RegistryEcsService } from './constructs/registry-ecs-service';
 import { McpServerService } from './constructs/mcp-server-service';
 import { ObservabilityPipeline } from './constructs/observability-pipeline';
 import { RegistryAlb } from './constructs/registry-alb';
 import { RegistryEfs } from './constructs/registry-efs';
 import { RegistrySecrets } from './constructs/registry-secrets';
-import { ScopesLoader } from './constructs/scopes-loader';
 import { RegistryAlarms } from './constructs/registry-alarms';
+import { CloudFrontOriginDistribution } from './constructs/cloudfront-distribution';
+import { WafRules } from './constructs/waf-rules';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as route53targets from 'aws-cdk-lib/aws-route53-targets';
 
 export interface RegistryServiceStackProps extends cdk.StackProps {
   readonly config: RegistryConfig;
@@ -87,10 +89,53 @@ export class RegistryServiceStack extends cdk.Stack {
     this.registryAlbDns = alb.alb.loadBalancerDnsName;
     this.registryAlbArn = alb.alb.loadBalancerArn;
 
-    this.registryUrl =
-      config.enableRoute53Dns || config.certificateArn !== ''
-        ? `https://${registryDomain}`
-        : `http://${alb.alb.loadBalancerDnsName}`;
+    // CloudFront distribution fronting the registry ALB (Mode 1 & 3).
+    let cfDistribution: CloudFrontOriginDistribution | undefined;
+    let cfHostedZone: route53.IHostedZone | undefined;
+    if (config.cloudfront.enabled) {
+      cfHostedZone = config.enableRoute53Dns
+        ? route53.HostedZone.fromLookup(this, 'HostedZone', {
+            domainName: config.baseDomain,
+          })
+        : undefined;
+      cfDistribution = new CloudFrontOriginDistribution(this, 'CloudFront', {
+        config,
+        albDns: alb.alb.loadBalancerDnsName,
+        customDomain: config.enableRoute53Dns ? `registry.${config.baseDomain}` : '',
+        hostedZone: cfHostedZone,
+        comment: `${config.name} MCP Gateway Registry CloudFront Distribution`,
+        logsPrefix: 'mcp-gateway/',
+        emitCloudFrontForwardedProtoHeader: true,
+      });
+
+      // Optional WAFv2 Web ACL
+      new WafRules(this, 'Waf', {
+        config,
+        mcpGatewayAlbArn: alb.alb.loadBalancerArn,
+        keycloakAlbArn: undefined,
+      });
+    }
+
+    // Route53 A-record for registry.<domain> — target ALB (Mode 2) or
+    // CloudFront (Mode 3). Registry ALB alias-in-Mode-2 is created inside
+    // RegistryAlb; here we only handle the Mode-3 case (target CloudFront).
+    if (config.enableRoute53Dns && config.cloudfront.enabled && cfDistribution?.distribution && cfHostedZone) {
+      new route53.ARecord(this, 'RegistryAliasRecord', {
+        zone: cfHostedZone,
+        recordName: `registry.${config.baseDomain}`,
+        target: route53.RecordTarget.fromAlias(
+          new route53targets.CloudFrontTarget(cfDistribution.distribution),
+        ),
+      });
+    }
+
+    if (cfDistribution) {
+      this.registryUrl = cfDistribution.url;
+    } else if (config.enableRoute53Dns || config.certificateArn !== '') {
+      this.registryUrl = `https://${registryDomain}`;
+    } else {
+      this.registryUrl = `http://${alb.alb.loadBalancerDnsName}`;
+    }
 
     // EFS + access points
     const efsResources = new RegistryEfs(this, 'Efs', { config, vpc, privateSubnets });
@@ -120,6 +165,15 @@ export class RegistryServiceStack extends cdk.Stack {
       AUTH_SERVER_EXTERNAL_URL: this.registryUrl,
       AWS_REGION: config.awsRegion,
       AUTH_PROVIDER: authProvider,
+      // Both registry AND auth-server need these *_ENABLED flags — auth-server
+      // substitutes them into oauth2_providers.yml. Missing values leave the
+      // yaml value as literal `${VAR}` which breaks provider registration
+      // (Login page then shows "No login methods are currently configured").
+      KEYCLOAK_ENABLED: authStack.keycloakDomain !== '' ? 'true' : 'false',
+      COGNITO_ENABLED: 'false',
+      GITHUB_ENABLED: 'false',
+      GOOGLE_ENABLED: 'false',
+      PINGFEDERATE_ENABLED: 'false',
       KEYCLOAK_URL: authStack.keycloakUrl,
       KEYCLOAK_REALM: 'mcp-gateway',
       KEYCLOAK_CLIENT_ID: 'mcp-gateway-web',
@@ -174,9 +228,7 @@ export class RegistryServiceStack extends cdk.Stack {
       HOME: '/tmp',
       GATEWAY_ADDITIONAL_SERVER_NAMES: registryDomain,
       EC2_PUBLIC_DNS: registryDomain || alb.alb.loadBalancerDnsName,
-      KEYCLOAK_ENABLED: authStack.keycloakDomain !== '' ? 'true' : 'false',
       KEYCLOAK_ADMIN: 'admin',
-      SCOPES_CONFIG_PATH: '/app/auth_server/scopes.yml',
       EMBEDDINGS_PROVIDER: config.embeddings.provider,
       EMBEDDINGS_MODEL_NAME: config.embeddings.modelName,
       EMBEDDINGS_MODEL_DIMENSIONS: String(config.embeddings.modelDimensions),
@@ -218,7 +270,6 @@ export class RegistryServiceStack extends cdk.Stack {
       ...sharedEnv,
       KEYCLOAK_EXTERNAL_URL: authStack.keycloakUrl,
       KEYCLOAK_M2M_CLIENT_ID: 'mcp-gateway-m2m',
-      SCOPES_CONFIG_PATH: '/efs/auth_config/scopes.yml',
     };
 
     // Container secrets (registry + auth share most of these)
@@ -314,7 +365,8 @@ export class RegistryServiceStack extends cdk.Stack {
         })]
       : [];
 
-    // Registry ECS service
+    // Registry ECS service — nginx (:8080) fronts everything external. Gradio
+    // (:7860) is loopback-bound and reached through nginx path routes.
     const registryService = new RegistryEcsService(this, 'RegistrySvc', {
       serviceName: 'registry',
       image: config.images.registry,
@@ -323,7 +375,7 @@ export class RegistryServiceStack extends cdk.Stack {
       containerPort: 8080,
       additionalPorts: [
         { port: 8443, name: 'https' },
-        { port: 7860, name: 'registry' },
+        { port: 7860, name: 'gradio-internal' },
       ],
       vpc,
       subnets: privateSubnets,
@@ -334,21 +386,20 @@ export class RegistryServiceStack extends cdk.Stack {
       secrets: registrySecrets,
       targetGroups: [
         { targetGroup: alb.registryTg, containerPort: 8080 },
-        { targetGroup: alb.gradioTg, containerPort: 7860 },
       ],
       additionalTaskRolePolicies: registryTaskRolePolicies,
       additionalExecRoleStatements: secretsAccessStatements,
-      healthCheckCommand: 'curl -f http://localhost:7860/health || exit 1',
+      healthCheckCommand: 'curl -f http://localhost:8080/health || exit 1',
       namePrefix,
       desiredCount: config.replicas.registry,
     });
     this.registryEcsSg = registryService.securityGroup;
 
-    for (const port of [8080, 8443, 7860]) {
-      registryService.securityGroup.addIngressRule(
-        alb.albSg, ec2.Port.tcp(port), `Port ${port} from ALB`,
-      );
-    }
+    // Only :8080 (nginx) accepts traffic from the ALB. :8443/:7860 remain
+    // inside the task for nginx-internal reverse-proxy to the app process.
+    registryService.securityGroup.addIngressRule(
+      alb.albSg, ec2.Port.tcp(8080), 'Registry nginx from ALB',
+    );
 
     // Auth ECS service
     const authService = new RegistryEcsService(this, 'AuthSvc', {
@@ -378,7 +429,9 @@ export class RegistryServiceStack extends cdk.Stack {
           containerPath: '/efs/auth_config',
         },
       ],
-      targetGroups: [{ targetGroup: alb.authTg, containerPort: 8888 }],
+      // No public ALB attachment — auth-server is only reachable via Service
+      // Connect from the registry container (nginx proxies /oauth2/*).
+      targetGroups: [],
       additionalExecRoleStatements: secretsAccessStatements,
       healthCheckCommand: 'curl -f http://localhost:8888/health || exit 1',
       namePrefix,
@@ -386,8 +439,11 @@ export class RegistryServiceStack extends cdk.Stack {
     });
     this.authEcsSg = authService.securityGroup;
 
-    authService.securityGroup.addIngressRule(alb.albSg, ec2.Port.tcp(8888), 'Auth server port from ALB');
     authService.securityGroup.addIngressRule(registryService.securityGroup, ec2.Port.tcp(8888), 'Allow registry to access auth server');
+
+    // Registry nginx hard-fails if auth-server Service Connect DNS is not yet
+    // registered on first deploy. Force CFN to create auth-server first.
+    registryService.service.node.addDependency(authService.service);
 
     // Optional MCP servers / A2A agents
     new McpServerService(this, 'CurrenttimeSvc', {
@@ -492,26 +548,6 @@ export class RegistryServiceStack extends cdk.Stack {
       });
     }
 
-    // UI-scope group docs into DocumentDB. Bridges the upstream-image gap:
-    // init-documentdb-indexes.py only seeds `registry-admins`; this seeds the
-    // rest defined in scopes.yml (mcp-registry-admin, etc.).
-    if (config.storageBackend === 'documentdb' && dataStack.documentDbSecretArn) {
-      new ScopesLoader(this, 'ScopesLoader', {
-        vpc,
-        privateSubnets,
-        ingressSg: registryService.securityGroup,
-        documentDbHost: dataStack.documentDbCluster.attrEndpoint,
-        documentDbPort: 27017,
-        documentDbDatabase: config.documentdb.database,
-        documentDbNamespace: config.documentdb.namespace,
-        documentDbSecretArn: dataStack.documentDbSecretArn,
-        documentDbSecretKmsKeyArn: dataStack.documentDbKmsKey.keyArn,
-        scopesYmlPath: path.join(__dirname, '..', '..', '..', 'auth_server', 'scopes.yml'),
-        authConfigAccessPoint: accessPoints['authConfig'],
-        namePrefix,
-      });
-    }
-
     // CloudWatch alarms (no-op when monitoring.enabled=false)
     new RegistryAlarms(this, 'Alarms', {
       config,
@@ -551,13 +587,16 @@ export class RegistryServiceStack extends cdk.Stack {
     cdk.Tags.of(this).add('Environment', 'production');
     cdk.Tags.of(this).add('ManagedBy', 'cdk');
 
-    // Outputs
+    // Outputs. Auth-server and Gradio are NOT exposed on the ALB — external
+    // callers reach both via nginx path routes on the registry container.
+    // OAuth callbacks go to ${REGISTRY_URL}/oauth2/callback/keycloak; the
+    // Gradio UI is proxied at the registry root.
     new cdk.CfnOutput(this, 'RegistryUrl', { value: this.registryUrl, description: 'MCP Gateway Registry URL' });
     new cdk.CfnOutput(this, 'RegistryAlbDnsName', { value: this.registryAlbDns, description: 'Registry ALB DNS name' });
     new cdk.CfnOutput(this, 'KeycloakUrl', { value: authStack.keycloakUrl, description: 'Keycloak identity provider URL' });
     new cdk.CfnOutput(this, 'GradioUiUrl', {
-      value: `${this.registryUrl.replace(/:\d+$/, '')}:7860`,
-      description: 'Gradio UI URL (port 7860)',
+      value: this.registryUrl,
+      description: 'Gradio UI URL (proxied by registry nginx at the root path)',
     });
     if (config.enableObservability) {
       new cdk.CfnOutput(this, 'GrafanaUrl', { value: `${this.registryUrl}/grafana`, description: 'Grafana dashboard URL' });
@@ -568,8 +607,8 @@ export class RegistryServiceStack extends cdk.Stack {
         registryApi: `${this.registryUrl}/api/v1`,
         registryHealth: `${this.registryUrl}/health`,
         keycloak: authStack.keycloakUrl,
-        authServer: `${this.registryUrl}:8888`,
-        gradioUi: `${this.registryUrl.replace(/:\d+$/, '')}:7860`,
+        authServer: `${this.registryUrl}/oauth2`,
+        gradioUi: this.registryUrl,
       }),
       description: 'All service endpoints as JSON',
     });

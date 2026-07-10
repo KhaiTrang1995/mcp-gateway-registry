@@ -714,5 +714,17 @@ export function loadRegistryConfig(configPath: string): RegistryConfig {
     }
   }
 
+  // Keycloak sslRequired=external blocks admin ops over plain HTTP, so a
+  // public HTTPS front is required. Fail fast at synth if neither option is
+  // enabled — otherwise KeycloakService throws late during construct build.
+  if (!config.enableRoute53Dns && !config.cloudfront.enabled) {
+    throw new Error(
+      'Keycloak needs a public HTTPS front: set enableRoute53Dns=true (custom ' +
+      'domain + ACM) or cloudfront.enabled=true (CloudFront default cert) in config.yaml. ' +
+      'Plain HTTP ALB is not supported because Keycloak sslRequired=external ' +
+      'blocks admin/OIDC endpoints over unencrypted connections.',
+    );
+  }
+
   return config;
 }
