@@ -236,6 +236,7 @@ Single URL; disables itself when unset.
 | Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Enable AWS Agent Registry federation | `AWS_REGISTRY_FEDERATION_ENABLED` | `aws_registry_federation_enabled` | `registry.awsRegistry.federationEnabled` | Overrides the `aws_registry.enabled` flag stored in MongoDB. |
+| Cross-account federation assume-role ARNs | — | `aws_registry_federation_assume_role_arns` | — | List of IAM role ARNs the registry task may `sts:AssumeRole` for cross-account AgentCore federation. Empty (default) omits the grant entirely (fail closed). ECS/IAM-only: no Docker env (the task role is an ECS construct) and no Helm value (Kubernetes uses IRSA on the service account instead of this policy). CDK equivalent: `federation.awsRegistryFederationAssumeRoleArns` in `infra/config.yaml`. |
 
 ---
 

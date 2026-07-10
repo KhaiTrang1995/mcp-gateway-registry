@@ -315,7 +315,20 @@ export class RegistryServiceStack extends cdk.Stack {
     // bedrock-agentcore-control plane (list registries, list records, get record
     // -- see registry/services/federation/agentcore_client.py). It never
     // creates/updates/deletes AgentCore resources, so the action set is limited
-    // to those three operations and scoped to the deploying account.
+    // to those three read operations.
+    //
+    // The read grant is split into two statements because the actions differ in
+    // their IAM resource-level support (per the AWS Service Authorization
+    // Reference):
+    //   - ListRegistries has NO resource type, so IAM only accepts it on
+    //     Resource "*". Scoping it to a registry ARN silently makes it a no-op
+    //     (the action never matches) and boto3 gets AccessDenied at runtime.
+    //   - ListRegistryRecords (resource type "registry") and GetRegistryRecord
+    //     (resource type "registry-record") DO support resource-level
+    //     permissions, so they are scoped to registries in the deploying
+    //     account. Region is wildcarded so per-registry region overrides keep
+    //     working; the record ARN (registry/<id>/record/<id>) is a child of the
+    //     registry/* prefix.
     //
     // Cross-account federation assumes caller-supplied role ARNs. That grant is
     // only emitted when specific ARNs are configured; an empty list -> no
@@ -323,16 +336,24 @@ export class RegistryServiceStack extends cdk.Stack {
     const federationRoleArns = config.federation.awsRegistryFederationAssumeRoleArns ?? [];
     const agentCoreStatements: iam.PolicyStatement[] = [
       new iam.PolicyStatement({
-        sid: 'BedrockAgentCoreReadRegistries',
+        sid: 'BedrockAgentCoreListRegistries',
+        effect: iam.Effect.ALLOW,
+        actions: ['bedrock-agentcore:ListRegistries'],
+        // ListRegistries has no IAM resource type; it must be granted on "*".
+        // This is not a privilege-creep wildcard -- it is the only Resource
+        // value AWS accepts for this single read/list action.
+        resources: ['*'],
+      }),
+      new iam.PolicyStatement({
+        sid: 'BedrockAgentCoreReadRecords',
         effect: iam.Effect.ALLOW,
         actions: [
-          'bedrock-agentcore:ListRegistries',
           'bedrock-agentcore:ListRegistryRecords',
           'bedrock-agentcore:GetRegistryRecord',
         ],
-        // Scope to AgentCore resources in the deploying account; region is
-        // wildcarded so per-registry region overrides keep working.
-        resources: [`arn:${this.partition}:bedrock-agentcore:*:${this.account}:*`],
+        // Scope to registries (and their child records) in the deploying
+        // account. registry/* also covers registry/<id>/record/<id>.
+        resources: [`arn:${this.partition}:bedrock-agentcore:*:${this.account}:registry/*`],
       }),
     ];
     if (federationRoleArns.length > 0) {

@@ -147,8 +147,18 @@ resource "aws_iam_policy" "ecs_exec_task_execution" {
 # bedrock-agentcore-control plane -- it only lists registries, lists records,
 # and fetches record details (see registry/services/federation/agentcore_client.py).
 # It never creates/updates/deletes AgentCore resources, so the action set is
-# restricted to those three operations and the resource is scoped to the
-# deploying account (same-account, default-client federation).
+# restricted to those three read operations.
+#
+# The read grant is split into two statements because the actions differ in
+# their IAM resource-level support (per the AWS Service Authorization Reference):
+#   - ListRegistries has NO resource type, so IAM only accepts it on
+#     Resource = "*". Scoping it to a registry ARN silently makes it a no-op
+#     (the action never matches) and boto3 gets AccessDenied at runtime.
+#   - ListRegistryRecords (resource type "registry") and GetRegistryRecord
+#     (resource type "registry-record") DO support resource-level permissions,
+#     so they are scoped to registries in the deploying account. Region is
+#     wildcarded so per-registry region overrides keep working; the record ARN
+#     (registry/<id>/record/<id>) is a child of the registry/* prefix.
 #
 # Cross-account federation uses sts:AssumeRole into caller-supplied role ARNs.
 # That grant is only emitted when specific role ARNs are configured
@@ -163,17 +173,26 @@ resource "aws_iam_policy" "bedrock_agentcore_access" {
     Statement = concat(
       [
         {
-          Sid    = "BedrockAgentCoreReadRegistries"
+          Sid    = "BedrockAgentCoreListRegistries"
           Effect = "Allow"
           Action = [
-            "bedrock-agentcore:ListRegistries",
+            "bedrock-agentcore:ListRegistries"
+          ]
+          # ListRegistries has no IAM resource type; it must be granted on "*".
+          # This is not a privilege-creep wildcard -- it is the only Resource
+          # value AWS accepts for this single read/list action.
+          Resource = "*"
+        },
+        {
+          Sid    = "BedrockAgentCoreReadRecords"
+          Effect = "Allow"
+          Action = [
             "bedrock-agentcore:ListRegistryRecords",
             "bedrock-agentcore:GetRegistryRecord"
           ]
-          # Scope to AgentCore resources in the deploying account. Registry and
-          # record ARNs live under this account/partition; region is wildcarded
-          # so per-registry region overrides keep working.
-          Resource = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:*:${data.aws_caller_identity.current.account_id}:*"
+          # Scope to registries (and their child records) in the deploying
+          # account. registry/* also covers registry/<id>/record/<id>.
+          Resource = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:*:${data.aws_caller_identity.current.account_id}:registry/*"
         }
       ],
       length(var.aws_registry_federation_assume_role_arns) > 0 ? [
