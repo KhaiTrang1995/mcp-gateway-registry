@@ -143,6 +143,69 @@ class TestM2MClientEnrichmentDisabled:
         assert result == []
 
 
+class TestNonBooleanEnabledFailsClosed:
+    """A record whose ``enabled`` is present but not the boolean True must not
+    grant groups, even if it slips past the MongoDB query filter (BSON is not
+    type-enforced). This proves the in-code re-check is fail-closed."""
+
+    @pytest.mark.parametrize("bad_value", [None, 0, "", "false", "true", 1, "True"])
+    def test_helper_denies_non_true_values(self, bad_value):
+        assert enrichment._is_record_enabled({"enabled": bad_value}) is False
+
+    @pytest.mark.parametrize("bad_value", [None, 0, "false"])
+    @pytest.mark.asyncio
+    async def test_user_group_non_boolean_enabled_contributes_no_groups(self, bad_value):
+        # find_one returns the doc directly (query filter bypassed) so only the
+        # in-code re-check stands between a non-boolean enabled and a grant.
+        doc = {"username": "alice", "groups": ["admins"], "enabled": bad_value}
+        collection = AsyncMock()
+        collection.find_one = AsyncMock(return_value=doc)
+
+        class _FakeDB:
+            def __getitem__(self, _name: str):
+                return collection
+
+        with patch.object(enrichment, "_get_mongodb", AsyncMock(return_value=_FakeDB())):
+            result = await enrichment.enrich_user_groups_from_mongodb("alice", [], "pingfederate")
+        assert result == []
+
+    @pytest.mark.parametrize("bad_value", [None, 0, "false"])
+    @pytest.mark.asyncio
+    async def test_m2m_non_boolean_enabled_contributes_no_groups(self, bad_value):
+        doc = {"client_id": "svc", "groups": ["registry-admins"], "enabled": bad_value}
+        collection = AsyncMock()
+        collection.find_one = AsyncMock(return_value=doc)
+
+        class _FakeDB:
+            def __getitem__(self, _name: str):
+                return collection
+
+        with patch.object(enrichment, "_get_mongodb", AsyncMock(return_value=_FakeDB())):
+            result = await enrichment.enrich_groups_from_mongodb("svc", [])
+        assert result == []
+
+
+class TestEnrichmentDbErrorFailsClosed:
+    """A database error during enrichment must not grant groups: the functions
+    return the caller's original (empty) groups, which map to empty scopes."""
+
+    @pytest.mark.asyncio
+    async def test_user_group_db_error_returns_empty_groups(self):
+        with patch.object(
+            enrichment, "_get_mongodb", AsyncMock(side_effect=RuntimeError("db down"))
+        ):
+            result = await enrichment.enrich_user_groups_from_mongodb("alice", [], "pingfederate")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_m2m_db_error_returns_empty_groups(self):
+        with patch.object(
+            enrichment, "_get_mongodb", AsyncMock(side_effect=RuntimeError("db down"))
+        ):
+            result = await enrichment.enrich_groups_from_mongodb("svc", [])
+        assert result == []
+
+
 class TestIsRecordEnabledHelper:
     """Unit coverage for the shared enabled-check helper."""
 

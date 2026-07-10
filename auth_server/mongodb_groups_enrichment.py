@@ -25,33 +25,40 @@ logger = logging.getLogger(__name__)
 _mongodb_database: AsyncIOMotorDatabase | None = None
 
 
-# A record whose `enabled` field is explicitly False has been disabled by an
-# operator (or synced as inactive from the upstream IdP) and MUST NOT
-# contribute groups/scopes to a token. Records that predate the `enabled`
-# field (field absent) are treated as active for backward compatibility, which
-# matches the registry service-layer read semantics
-# (``doc.get("enabled", True)``). Both registry create paths and the Okta/Auth0
-# sync paths write ``enabled`` explicitly, so an active record always carries
-# ``enabled: True`` and a revoked one carries ``enabled: False``.
+# A record whose `enabled` field is anything other than boolean True has been
+# disabled by an operator (or synced as inactive from the upstream IdP) and MUST
+# NOT contribute groups/scopes to a token. Records that predate the `enabled`
+# field (field absent) are treated as active for backward compatibility. Both
+# registry create paths and the Okta/Auth0 sync paths write ``enabled``
+# explicitly as a boolean, so an active record always carries ``enabled: True``
+# and a revoked one carries ``enabled: False``.
+#
+# The query filter is a pre-filter only; ``_is_record_enabled`` is the
+# authoritative, fail-closed re-check applied to whatever the query returns.
 _ENABLED_FILTER: dict[str, Any] = {"enabled": {"$ne": False}}
 
 
 def _is_record_enabled(doc: dict[str, Any]) -> bool:
     """Return whether an enrichment record is active (not operator-disabled).
 
-    A record is considered disabled only when its ``enabled`` field is
-    explicitly ``False``. A missing field is treated as active for backward
-    compatibility with records created before the flag existed, matching the
-    registry service-layer read semantics.
+    Fail-closed: a record is active only when its ``enabled`` field is absent
+    (backward compatibility with records created before the flag existed) or is
+    the boolean ``True``. Any other present value -- ``False``, ``None``, ``0``,
+    an empty string, the string ``"false"``, or any non-boolean -- is treated as
+    disabled and ignored. MongoDB does not enforce BSON types, so a record with
+    a non-boolean ``enabled`` (however it got written) must never grant groups.
 
     Args:
         doc: The MongoDB document for an M2M client or user-group mapping.
 
     Returns:
         ``True`` if the record may contribute groups, ``False`` if it has been
-        disabled and must be ignored.
+        disabled (or carries a non-``True`` ``enabled`` value) and must be
+        ignored.
     """
-    return doc.get("enabled", True) is not False
+    if "enabled" not in doc:
+        return True
+    return doc["enabled"] is True
 
 
 async def _get_mongodb() -> AsyncIOMotorDatabase:
