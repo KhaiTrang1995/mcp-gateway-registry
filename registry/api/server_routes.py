@@ -258,6 +258,9 @@ def _apply_tool_visibility(
         endpoint=endpoint,
         server_path=server_path,
     )
+    # Safe to mutate: server_service.get_server_info() returns a fresh
+    # per-request document (not a shared/cached dict), so this cannot poison a
+    # cache or a concurrent request.
     server_info["tool_list"] = filtered
     # Keep the badge/count consistent with what is actually rendered.
     server_info["num_tools"] = len(filtered)
