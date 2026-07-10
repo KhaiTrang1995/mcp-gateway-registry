@@ -155,11 +155,11 @@ async def _perform_agent_security_scan_on_registration(
                     # the warning it earned.
                     agent_info = await agent_service.get_agent_info(path)
                     if agent_info:
-                        updated_card = agent_info.model_dump()
-                        updated_card["tags"] = current_tags
-                        from ..schemas.agent_models import AgentCard as AgentCardModel
-
-                        await agent_service.update_agent(path, AgentCardModel(**updated_card))
+                        # update_agent takes a dict of fields to merge (it calls
+                        # updates.get(...)); pass the dict directly, not an
+                        # AgentCard instance (which has no .get and raises
+                        # AttributeError). Only the changed field is needed.
+                        await agent_service.update_agent(path, {"tags": current_tags})
                     logger.info(f"Added 'security-pending' tag to agent {path}")
 
             # Disable agent if configured
