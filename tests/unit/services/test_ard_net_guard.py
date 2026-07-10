@@ -28,12 +28,22 @@ class TestAssertFetchable:
 
     @pytest.mark.parametrize(
         "ip",
-        ["127.0.0.1", "10.1.2.3", "192.168.1.5", "172.16.0.9", "169.254.169.254",
-         "0.0.0.0", "::ffff:10.0.0.1"],
+        [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.1.5",
+            "172.16.0.9",
+            "169.254.169.254",
+            "0.0.0.0",
+            "::ffff:10.0.0.1",
+        ],
     )
     def test_blocks_private_and_metadata(self, ip):
         family = 10 if ":" in ip else 2  # AF_INET6 vs AF_INET
-        stub = lambda host, port, **kw: [(family, 1, 6, "", (ip, port))]
+
+        def stub(host, port, **kw):
+            return [(family, 1, 6, "", (ip, port))]
+
         with patch.object(g.socket, "getaddrinfo", stub):
             with pytest.raises(ArdValidationError):
                 g.assert_fetchable("https://evil.example/x")

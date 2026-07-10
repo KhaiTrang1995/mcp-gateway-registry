@@ -89,7 +89,7 @@ configured IdPs:
 Validation: signature checked against the IdP's JWKS, issuer against the
 configured allowed-issuer list, audience against the registered client_id,
 expiration against current time. Provider-specific code lives under
-[auth_server/providers/](../../auth_server/providers/) — each provider's
+[auth_server/providers/](../../auth_server/providers) — each provider's
 `validate_token` method returns a normalized dict shape.
 
 ### 2.2 Self-signed JWT (programmatic API token)

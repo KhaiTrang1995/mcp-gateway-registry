@@ -142,10 +142,35 @@ variable "keycloak_database_username" {
   default     = "keycloak"
 }
 
+variable "allow_unsafe_password_chars" {
+  description = <<-EOT
+    Escape hatch for the URI/RDS-safe password character validation added in
+    #1354. Default false: keycloak_database_password and documentdb_admin_password
+    are rejected if they contain / @ " ' + : ? # & ! = % or spaces (these break
+    RDS/DocumentDB, connection-string/URI parsing, or curl form-encoding).
+
+    Set true ONLY for an EXISTING install whose databases were already created
+    with such a password (rotating a live master password is avoidable churn).
+    This does NOT make those characters safe; it suppresses the fail-fast check
+    so an existing deployment can keep applying without a forced password change.
+    New installs should leave this false and choose a compliant password.
+  EOT
+  type        = bool
+  default     = false
+}
+
 variable "keycloak_database_password" {
   description = "Keycloak database password"
   type        = string
   sensitive   = true
+
+  validation {
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Safe by default.
+    condition     = var.allow_unsafe_password_chars || !can(regex("[/ @\"'+:?#&!=%]", var.keycloak_database_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
+  }
 }
 
 variable "keycloak_database_min_acu" {
@@ -175,19 +200,19 @@ variable "keycloak_log_level" {
 variable "registry_image_uri" {
   description = "Container image URI for registry service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/registry:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/registry:1.26.0"
 }
 
 variable "auth_server_image_uri" {
   description = "Container image URI for auth server service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/auth-server:1.26.0"
 }
 
 variable "mcpgw_image_uri" {
   description = "Container image URI for mcpgw service (defaults to pre-built image from public ECR)"
   type        = string
-  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.25.0"
+  default     = "public.ecr.aws/p3v1o3c6/mcpgw:1.26.0"
 }
 
 variable "keycloak_image_uri" {
@@ -361,6 +386,24 @@ variable "session_cookie_domain" {
   default     = ""
 }
 
+variable "trusted_proxy_hops" {
+  description = "Number of trusted reverse-proxy hops in front of the app. The audit client IP is taken from the Nth-from-the-right X-Forwarded-For entry, never the client-controlled left-most one. Default 1 (the bundled nginx). Raise it when additional trusted proxies (e.g. ALB + CloudFront) sit in front."
+  type        = number
+  default     = 1
+}
+
+variable "trusted_external_hosts" {
+  description = "ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header when building OAuth external URLs. The primary domain is already covered automatically (the allowlist always includes the registry URL host), so leave empty for a single-domain deployment. Only list extra hostnames the app is also reached at but that differ from the registry URL host (e.g. a CloudFront domain alongside a custom domain). A Host not on the allowlist falls back to the configured host (prevents host-header injection / open redirect)."
+  type        = string
+  default     = ""
+}
+
+variable "trusted_real_ip_cidrs" {
+  description = "Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP is the real end user rather than the load balancer's internal IP AND so the inbound rate-limit zones throttle per real client IP instead of collapsing to one global bucket at the ALB's IP. Leave EMPTY (the default) to auto-populate with this stack's VPC CIDR: ECS is always behind an ALB, so the module defaults set_real_ip_from to the VPC CIDR for you. Set it explicitly only to override (e.g. CloudFront in front of an ALB: list the VPC CIDR AND CloudFront's origin-facing ranges), or to a narrower range. Malformed entries are dropped (fail closed) and a spoofed left-most X-Forwarded-For is always ignored."
+  type        = string
+  default     = ""
+}
+
 variable "bind_host" {
   description = "Network bind address for registry and gateway services. Default '0.0.0.0' (IPv4) works on all hosts. Set to '::' only for IPv6-only deployments (requires net.ipv6.bindv6only=0 on the host)."
   type        = string
@@ -383,6 +426,15 @@ variable "documentdb_admin_password" {
   type        = string
   sensitive   = true
   default     = ""
+
+  validation {
+    # Reject URI/RDS-unsafe characters (#1354) unless the operator explicitly
+    # opts out via allow_unsafe_password_chars (for existing installs already
+    # running such a password). Empty is allowed (only required for documentdb
+    # storage backend). Safe by default.
+    condition     = var.allow_unsafe_password_chars || var.documentdb_admin_password == "" || !can(regex("[/ @\"'+:?#&!=%]", var.documentdb_admin_password))
+    error_message = "Password cannot contain URI-reserved or RDS-rejected characters: / @ \" ' + : ? # & ! = % or spaces. Set allow_unsafe_password_chars=true to override for an existing install."
+  }
 }
 
 variable "documentdb_shard_capacity" {
@@ -717,6 +769,18 @@ variable "okta_auth_server_id" {
   default     = ""
 }
 
+variable "okta_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted Okta M2M token audiences (e.g. api://ai-registry). Empty accepts only the configured client ids (fail closed)."
+  type        = string
+  default     = ""
+}
+
+variable "okta_m2m_client_groups" {
+  description = "JSON object mapping Okta M2M client_id to a list of group names for RBAC sync, e.g. {\"0oaEXAMPLECLIENTID\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # AUTH0 CONFIGURATION
 # =============================================================================
@@ -769,6 +833,12 @@ variable "auth0_m2m_client_secret" {
   type        = string
   default     = ""
   sensitive   = true
+}
+
+variable "auth0_m2m_client_groups" {
+  description = "JSON object mapping Auth0 M2M client_id to a list of group names for RBAC sync, e.g. {\"abc123clientid\":[\"public-mcp-users\"]}. Empty assigns no groups (fail closed)."
+  type        = string
+  default     = ""
 }
 
 variable "auth0_management_api_token" {
@@ -836,6 +906,12 @@ variable "pingfederate_groups_claim" {
   description = "JWT claim name carrying group memberships (default: groups)"
   type        = string
   default     = "groups"
+}
+
+variable "pingfederate_m2m_allowed_audiences" {
+  description = "Comma/space-separated allowlist of accepted PingFederate M2M token audiences. Empty accepts only the configured client ids / application id URI (fail closed)."
+  type        = string
+  default     = ""
 }
 
 # =============================================================================
@@ -1181,6 +1257,12 @@ variable "audit_log_ttl_days" {
   }
 }
 
+variable "audit_log_require_durable" {
+  description = "Require a durable audit sink (fail closed). When true (default), the registry refuses to start if audit logging is enabled but no durable store (MongoDB/DocumentDB) is available, instead of silently degrading to non-durable JSON log lines that can be lost on restart and are not queryable for forensics. Set to false only in environments where a non-durable audit trail is acceptable."
+  type        = bool
+  default     = true
+}
+
 # =============================================================================
 # APPLICATION LOG CONFIGURATION
 # =============================================================================
@@ -1454,6 +1536,24 @@ variable "registry_mode" {
   }
 }
 
+variable "a2a_reverse_proxy_enabled" {
+  description = "Enable A2A agent reverse-proxy generation (opt-in; default off). When true, each enabled A2A agent gets nginx location blocks proxying its card + JSON-RPC through the gateway for centralized auth and metrics."
+  type        = bool
+  default     = false
+}
+
+variable "ssrf_allowed_hosts" {
+  description = "Comma-separated hostnames (or literal IPs) that may resolve to private addresses and still be accepted by the SSRF guard for MCP-server proxy_pass_url / A2A-agent URLs. The cloud metadata endpoint is never permitted."
+  type        = string
+  default     = ""
+}
+
+variable "ssrf_allowed_cidrs" {
+  description = "Comma-separated CIDR ranges the SSRF guard accepts for MCP-server / A2A-agent upstreams even though they are private. The cloud metadata address 169.254.169.254 is never permitted."
+  type        = string
+  default     = ""
+}
+
 variable "internal_only_deployment" {
   description = <<-EOT
     Marks this as one of our own internal/workshop deployments (not a community
@@ -1668,7 +1768,7 @@ variable "github_api_base_url" {
 # =============================================================================
 
 variable "enable_waf" {
-  description = "Enable WAFv2 Web ACLs for ALBs. Requires wafv2:* IAM permissions. Set to false if IAM permissions are not available."
+  description = "Enable WAFv2 Web ACLs for ALBs (AWS managed rule sets + WAF-level rate rules) as optional defense-in-depth. NOT required for per-client-IP rate limiting: the container nginx already rate-limits the auth-validation fan-out per real client IP (trusted_real_ip_cidrs defaults to the VPC CIDR, so nginx's realip module rewrites the limit key from the ALB IP to the real client out of the box). Defaults to false as a cost decision (WAFv2 has a per-Web-ACL and per-request cost and requires wafv2:* IAM permissions); set to true for an extra managed-rules layer (see terraform/aws-ecs/README.md)."
   type        = bool
   default     = false
 }
@@ -1790,6 +1890,18 @@ variable "egress_state_ttl_seconds" {
   description = "TTL for the AEAD-encrypted egress OAuth state blob."
   type        = number
   default     = 600
+}
+
+variable "egress_obo_allowed_audiences" {
+  description = <<-EOT
+    Optional allowlist (whitespace-separated) for obo_exchange target_audience
+    values. When set, an obo server may only use a listed audience (authoritative
+    positive control). When empty, a shape rule applies: the target must be an
+    internal app audience (api:// App ID URI or bare client-id/GUID), never an
+    https host URL, so shared first-party APIs (Graph/ARM/Key Vault) are rejected.
+  EOT
+  type        = string
+  default     = ""
 }
 
 variable "egress_registry_internal_url" {

@@ -275,9 +275,11 @@ class TestManagementListUsers:
         # Act
         response = client.get("/api/management/iam/users")
 
-        # Assert
+        # Assert - generic message returned, raw IdP error NOT reflected (stack-trace exposure)
         assert response.status_code == 502
-        assert "Connection refused" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert detail == "IAM provider error"
+        assert "Connection refused" not in detail
 
     def test_dedup_skips_mongo_entries_matching_idp(self, test_client_admin):
         """MongoDB entries whose client_id already appears in IdP are skipped.
@@ -362,8 +364,19 @@ class TestManagementListUsers:
 class TestManagementDeleteUser:
     """Tests for DELETE /management/iam/users/{username} endpoint.
 
-    Covers the orphan-delete behavior introduced in PR #942.
+    Covers the orphan-delete behavior introduced in PR #942. The intra-admin
+    last-admin guard is neutralized here (a no-op) so these tests exercise the
+    orphan-delete path; the guard itself is covered by
+    TestManagementDeleteUserSafetyGuards.
     """
+
+    @pytest.fixture(autouse=True)
+    def _neutralize_last_admin_guard(self):
+        with patch(
+            "registry.api.management_routes.admin_safety.assert_not_last_admin",
+            new=AsyncMock(return_value=None),
+        ):
+            yield
 
     @staticmethod
     def _make_mock_db(deleted_count: int = 0):
@@ -435,7 +448,9 @@ class TestManagementDeleteUser:
             response = client.delete("/api/management/iam/users/some-user")
 
         assert response.status_code == 502
-        assert "Bad Gateway" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert detail == "IAM provider error"
+        assert "Bad Gateway" not in detail
         mock_collection.delete_one.assert_not_called()
 
     def test_mongo_delete_filter_is_case_insensitive(self, test_client_admin):
@@ -463,6 +478,230 @@ class TestManagementDeleteUser:
         # Ensure each side of the $or is a compiled case-insensitive regex
         assert all(isinstance(p, _re.Pattern) for p in patterns)
         assert all(p.flags & _re.IGNORECASE for p in patterns)
+
+
+# =============================================================================
+# TEST DELETE /management/iam/users/{username} - Intra-admin safety guards
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.api
+class TestManagementDeleteUserSafetyGuards:
+    """Self-deletion and last-admin lockout guards on user delete."""
+
+    @staticmethod
+    def _make_mock_db(deleted_count: int = 0):
+        delete_result = MagicMock()
+        delete_result.deleted_count = deleted_count
+        mock_collection = MagicMock()
+        mock_collection.delete_one = AsyncMock(return_value=delete_result)
+        mock_db = MagicMock()
+        mock_db.__getitem__.return_value = mock_collection
+        return mock_db, mock_collection
+
+    def test_admin_cannot_delete_own_account(self, test_client_admin):
+        """An admin deleting their OWN account is rejected with 403.
+
+        The admin fixture's username is 'admin'; deleting 'admin' must fail
+        before any IdP/DB call.
+        """
+        client, mock_iam = test_client_admin
+
+        response = client.delete("/api/management/iam/users/admin")
+
+        assert response.status_code == 403
+        assert "your own account" in response.json()["detail"].lower()
+        mock_iam.delete_user.assert_not_called()
+
+    def test_self_delete_check_is_case_insensitive(self, test_client_admin):
+        client, mock_iam = test_client_admin
+
+        response = client.delete("/api/management/iam/users/ADMIN")
+
+        assert response.status_code == 403
+        mock_iam.delete_user.assert_not_called()
+
+    def test_deleting_last_admin_is_rejected(self, test_client_admin):
+        """Deleting the final administrator is refused with 409."""
+        from registry.services.admin_safety import AdminSafetyError
+
+        client, mock_iam = test_client_admin
+
+        with patch(
+            "registry.api.management_routes.admin_safety.assert_not_last_admin",
+            new=AsyncMock(
+                side_effect=AdminSafetyError(409, "Refusing to remove the last administrator.")
+            ),
+        ):
+            response = client.delete("/api/management/iam/users/other-admin")
+
+        assert response.status_code == 409
+        assert "last administrator" in response.json()["detail"].lower()
+        mock_iam.delete_user.assert_not_called()
+
+    def test_delete_fails_closed_when_admin_count_unknown(self, test_client_admin):
+        """If the admin population can't be verified, the delete is refused."""
+        from registry.services.admin_safety import AdminSafetyError
+
+        client, mock_iam = test_client_admin
+
+        with patch(
+            "registry.api.management_routes.admin_safety.assert_not_last_admin",
+            new=AsyncMock(
+                side_effect=AdminSafetyError(
+                    503, "Unable to verify administrator population; operation refused"
+                )
+            ),
+        ):
+            response = client.delete("/api/management/iam/users/other-user")
+
+        assert response.status_code == 503
+        mock_iam.delete_user.assert_not_called()
+
+    def test_delete_non_admin_user_succeeds(self, test_client_admin):
+        """A normal (non-self, non-last-admin) delete still works."""
+        client, mock_iam = test_client_admin
+        mock_iam.delete_user.return_value = True
+        mock_db, _ = self._make_mock_db(deleted_count=0)
+
+        with (
+            patch(
+                "registry.api.management_routes.admin_safety.assert_not_last_admin",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "registry.api.management_routes.get_documentdb_client",
+                new=AsyncMock(return_value=mock_db),
+            ),
+        ):
+            response = client.delete("/api/management/iam/users/regular-user")
+
+        assert response.status_code == 200
+        mock_iam.delete_user.assert_called_once_with(username="regular-user")
+
+
+# =============================================================================
+# TEST PATCH /management/iam/users/{username}/groups - Safety + admin-grant audit
+# =============================================================================
+
+
+@pytest.mark.unit
+@pytest.mark.api
+class TestManagementUpdateUserGroupsSafety:
+    """Last-admin demotion guard and admin-grant audit on group update."""
+
+    def test_demoting_last_admin_is_rejected(self, test_client_admin):
+        from registry.services.admin_safety import AdminSafetyError
+
+        client, _ = test_client_admin
+
+        with patch(
+            "registry.api.management_routes.admin_safety.would_remove_last_admin_via_groups",
+            new=AsyncMock(
+                side_effect=AdminSafetyError(409, "Refusing to demote the last administrator.")
+            ),
+        ):
+            response = client.patch(
+                "/api/management/iam/users/only-admin/groups",
+                json={"groups": ["readers"]},
+            )
+
+        assert response.status_code == 409
+        assert "last administrator" in response.json()["detail"].lower()
+
+    def test_group_update_emits_admin_grant_audit(self, test_client_admin):
+        """Granting an admin group triggers the dedicated admin-grant audit."""
+        client, mock_iam = test_client_admin
+        mock_iam.update_user_groups = AsyncMock(
+            return_value={
+                "username": "promoted-user",
+                "groups": ["mcp-registry-admin"],
+                "added": ["mcp-registry-admin"],
+                "removed": [],
+            }
+        )
+
+        # M2M lookup returns nothing => IdP path.
+        mock_collection = MagicMock()
+        mock_collection.find_one = AsyncMock(return_value=None)
+        mock_db = MagicMock()
+        mock_db.__getitem__.return_value = mock_collection
+
+        with (
+            patch(
+                "registry.api.management_routes.admin_safety.would_remove_last_admin_via_groups",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "registry.api.management_routes.get_documentdb_client",
+                new=AsyncMock(return_value=mock_db),
+            ),
+            patch(
+                "registry.api.management_routes.admin_safety.desired_groups_grant_admin",
+                new=AsyncMock(return_value=True),
+            ) as mock_grant,
+            patch(
+                "registry.api.management_routes.set_audit_action",
+            ) as mock_audit,
+        ):
+            response = client.patch(
+                "/api/management/iam/users/promoted-user/groups",
+                json={"groups": ["mcp-registry-admin"]},
+            )
+
+        assert response.status_code == 200
+        mock_grant.assert_awaited()
+        # A distinct admin-grant audit event was recorded.
+        assert any(
+            call.kwargs.get("metadata", {}).get("admin_grant") is True
+            for call in mock_audit.call_args_list
+        )
+
+    def test_group_update_no_audit_for_non_admin_grant(self, test_client_admin):
+        """A non-admin group change does NOT emit the admin-grant event."""
+        client, mock_iam = test_client_admin
+        mock_iam.update_user_groups = AsyncMock(
+            return_value={
+                "username": "user",
+                "groups": ["readers"],
+                "added": ["readers"],
+                "removed": [],
+            }
+        )
+
+        mock_collection = MagicMock()
+        mock_collection.find_one = AsyncMock(return_value=None)
+        mock_db = MagicMock()
+        mock_db.__getitem__.return_value = mock_collection
+
+        with (
+            patch(
+                "registry.api.management_routes.admin_safety.would_remove_last_admin_via_groups",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "registry.api.management_routes.get_documentdb_client",
+                new=AsyncMock(return_value=mock_db),
+            ),
+            patch(
+                "registry.api.management_routes.admin_safety.desired_groups_grant_admin",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "registry.api.management_routes.set_audit_action",
+            ) as mock_audit,
+        ):
+            response = client.patch(
+                "/api/management/iam/users/user/groups",
+                json={"groups": ["readers"]},
+            )
+
+        assert response.status_code == 200
+        assert not any(
+            call.kwargs.get("metadata", {}).get("admin_grant") is True
+            for call in mock_audit.call_args_list
+        )
 
 
 # =============================================================================
@@ -724,9 +963,11 @@ class TestManagementCreateGroup:
             },
         )
 
-        # Assert
+        # Assert - generic message returned, raw IdP error NOT reflected (stack-trace exposure)
         assert response.status_code == 502
-        assert "IAM service unavailable" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert detail == "IAM provider error"
+        assert "IAM service unavailable" not in detail
 
     def test_create_group_scope_import_failure_logs_warning(self, test_client_admin):
         """Test that scope import failure is logged but doesn't fail the request."""
@@ -1100,9 +1341,11 @@ class TestManagementDeleteGroup:
         # Act
         response = client.delete("/api/management/iam/groups/test-group")
 
-        # Assert
+        # Assert - generic message returned, raw IdP error NOT reflected (stack-trace exposure)
         assert response.status_code == 502
-        assert "IAM service error" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert detail == "IAM provider error"
+        assert "IAM service error" not in detail
 
     def test_delete_group_scope_deletion_failure_logs_warning(self, test_client_admin):
         """Test that scope deletion failure is logged but doesn't fail the request."""

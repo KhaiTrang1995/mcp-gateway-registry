@@ -106,19 +106,25 @@ def _flatten_server_access(
 ) -> list[dict[str, Any]]:
     """Flatten a scope document's ``server_access`` into a flat rule list.
 
-    Handles two on-disk formats:
-    1. New format: ``{"scope_name": "...", "access_rules": [...]}``
-    2. Old/direct format: ``{"server": "...", "methods": [...], "tools": [...]}``
+    Handles three on-disk formats:
+    1. Grouped format: ``{"scope_name": "...", "access_rules": [...]}`` (the inner
+       rules are spliced in as-is; they may be server or agent rules).
+    2. Direct server rule: ``{"server": "...", "methods": [...], "tools": [...]}``.
+    3. Direct agent rule: ``{"agent": "...", "actions": [...]}`` -- the per-agent
+       shape mirrors the server rule (``agent`` is the identifier, ``actions`` its
+       siblings), consumed by ``validate_a2a_agent_access``.
 
-    Entries that are neither (e.g. agent-permission blocks) are skipped.
-    Shared by ``get_server_scopes`` and ``get_server_scopes_bulk`` so the
-    single and batch paths produce byte-identical rule lists.
+    An entry that matches none of these is skipped. Shared by
+    ``get_server_scopes`` and ``get_server_scopes_bulk`` so the single and batch
+    paths produce byte-identical rule lists.
     """
     all_rules: list[dict[str, Any]] = []
     for scope_entry in server_access:
         if "access_rules" in scope_entry:
             all_rules.extend(scope_entry.get("access_rules", []))
         elif "server" in scope_entry:
+            all_rules.append(scope_entry)
+        elif "agent" in scope_entry:
             all_rules.append(scope_entry)
     return all_rules
 

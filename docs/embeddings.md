@@ -410,7 +410,7 @@ dim = client.get_embedding_dimension()
 - [OpenAI Embeddings Guide](https://platform.openai.com/docs/guides/embeddings)
 - [Amazon Bedrock Embeddings](https://docs.aws.amazon.com/bedrock/latest/userguide/embeddings.html)
 - [Sentence Transformers Models](https://www.sbert.net/docs/pretrained_models.html)
-- [Search Service Implementation](../registry/search/service.py)
+- Search Service Implementation
 
 ## Contributing
 

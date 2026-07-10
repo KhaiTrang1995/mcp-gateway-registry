@@ -142,7 +142,7 @@ Affects only `with-gateway` deployments (nginx reverse proxy).
 
 ## Group 5 — Registry API Auth (Static Tokens)
 
-Enterprise-perimeter auth for registry APIs without full IdP validation. See [`docs/registry-api-auth.md`](../docs/registry-api-auth.md).
+Enterprise-perimeter auth for registry APIs without full IdP validation. See [`docs/registry-api-auth.md`](registry-api-auth.md).
 
 | Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
 |-----------|-----------------|-----------------------|----------------------|---------|
@@ -577,6 +577,8 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 |-----------|-----------------|-----------------------|----------------------|---------|
 | Audit log enabled | `AUDIT_LOG_ENABLED` | `audit_log_enabled` | — | — |
 | Audit TTL (days) | `AUDIT_LOG_MONGODB_TTL_DAYS` | `audit_log_ttl_days` | — | TTL index. |
+| Audit require durable sink | `AUDIT_LOG_REQUIRE_DURABLE` | `audit_log_require_durable` | `registry.app.auditLogRequireDurable` / `auth-server.app.auditLogRequireDurable` | Fail closed (default `true`): refuse to start if audit logging is enabled but no durable sink (MongoDB/DocumentDB) is available, instead of degrading to non-durable log lines. Set `false` only in local/dev (emits a loud warning). |
+| Audit instance id | `AUDIT_INSTANCE_ID` | — | — | Per-replica attribution label embedded in internal-token `sub` and audit records. Auto-detected per replica from `HOSTNAME` (set per-container by Docker, per-pod by Kubernetes); set explicitly only to override, so no Terraform/Helm column. |
 | App log max bytes | `APP_LOG_MAX_BYTES` | — | `registry.app.appLogMaxBytes` / `auth-server.app.appLogMaxBytes` | Rotating file size. |
 | App log backup count | `APP_LOG_BACKUP_COUNT` | — | `*.app.appLogBackupCount` | — |
 | Centralized log enabled | `APP_LOG_CENTRALIZED_ENABLED` | `app_log_centralized_enabled` | `*.app.appLogCentralizedEnabled` | Write to MongoDB. |
@@ -703,6 +705,7 @@ shared in the stack `shared-secret`.
 | Token refresh skew (s) | `EGRESS_TOKEN_REFRESH_SKEW_SECONDS` | `egress_token_refresh_skew_seconds` | `registry.egressAuth.tokenRefreshSkewSeconds` | Refresh a vaulted token this many seconds before expiry.          |
 | Refresh worker interval (s) | `EGRESS_REFRESH_WORKER_INTERVAL_SECONDS` | — | `registry.egressAuth.refreshWorkerIntervalSeconds` | Background refresh sweep interval.                                |
 | OAuth state TTL (s) | `EGRESS_STATE_TTL_SECONDS` | `egress_state_ttl_seconds` | `registry.egressAuth.stateTtlSeconds` | TTL for the AEAD-encrypted OAuth `state` blob.                    |
+| obo audience allowlist | `EGRESS_OBO_ALLOWED_AUDIENCES` | `egress_obo_allowed_audiences` | `registry.egressAuth.oboAllowedAudiences` | Whitespace-separated allowlist of `obo_exchange` `target_audience` values. When set, authoritative; when empty a shape rule applies (api:// App ID URI / bare client-id only, never an https host URL or GUID) so shared first-party APIs (Graph/ARM/Key Vault) are rejected. |
 | Registry internal vend URL | `EGRESS_REGISTRY_INTERNAL_URL` | `egress_registry_internal_url` | `auth-server.egressAuth.registryInternalUrl` | Auth-server → registry internal vend endpoint.                    |
 | nginx marker secret **(secret)** | `AUTH_SERVER_NGINX_MARKER_SECRET` | `egress_nginx_marker_secret` | auto-generated in stack `shared-secret`; `*.egressAuth.markerSecret` (standalone) | Marker shared by registry + auth-server; required at startup (both refuse to start without it). |
 | Secrets Manager KMS key **(secret)** | `SECRETS_MANAGER_KMS_KEY_ID` | `egress_secrets_manager_kms_key_id` | `registry.egressAuth.secretsManager.kmsKeyId` | Optional CMK for the vault secrets (secrets-manager backend).     |
@@ -775,6 +778,16 @@ These have no `.env` equivalent because they describe the infrastructure, not th
 | `<subchart>.ingress.*` | Per-subchart ingress overrides. |
 | `mongodb-kubernetes.operator.*` | MongoDB Community operator knobs. |
 | `mongodb-configure.*`, `keycloak-configure.*` | One-shot job configuration for the init jobs. |
+
+---
+
+## Group 31 — A2A Reverse-Proxy Mode
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| Enable reverse-proxy | `A2A_REVERSE_PROXY_ENABLED` | `a2a_reverse_proxy_enabled` | `registry.app.a2aReverseProxyEnabled` | Opt-in. When `true`, each enabled agent gets nginx blocks that proxy its A2A traffic (agent card + JSON-RPC) through the gateway for centralized auth and per-agent access control. Default `false` = registry-only discovery, no proxy blocks. Also gated by `with-gateway` deployment mode; force-disabled in `registry-only`. See [A2A reverse-proxy mode](design/a2a-protocol-integration.md#reverse-proxy-mode-proxying-a2a-traffic). |
+| SSRF allowed hosts | `SSRF_ALLOWED_HOSTS` | `ssrf_allowed_hosts` | `registry.app.ssrfAllowedHosts` | Comma-separated exact hostnames or literal IPs that the gateway is permitted to proxy/health-check even though they resolve to private/internal addresses. Needed when agent backends live on internal networks (Docker service names, ECS Service Connect names, in-cluster ClusterIPs), which the SSRF guard blocks by default. Least-privilege: prefer naming hosts here over widening CIDRs. Empty = only public addresses allowed. |
+| SSRF allowed CIDRs | `SSRF_ALLOWED_CIDRS` | `ssrf_allowed_cidrs` | `registry.app.ssrfAllowedCidrs` | Comma-separated CIDR ranges to allow whole internal subnets (e.g. `172.18.0.0/16` for a Docker network, or the cluster service CIDR on EKS). Use only when you cannot enumerate hosts. Empty = no internal subnets allowed. |
 
 ---
 

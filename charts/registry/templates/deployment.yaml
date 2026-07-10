@@ -126,6 +126,22 @@ spec:
             # DCR scope-allowlist alignment
             - name: MCP_ADVERTISED_SCOPES
               value: {{ .Values.app.mcpAdvertisedScopes | default "" | quote }}
+            # SSRF guard bypass for internal MCP-server upstreams. The health
+            # checker and proxy validate a server's proxy_pass_url through the
+            # SSRF guard, which blocks private/cluster IPs by default. Internal
+            # MCP servers live at private ClusterIPs, so list their hosts or the
+            # cluster service CIDR here or they are marked unhealthy (their nginx
+            # location is commented out -> requests 405). The cloud metadata
+            # address is never permitted regardless of these values.
+            - name: SSRF_ALLOWED_HOSTS
+              value: {{ .Values.app.ssrfAllowedHosts | default "" | quote }}
+            - name: SSRF_ALLOWED_CIDRS
+              value: {{ .Values.app.ssrfAllowedCidrs | default "" | quote }}
+            # A2A reverse-proxy gateway (opt-in; default off). When true, each
+            # enabled A2A agent gets nginx location blocks proxying its card +
+            # JSON-RPC through the gateway for centralized auth and metrics.
+            - name: A2A_REVERSE_PROXY_ENABLED
+              value: {{ .Values.app.a2aReverseProxyEnabled | default false | toString | quote }}
             # IDE OAuth login (PR #1224): public client_id + fixed callback port
             - name: IDE_OAUTH_CLIENT_ID
               value: {{ .Values.app.ideOauthClientId | default "" | quote }}
@@ -253,6 +269,10 @@ spec:
             {{- end }}
             - name: PINGFEDERATE_GROUPS_CLAIM
               value: {{ .Values.pingfederate.groupsClaim | default "groups" | quote }}
+            {{- if .Values.pingfederate.m2mAllowedAudiences }}
+            - name: PINGFEDERATE_M2M_ALLOWED_AUDIENCES
+              value: {{ .Values.pingfederate.m2mAllowedAudiences | quote }}
+            {{- end }}
             {{- end }}
             # Update-check: poll GitHub Releases for newer registry versions
             # (admin banner). Set updateCheck.enabled=false for air-gapped clusters.
@@ -260,6 +280,13 @@ spec:
               value: {{ .Values.app.updateCheck.enabled | default true | toString | quote }}
             - name: UPDATE_CHECK_INTERVAL_HOURS
               value: {{ .Values.app.updateCheck.intervalHours | default 24 | toString | quote }}
+            # Audit durability guard (fail closed). When true (default), the
+            # registry refuses to start if audit logging is enabled but no
+            # durable sink (DocumentDB/MongoDB) is available, instead of silently
+            # degrading to non-durable JSON log lines. Set to false only where a
+            # non-durable audit trail is acceptable.
+            - name: AUDIT_LOG_REQUIRE_DURABLE
+              value: {{ .Values.app.auditLogRequireDurable | default true | toString | quote }}
             {{- if .Values.app.registryApiKeysExistingSecret }}
             - name: REGISTRY_API_KEYS
               valueFrom:

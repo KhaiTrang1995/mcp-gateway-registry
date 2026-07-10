@@ -122,11 +122,25 @@ AUTH_LISTEN_PORT="${AUTH_LISTEN_PORT:-8888}"
 echo "Starting Auth Server (host=$BIND_HOST, port=$AUTH_LISTEN_PORT)..."
 cd /app
 source .venv/bin/activate
+# Only trust proxy headers when the peer is loopback. The auth-server is reached
+# solely via nginx (the /validate subrequest and OAuth callbacks), whose peer is
+# NOT loopback, so uvicorn will not derive request.client from a forwarded header
+# at all — request.client stays the nginx peer, not a client-controlled value.
+# Scope of this setting: it governs ONLY the request.client (tier-3) fallback in
+# get_client_ip(). The audit client IP normally comes from the X-Real-IP /
+# X-Forwarded-For headers (tiers 1-2), whose trustworthiness depends on nginx
+# OVERWRITING those headers on every path that reaches get_client_ip — including
+# the auth_request /validate subrequest, which must set X-Real-IP itself because
+# auth_request subrequests do NOT inherit the parent location's proxy_set_header
+# (see docker/nginx_rev_proxy_*.conf). This flag does not cover that; it only
+# hardens the tier-3 fallback. HTTPS/OAuth detection reads X-Forwarded-Proto from
+# the header directly, so it is unaffected. ::1 covers BIND_HOST=:: dual-stack.
+FORWARDED_ALLOW_IPS="127.0.0.1,::1"
 if [ -n "${OTEL_EXPORTER_OTLP_ENDPOINT}" ] && command -v opentelemetry-instrument >/dev/null 2>&1; then
     echo "Using OTEL_EXPORTER_OTLP_ENDPOINT at ${OTEL_EXPORTER_OTLP_ENDPOINT}"
-    UVICORN_CMD="opentelemetry-instrument uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="opentelemetry-instrument uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 else
     echo "OTEL_EXPORTER_OTLP_ENDPOINT not found, not using OTEL"
-    UVICORN_CMD="uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=*"
+    UVICORN_CMD="uvicorn server:app --host $BIND_HOST --port $AUTH_LISTEN_PORT --proxy-headers --forwarded-allow-ips=$FORWARDED_ALLOW_IPS"
 fi
 exec $UVICORN_CMD

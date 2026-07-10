@@ -35,7 +35,6 @@ The dynamic tool discovery process follows these steps:
 4. **Relevance Ranking**: Returns tools ranked by semantic similarity to the query
 5. **Tool Invocation**: Agent uses the discovered tool information to invoke the appropriate MCP tool
 
-![Dynamic Tool Discovery Flow](img/dynamic-tool-discovery-demo.gif)
 
 ## Discovery Receipts and Context Budgets
 
@@ -115,7 +114,7 @@ graph TB
         A[AI Agent] --> B[Natural Language Query]
         A --> H[invoke_mcp_tool]
     end
-    
+
     subgraph "Discovery Layer"
         B --> C[intelligent_tool_finder]
         C --> D[Sentence Transformer]
@@ -125,7 +124,7 @@ graph TB
         G --> K[Tool Discovery Results]
         K --> A
     end
-    
+
     subgraph "Execution Layer"
         H --> I[Target MCP Server]
         I --> J[Tool Result]
@@ -193,7 +192,7 @@ weather_tools = await intelligent_tool_finder(
 # 2. Use the discovered tool
 if weather_tools:
     tool_info = weather_tools[0]  # Get the best match
-    
+
     result = await invoke_mcp_tool(
         mcp_registry_url="https://your-registry.com/mcpgw/sse",
         server_name=tool_info["service_path"],  # e.g., "/weather"

@@ -51,6 +51,25 @@ try:
 except ImportError:
     from auth_server.observability.meters import token_mint_total
 
+try:
+    from egress_obo import (
+        OboConfigError,
+        OboConsentRequired,
+        OboExchangeError,
+        OboReauthRequired,
+        OboUnsupportedIdpError,
+        obo_exchange,
+    )
+except ImportError:
+    from auth_server.egress_obo import (
+        OboConfigError,
+        OboConsentRequired,
+        OboExchangeError,
+        OboReauthRequired,
+        OboUnsupportedIdpError,
+        obo_exchange,
+    )
+
 # Import provider factory
 from providers.factory import get_auth_provider
 from pydantic import (
@@ -64,7 +83,7 @@ sys.path.insert(0, "/app")
 # Import MCP audit logging components
 from registry.audit.mcp_logger import MCPLogger
 from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
-from registry.audit.service import AuditLogger
+from registry.audit.service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
 from registry.common.secret_key import validate_secret_key
@@ -103,8 +122,14 @@ _USER_JWT_AUDIENCE: str = "mcp-registry"
 MAX_TOKEN_LIFETIME_HOURS = 24
 DEFAULT_TOKEN_LIFETIME_HOURS = 8
 
+# Trailing path segments that are MCP transport endpoints, not part of the
+# registered server name. Used when deriving the scope key from a proxied path
+# so that /validate and the mcp-proxy hop authorize against the SAME server
+# name (see _registered_server_from_proxy_path).
+MCP_TRANSPORT_ENDPOINTS: frozenset[str] = frozenset({"mcp", "sse", "messages"})
+
 # Rate limiting for token generation (simple in-memory counter)
-user_token_generation_counts = {}
+user_token_generation_counts: dict[str, int] = {}
 MAX_TOKENS_PER_USER_PER_HOUR = int(os.environ.get("MAX_TOKENS_PER_USER_PER_HOUR", "100"))
 
 
@@ -171,7 +196,7 @@ def _read_mcp_filter_enabled() -> bool:
         value = getattr(settings, "mcp_tools_list_filter_enabled", None)
         if value is not None:
             return bool(value)
-    except Exception:
+    except Exception:  # nosec B110 - settings attr optional; falls back to env
         pass
     raw = os.getenv("MCP_TOOLS_LIST_FILTER_ENABLED", "true").lower()
     return raw in ("true", "1", "yes")
@@ -242,6 +267,75 @@ def _canonical_auth_method(validation_result: dict) -> str:
     return method
 
 
+def _canonical_egress_user(validation_result: dict) -> str:
+    """The stable per-user id the egress vault keys on, for ONE human identity.
+
+    Must resolve to the SAME value on the consent-write path (browser cookie
+    session) and the vend path (bearer token), or the user's vaulted token is
+    written under one id and looked up under another -> permanent vend miss.
+
+    Uses the OIDC ``sub`` claim, which is present in BOTH id_tokens and access
+    tokens for every OIDC provider and is stable per (user, gateway app). This is
+    provider-agnostic: it avoids ``preferred_username``, which some IdPs (notably
+    Entra) omit from ACCESS tokens, so the browser id_token (has it) and a DCR
+    client's bearer access token (lacks it) would otherwise key differently.
+
+    Resolution (first hit wins):
+      1. ``data.sub`` -- the raw IdP subject. Bearer paths expose the verified
+         claims here; the cookie path carries the sub persisted into the session
+         at login (see create_session ``subject``).
+      2. top-level ``sub`` -- direct-token paths that surface it there.
+      3. ``username`` -- fallback for callers with no sub (keeps pre-existing
+         non-OIDC behavior unchanged; only OIDC callers change bucket).
+    """
+    data = validation_result.get("data") or {}
+    return (
+        data.get("sub")
+        or data.get("subject")
+        or validation_result.get("sub")
+        or validation_result.get("username")
+        or ""
+    )
+
+
+def _audit_identity_display(validation_result: dict) -> str:
+    """The human-readable identity to record in AUDIT logs, for ONE human.
+
+    This is the counterpart to ``_canonical_egress_user``: that function resolves
+    the STABLE, provider-agnostic ``sub`` used to key the egress vault and bind
+    the OBO principal; this one resolves the most human-READABLE identity so an
+    operator reading an audit record knows who to contact without a reverse
+    lookup against the IdP. The two are intentionally separate -- do NOT route
+    auth/vault/OBO decisions through this value.
+
+    Resolution (first hit wins), per the audit-identity policy
+    (email -> preferred_username -> sub):
+      1. ``data.email`` / top-level ``email`` -- the self-signed token bakes in
+         an ``email`` claim (see the /internal/tokens mint) and the validated
+         claims are surfaced under ``data``; the session path carries it too.
+      2. ``data.preferred_username`` -- present on browser id_tokens; a readable
+         login handle when the IdP omits ``email``.
+      3. ``username`` -- the resolved username from validation; on the session
+         path this is already the human handle, on the self-signed path it is
+         the ``sub`` (opaque) -- which is why email/preferred_username come first.
+      4. ``data.sub`` / top-level ``sub`` -- opaque last resort.
+      5. ``"anonymous"`` -- nothing identified the caller.
+
+    Forward-only: this changes what NEW audit records store. Historical
+    ``sub``-only rows are not backfilled (no durable sub->email map exists).
+    """
+    data = validation_result.get("data") or {}
+    return (
+        data.get("email")
+        or validation_result.get("email")
+        or data.get("preferred_username")
+        or validation_result.get("username")
+        or data.get("sub")
+        or validation_result.get("sub")
+        or "anonymous"
+    )
+
+
 def _attach_mcp_proxy_token(
     request: "Request",
     response: "JSONResponse",
@@ -249,6 +343,7 @@ def _attach_mcp_proxy_token(
     scopes: list[str],
     server_name: str,
     auth_method: str = "",
+    egress_user: str = "",
 ) -> None:
     """Mint and attach the X-Internal-Token for the /mcp-proxy hop.
 
@@ -289,6 +384,7 @@ def _attach_mcp_proxy_token(
             server_name=server_name,
             upstream_url=resolved_upstream,
             auth_method=auth_method,
+            egress_user=egress_user,
         )
     except ValueError as exc:
         logger.error(f"/validate: could not mint mcp-proxy token: {exc}")
@@ -302,6 +398,7 @@ def _attach_registry_ui_token(
     groups: list[str],
     auth_method: str,
     client_id: str,
+    egress_user: str = "",
 ) -> None:
     """Mint and attach the X-Internal-Token-Registry for the registry /api/ hop.
 
@@ -324,6 +421,7 @@ def _attach_registry_ui_token(
             groups=groups,
             auth_method=auth_method,
             client_id=client_id,
+            egress_user=egress_user,
         )
     except ValueError as exc:
         logger.error(f"/validate: could not mint registry-ui token: {exc}")
@@ -381,7 +479,7 @@ def _read_mcp_proxy_timeout() -> float:
 
 
 # Global scopes configuration (will be loaded during FastAPI startup)
-SCOPES_CONFIG = {}
+SCOPES_CONFIG: dict[str, Any] = {}
 
 
 def _log_scopes_loaded(scopes_config: dict) -> None:
@@ -442,7 +540,7 @@ if _registry_static_token_requested and not REGISTRY_API_TOKEN and not _REGISTRY
     )
     REGISTRY_STATIC_TOKEN_AUTH_ENABLED: bool = False
 else:
-    REGISTRY_STATIC_TOKEN_AUTH_ENABLED: bool = _registry_static_token_requested
+    REGISTRY_STATIC_TOKEN_AUTH_ENABLED = _registry_static_token_requested
 
 
 # ---------------------------------------------------------------------------
@@ -683,7 +781,7 @@ if _federation_static_token_requested and not FEDERATION_STATIC_TOKEN:
     )
     FEDERATION_STATIC_TOKEN_AUTH_ENABLED: bool = False
 else:
-    FEDERATION_STATIC_TOKEN_AUTH_ENABLED: bool = _federation_static_token_requested
+    FEDERATION_STATIC_TOKEN_AUTH_ENABLED = _federation_static_token_requested
 
 # Warn if token is too short (weak entropy)
 MIN_FEDERATION_TOKEN_LENGTH: int = 32
@@ -769,11 +867,15 @@ def anonymize_ip(ip_address: str) -> str:
 
 
 def mask_token(token: str) -> str:
-    """Mask JWT token showing only first 4 characters followed by ellipsis."""
+    """Mask a token/credential for logging, emitting no part of the value.
+
+    Even a short prefix is credential material: for opaque tokens (API keys,
+    PATs, session ids) the leading characters are real key-space, so nothing
+    from the value is ever emitted -- only a fixed marker. Distinguishing an
+    empty value aids diagnostics without disclosing anything.
+    """
     if not token:
         return "***EMPTY***"
-    if len(token) > 8:
-        return f"{token[:4]}..."
     return "***MASKED***"
 
 
@@ -865,7 +967,7 @@ def _mask_sensitive_dict(
     if not isinstance(data, dict):
         return data
 
-    masked = {}
+    masked: dict[str, Any] = {}
     for key, value in data.items():
         key_lower = key.lower()
         if any(sensitive in key_lower for sensitive in sensitive_keys):
@@ -885,12 +987,50 @@ def _mask_sensitive_dict(
     return masked
 
 
+# Substrings that mark a header name (case-insensitive) as credential-bearing.
+# Matching is fail-closed: any header whose name contains one of these markers
+# has its value masked, so a new credential header (e.g. ``X-Auth-Credential``,
+# ``X-Api-Key``) forwarded on the auth subrequest is never logged in plaintext.
+#
+# KEEP IN SYNC with ``registry.common.log_redaction.SENSITIVE_HEADER_SUBSTRINGS``
+# -- this is a duplicate because the auth server is a separate deployable and
+# cannot import the registry package. ``test_header_substrings_match_shared_redactor``
+# (tests/auth_server/unit/test_server.py) fails if the two lists drift apart.
+_SENSITIVE_HEADER_SUBSTRINGS: tuple[str, ...] = (
+    "authorization",
+    "cookie",
+    "token",
+    "secret",
+    "credential",
+    "password",
+    "api-key",
+    "apikey",
+    "auth",
+    "jwt",
+    "bearer",
+    "session",
+    "key",
+)
+
+
+def _is_sensitive_header_name(name: str) -> bool:
+    """Return True when a header name should be masked before logging."""
+    lowered = name.lower()
+    return any(marker in lowered for marker in _SENSITIVE_HEADER_SUBSTRINGS)
+
+
 def mask_headers(headers: dict) -> dict:
-    """Mask sensitive headers for logging compliance."""
+    """Mask sensitive headers for logging compliance.
+
+    Uses fail-closed substring matching so any credential-bearing header is
+    masked, not just a fixed allowlist a new header name could slip past.
+    """
     masked = {}
     for key, value in headers.items():
         key_lower = key.lower()
-        if key_lower in ["x-authorization", "authorization", "cookie"]:
+        if key_lower in ["x-user-pool-id", "x-client-id"]:
+            masked[key] = mask_sensitive_id(value)
+        elif _is_sensitive_header_name(key):
             if "bearer" in str(value).lower():
                 # Extract token part and mask it
                 parts = str(value).split(" ", 1)
@@ -900,11 +1040,43 @@ def mask_headers(headers: dict) -> dict:
                     masked[key] = mask_token(value)
             else:
                 masked[key] = "***MASKED***"
-        elif key_lower in ["x-user-pool-id", "x-client-id"]:
-            masked[key] = mask_sensitive_id(value)
         else:
             masked[key] = value
     return masked
+
+
+def safe_identity_summary(claims: dict) -> dict:
+    """Return a non-sensitive summary of an id_token claim set / user-info dict.
+
+    id_token claims and userInfo responses carry PII (email, name, full group
+    membership) and must never be logged verbatim. This produces a compact,
+    log-safe view: the stable ``sub`` identifier (masked), a masked
+    ``preferred_username`` when present, the count of groups/roles, and the set
+    of claim NAMES only (never their values).
+
+    Args:
+        claims: Decoded id_token claims or a userInfo response dict.
+
+    Returns:
+        A dict safe to log at any level, containing only identifiers and counts.
+    """
+    if not isinstance(claims, dict):
+        return {"claims": "unavailable"}
+
+    groups = claims.get("groups")
+    if not isinstance(groups, list):
+        groups = claims.get("roles")
+    group_count = len(groups) if isinstance(groups, list) else 0
+
+    summary: dict = {
+        "sub": mask_sensitive_id(str(claims["sub"])) if claims.get("sub") else None,
+        "group_count": group_count,
+        "claim_names": sorted(str(k) for k in claims),
+    }
+    preferred = claims.get("preferred_username")
+    if preferred:
+        summary["preferred_username"] = mask_sensitive_id(str(preferred))
+    return summary
 
 
 async def map_groups_to_scopes(groups: list[str]) -> list[str]:
@@ -949,7 +1121,7 @@ async def map_groups_to_scopes(groups: list[str]) -> list[str]:
     return unique_scopes
 
 
-async def validate_session_cookie(cookie_value: str) -> dict[str, any]:
+async def validate_session_cookie(cookie_value: str) -> dict[str, Any]:
     """
     Validate session cookie using itsdangerous serializer.
 
@@ -1079,6 +1251,39 @@ def _server_names_match(name1: str, name2: str) -> bool:
     if normalized_name1 == "*":
         return True
     return normalized_name1 == _normalize_server_name(name2)
+
+
+def _registered_server_from_proxy_path(
+    server_path: str,
+) -> str:
+    """Derive the registered server name (the scope key) from a proxy path.
+
+    The ``/mcp-proxy/{server_name:path}`` capture and the ``X-Original-URL``
+    /validate parses both contain the registered server name plus any MCP
+    transport endpoint the client appended (``mcp``/``sse``/``messages``). The
+    scope allowlist is keyed on the registered server name WITHOUT that trailing
+    transport segment. Both the /validate hop and the mcp-proxy hop must strip
+    it identically, otherwise they authorize against different keys and a body
+    authorized by one is not re-checked by the other.
+
+    For local servers the path is ``server-name[/transport]``; for federated
+    servers it is ``peer-name/server-name[/transport]``. Only a trailing
+    transport segment is stripped -- the rest of the path is preserved so
+    federated ``peer/server`` keys stay intact.
+
+    Args:
+        server_path: The proxied path segment (e.g. ``currenttime/mcp`` or
+            ``peer-registry-lob-1/cloudflare-docs``).
+
+    Returns:
+        The registered server name used for the scope lookup.
+    """
+    parts = [p for p in server_path.strip("/").split("/") if p]
+    if not parts:
+        return server_path.strip("/")
+    if len(parts) >= 2 and parts[-1] in MCP_TRANSPORT_ENDPOINTS:
+        return "/".join(parts[:-1])
+    return "/".join(parts)
 
 
 async def validate_server_tool_access(
@@ -1348,6 +1553,13 @@ async def lifespan(app: FastAPI):
     # Runs after scopes are loaded so map_groups_to_scopes can resolve groups.
     await _build_static_token_map()
 
+    # Prime the MCP/token-mint audit logger at startup so the durable-sink
+    # guard runs at boot. Without this the guard would only fire lazily on the
+    # first audited request; priming here makes the auth-server refuse to start
+    # (NonDurableAuditError) when audit logging is enabled but no durable sink is
+    # available, matching the registry process's fail-closed startup behavior.
+    get_mcp_logger()
+
     yield
 
     # Shutdown: Add cleanup code here if needed in the future
@@ -1534,8 +1746,8 @@ class SimplifiedCognitoValidator:
             region: Default AWS region
         """
         self.default_region = region
-        self._cognito_clients = {}  # Cache boto3 clients by region
-        self._jwks_cache = {}  # Cache JWKS by user pool
+        self._cognito_clients: dict[str, Any] = {}  # Cache boto3 clients by region
+        self._jwks_cache: dict[str, Any] = {}  # Cache JWKS by user pool
 
     def _get_cognito_client(self, region: str):
         """Get or create boto3 cognito client for region"""
@@ -1600,7 +1812,7 @@ class SimplifiedCognitoValidator:
 
             # Get JWKS and find matching key
             jwks = self._get_jwks(user_pool_id, region)
-            signing_key = None
+            signing_key: Any = None
 
             for key in jwks.get("keys", []):
                 if key.get("kid") == kid:
@@ -1618,8 +1830,8 @@ class SimplifiedCognitoValidator:
                             algorithms = get_default_algorithms()
                             signing_key = algorithms["RS256"].from_jwk(key)
                         except (ImportError, AttributeError):
-                            # For PyJWT 2.0.0+
-                            signing_key = PyJWK.from_jwk(json.dumps(key)).key
+                            # For PyJWT 2.0.0+ (from_jwk exists at runtime; stubs lag)
+                            signing_key = PyJWK.from_jwk(json.dumps(key)).key  # type: ignore[attr-defined]
                     break
 
             if not signing_key:
@@ -1836,7 +2048,7 @@ class SimplifiedCognitoValidator:
             jwt_claims = self.validate_jwt_token(access_token, user_pool_id, client_id, region)
 
             # Extract scopes and other info
-            scopes = []
+            scopes: list[str] = []
             if "scope" in jwt_claims:
                 scopes = jwt_claims["scope"].split() if jwt_claims["scope"] else []
 
@@ -1908,6 +2120,133 @@ def _is_registry_api_request(
     return False
 
 
+def _get_a2a_agent_path(
+    original_url: str | None,
+) -> str | None:
+    """Return the agent path for an A2A reverse-proxy request, or None.
+
+    Recognizes URLs of the form ``{root}/agent/{agent_path}/...``
+    and returns the agent path with a leading slash (e.g. "/flight-booking-agent"),
+    matching the agent's registered path and the ``invoke_agent`` scope
+    resources. Agent paths may be multi-segment (e.g. "/lob1/travel"); the trailing
+    agent-card discovery suffix is stripped so the card and JSON-RPC requests
+    resolve to the same agent path. Returns None for any non-agent request so the
+    caller falls back to MCP handling.
+
+    Args:
+        original_url: The X-Original-URL header value from nginx.
+
+    Returns:
+        The agent path (leading slash, one or more segments) or None.
+    """
+    if not original_url:
+        return None
+
+    parsed = urlparse(original_url)
+    path = parsed.path.strip("/")
+
+    registry_prefix = REGISTRY_ROOT_PATH.strip("/")
+    if registry_prefix and path.startswith(registry_prefix):
+        path = path[len(registry_prefix) :].lstrip("/")
+
+    parts = path.split("/") if path else []
+    if len(parts) < 2 or parts[0] != "agent":
+        return None
+
+    agent_segments = parts[1:]
+    # Drop the agent-card discovery suffix so /agent/x/.well-known/agent-card.json
+    # and /agent/x/ both resolve to the same agent path.
+    if agent_segments[-2:] == [".well-known", "agent-card.json"]:
+        agent_segments = agent_segments[:-2]
+
+    if not agent_segments or not all(agent_segments):
+        return None
+
+    return "/" + "/".join(agent_segments)
+
+
+# Admin scope/group markers that grant A2A invoke regardless of scope-doc shape.
+# Backwards compatibility: scope docs seeded before the {agent, actions} schema
+# (#1434) use the legacy nested {"agents": {"actions": [...]}} shape, which has no
+# invoke_agent action at all, so an admin on such a doc would otherwise be denied
+# invoke. Admins are allowed via these markers so operators need not re-seed their
+# group definitions. Non-admins on the legacy shape must use the new
+# {agent, actions} rule (or re-seed). Keyed only on the admin markers -- never on a
+# broad server grant -- so an MCP server scope never gates agent invoke. The set
+# matches the registry's own admin determination (registry/auth/dependencies.py
+# _user_is_admin): both the "mcp-registry-admin" scope and the "registry-admins"
+# bootstrap group/scope count as admin.
+_A2A_ADMIN_MARKERS: frozenset[str] = frozenset({"mcp-registry-admin", "registry-admins"})
+
+
+async def validate_a2a_agent_access(
+    agent_path: str,
+    user_scopes: list[str],
+    user_groups: list[str] | None = None,
+) -> bool:
+    """Check per-agent A2A invocation access against structured agent scopes.
+
+    Enforced at the ``/validate`` auth subrequest: it answers "may this caller
+    invoke this agent?". Mirrors :func:`validate_server_tool_access` and uses the
+    same rule shape as a server rule: each ``server_access`` entry is a per-agent
+    dict ``{"agent": "<path or *>", "actions": [...]}`` -- ``agent`` is the
+    identifier (like ``server``) and ``actions`` are its siblings (like
+    ``methods``). A caller may invoke the agent if any of their scopes has a rule
+    whose ``agent`` matches (exact path, or ``*``/``all`` wildcard) and whose
+    ``actions`` include ``invoke_agent`` (or the ``all``/``*`` wildcard).
+
+    Backwards compatibility: an admin (see ``_A2A_ADMIN_MARKERS``) is always
+    allowed, so a deployment whose admin scope doc still uses the legacy nested
+    ``{"agents": {...}}`` shape (which predates ``invoke_agent``) keeps working
+    without re-seeding.
+
+    Args:
+        agent_path: Agent path with leading slash (e.g. "/travel").
+        user_scopes: Scope names resolved for the caller (from group mappings).
+        user_groups: IdP group names for the caller, used only for the admin
+            marker check (some deployments carry the admin marker as a group).
+
+    Returns:
+        True if any scope grants ``invoke_agent`` on this agent, else False.
+    """
+    # Admin bypass (legacy-schema backwards compatibility -- see _A2A_ADMIN_MARKERS).
+    markers = set(user_scopes or []) | set(user_groups or [])
+    if markers & _A2A_ADMIN_MARKERS:
+        logger.info(f"A2A invoke allowed for admin caller to agent {agent_path}")
+        return True
+
+    if not user_scopes:
+        return False
+
+    scope_repo = get_scope_repository()
+    # Single round-trip for all caller scopes (this runs on the /validate auth
+    # subrequest hot path); get_server_scopes_bulk uses an $in query rather than
+    # one find_one per scope.
+    try:
+        scope_rules = await scope_repo.get_server_scopes_bulk(user_scopes)
+    except Exception as exc:
+        logger.warning(f"A2A access: failed to resolve scopes {user_scopes}: {exc}")
+        return False
+
+    for scope_config in scope_rules.values():
+        if not scope_config:
+            continue
+
+        for entry in scope_config:
+            rule_agent = entry.get("agent")
+            if not isinstance(rule_agent, str):
+                continue
+            # Agent identifier match: exact path, or a wildcard covering any agent.
+            if rule_agent not in ("*", "all") and rule_agent != agent_path:
+                continue
+            actions = entry.get("actions", [])
+            if not isinstance(actions, list):
+                continue
+            if "invoke_agent" in actions or "all" in actions or "*" in actions:
+                return True
+    return False
+
+
 def _check_registry_static_token(
     bearer_token: str,
 ) -> dict | None:
@@ -1975,6 +2314,56 @@ def _is_federation_api_request(
     return False
 
 
+def _obo_extra_audiences(server_name_from_url: str | None) -> list[str]:
+    """Per-server OBO resource audiences to accept for the server being accessed.
+
+    The OBO ingress token's ``aud`` is the per-server resource URL the gateway
+    advertised in its PRM (RFC 8707), e.g. ``https://gw/<server>/mcp``. We derive
+    it from the request's server path (already parsed from X-Original-URL) and the
+    gateway's public URL -- no static env list. Returns both the ``/mcp`` and
+    bare-path forms to be robust to the server's ``append_mcp_path``. Returns []
+    when there's no server context or no configured gateway URL.
+
+    Gated on the egress feature (not on a specific egress mode): the per-server
+    resource audience is a valid ingress ``aud`` for any server that logs the
+    client in at the gateway via a per-server PRM -- both obo_exchange and the
+    3LO vault's oauth_user ingress leg -- and none of that can function with
+    egress disabled. Returning [] when egress is off keeps the accepted-audience
+    surface at exactly the gateway-app audience for every non-egress deployment
+    rather than always widening it to the per-server resource form.
+    """
+    if not server_name_from_url:
+        return []
+    if not getattr(settings, "egress_auth_enabled", False):
+        return []
+    # The token's aud is the PUBLIC per-server resource the registry advertised
+    # in its PRM, built from the PUBLIC gateway URL. On auth-server, settings.
+    # registry_url is the INTERNAL cluster URL, so prefer the public external URL
+    # (AUTH_SERVER_EXTERNAL_URL) and only fall back to registry_url.
+    registry_url = (
+        os.environ.get("AUTH_SERVER_EXTERNAL_URL", "")
+        or getattr(settings, "registry_url", "")
+        or os.environ.get("REGISTRY_URL", "")
+    )
+    if not registry_url:
+        return []
+    try:
+        from registry.auth.oauth_metadata import build_per_server_resource_url
+    except Exception:
+        return []
+    # Normalize: strip a trailing /mcp transport segment to get the server path.
+    path = "/" + server_name_from_url.strip("/")
+    if path.endswith("/mcp"):
+        path = path[: -len("/mcp")]
+    auds = []
+    try:
+        auds.append(build_per_server_resource_url(registry_url, path, append_mcp=True))
+        auds.append(build_per_server_resource_url(registry_url, path, append_mcp=False))
+    except ValueError:
+        return []
+    return auds
+
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -2009,17 +2398,72 @@ async def validate_request(request: Request):
 
     try:
         # Extract headers
-        # Check for X-Authorization first (custom header used by this gateway)
-        # Only if X-Authorization is not present, check standard Authorization header
-        authorization = request.headers.get("X-Authorization")
-        if not authorization:
-            authorization = request.headers.get("Authorization")
+        original_url = request.headers.get("X-Original-URL")
+        x_authorization = request.headers.get("X-Authorization")
+        raw_authorization = request.headers.get("Authorization")
+
+        # A2A agent-proxy trust model: on an /agent/... path the standard
+        # Authorization header carries the *target agent's* credential, which the
+        # calling agent obtained out-of-band (per the A2A spec) and which nginx
+        # forwards end-to-end to the agent backend. The gateway credential must
+        # travel in X-Authorization ONLY. So for agent paths we authenticate the
+        # caller on X-Authorization and never fall back to Authorization -- a
+        # fallback would authenticate on (and, since it is forwarded, leak) the
+        # target-agent credential. For every non-agent path the historic
+        # precedence (X-Authorization first, then Authorization) is preserved.
+        a2a_agent_path = _get_a2a_agent_path(original_url)
+        is_a2a_request = a2a_agent_path is not None
+        if x_authorization:
+            authorization = x_authorization
+        elif is_a2a_request:
+            # No gateway credential on an agent path: fail closed as
+            # unauthenticated rather than trusting the target-agent Authorization.
+            authorization = None
+        else:
+            authorization = raw_authorization
+
+        # Defense in depth: if a caller duplicates its gateway token into both
+        # X-Authorization and Authorization on an agent path, the Authorization
+        # copy would be forwarded to the registrant-controlled agent backend and
+        # could be replayed against the registry. Refuse the request (fail closed)
+        # rather than silently leaking the gateway credential. Compare the extracted
+        # token VALUES (strip an optional "Bearer " scheme + surrounding whitespace)
+        # so a duplicate that differs only in scheme prefix or whitespace is caught.
+        def _bearer_token_value(header: str | None) -> str:
+            if not header:
+                return ""
+            value = header.strip()
+            if value.lower().startswith("bearer "):
+                value = value[len("bearer ") :].strip()
+            return value
+
+        if (
+            is_a2a_request
+            and x_authorization
+            and _bearer_token_value(raw_authorization) == _bearer_token_value(x_authorization)
+        ):
+            logger.warning(
+                "A2A request for %s presents identical X-Authorization and "
+                "Authorization; refusing so the gateway credential cannot leak to "
+                "the agent backend.",
+                a2a_agent_path,
+            )
+            return JSONResponse(
+                content={"detail": "Authorization must not duplicate the gateway credential"},
+                status_code=401,
+                headers={"WWW-Authenticate": "Bearer", "Connection": "close"},
+            )
+
         cookie_header = request.headers.get("Cookie", "")
         user_pool_id = request.headers.get("X-User-Pool-Id")
         client_id = request.headers.get("X-Client-Id")
         region = request.headers.get("X-Region", "us-east-1")
-        original_url = request.headers.get("X-Original-URL")
         body = request.headers.get("X-Body")
+        # capture_body.lua sets this when the request body was too large to buffer
+        # in memory and spilled to a temp file, so no X-Body could be captured.
+        # Without the body we cannot determine the scope-relevant method/tool, so
+        # any server-scoped request in this state must fail closed (see below).
+        body_uninspectable = request.headers.get("X-Body-Uninspectable") == "1"
 
         # Extract server_name and endpoint from original_url early for logging
         server_name_from_url = None
@@ -2037,8 +2481,11 @@ async def validate_request(request: Request):
 
                 path_parts = path.split("/") if path else []
 
-                # MCP endpoints that should be treated as endpoints, not server names
-                mcp_endpoints = {"mcp", "sse", "messages"}
+                # MCP transport endpoints that should be treated as endpoints,
+                # not server names. Shared with the mcp-proxy hop via
+                # MCP_TRANSPORT_ENDPOINTS / _registered_server_from_proxy_path so
+                # both authorize against the identical scope key.
+                mcp_endpoints = MCP_TRANSPORT_ENDPOINTS
 
                 # For peer/federated registries, path is: peer-name/server-name/endpoint
                 # For local servers, path is: server-name/endpoint
@@ -2068,25 +2515,37 @@ async def validate_request(request: Request):
 
         # Read request body
         request_payload = None
+        # True when a non-empty X-Body was present but could not be parsed into
+        # a scope-relevant payload. We must not silently default such a request
+        # to the unprivileged "initialize" method (that would authorize a body
+        # whose real method we could not read) -- fail closed below instead.
+        body_parse_failed = False
         try:
             if body:
                 payload_text = body  # .decode('utf-8')
-                logger.debug(
-                    "Raw Request Payload (%d chars): %s...",
-                    len(payload_text),
-                    payload_text[:1000],
-                )
+                # Do NOT log the raw or parsed payload: a JSON-RPC tools/call
+                # carries user-supplied tool arguments that may contain
+                # credentials, API keys, or PII. Log only the size and, once
+                # parsed, the non-sensitive method name + request id.
+                logger.debug("Request payload received (%d chars)", len(payload_text))
                 request_payload = json.loads(payload_text)
-                if logger.isEnabledFor(logging.DEBUG):
-                    logger.debug("JSON RPC Request Payload: %s", json.dumps(request_payload))
+                if logger.isEnabledFor(logging.DEBUG) and isinstance(request_payload, dict):
+                    logger.debug(
+                        "JSON-RPC request: method=%s id=%s",
+                        request_payload.get("method"),
+                        request_payload.get("id"),
+                    )
             else:
                 logger.debug("No request body provided, skipping payload parsing")
         except UnicodeDecodeError as e:
             logger.warning(f"Could not decode body as UTF-8: {e}")
+            body_parse_failed = True
         except json.JSONDecodeError as e:
             logger.warning(f"Could not parse JSON RPC payload: {e}")
+            body_parse_failed = True
         except Exception as e:
             logger.error(f"Error reading request payload: {type(e).__name__}: {e}")
+            body_parse_failed = True
 
         # Log request for debugging with anonymized IP
         client_ip = get_client_ip(request)
@@ -2156,7 +2615,7 @@ async def validate_request(request: Request):
                     "federation/read",
                     "federation/peers",
                 ]
-                response_data = {
+                response_data: dict[str, Any] = {
                     "valid": True,
                     "username": "federation-peer",
                     "client_id": "federation-static",
@@ -2316,10 +2775,16 @@ async def validate_request(request: Request):
             if cookie_value:
                 try:
                     validation_result = await validate_session_cookie(cookie_value)
-                    # Log validation result without exposing username or tokens
-                    safe_result = _mask_sensitive_dict(validation_result)
-                    safe_result["username"] = hash_username(validation_result.get("username", ""))
-                    logger.info(f"Session cookie validation result: {safe_result}")
+                    # Log only non-sensitive counts: the result nests a full
+                    # claims dict (email/name/groups) that must never be logged.
+                    logger.info(
+                        "Session cookie validation result: valid=%s, method=%s, "
+                        "group_count=%d, scope_count=%d",
+                        bool(validation_result.get("valid")),
+                        validation_result.get("method") or "unknown",
+                        len(validation_result.get("groups", []) or []),
+                        len(validation_result.get("scopes", []) or []),
+                    )
                     logger.info(
                         f"Session cookie validation successful for user: {hash_username(validation_result['username'])}"
                     )
@@ -2365,8 +2830,21 @@ async def validate_request(request: Request):
 
                     # Provider-specific validation
                     if hasattr(auth_provider, "validate_token"):
-                        # For Keycloak, no additional headers needed
-                        validation_result = auth_provider.validate_token(access_token)
+                        # For an OBO ingress token, the aud is the per-server
+                        # resource URL (RFC 8707, e.g. https://gw/<server>/mcp).
+                        # Pass the expected per-server audience for the server being
+                        # accessed so Entra validation accepts it without a static
+                        # env allowlist (registry-derived, still a closed set).
+                        # Pass defensively: providers/mocks whose validate_token
+                        # does not accept the kwarg still work (fall back to the
+                        # bare call).
+                        extra_audiences = _obo_extra_audiences(server_name_from_url)
+                        try:
+                            validation_result = auth_provider.validate_token(
+                                access_token, extra_audiences=extra_audiences
+                            )
+                        except TypeError:
+                            validation_result = auth_provider.validate_token(access_token)
                         logger.info(
                             f"Token validation successful using {auth_provider.__class__.__name__}"
                         )
@@ -2407,7 +2885,9 @@ async def validate_request(request: Request):
                 logger.warning(f"Token validation failed: {e}")
                 raise HTTPException(
                     status_code=401,
-                    detail=f"Token validation failed: {e}",
+                    # Generic detail: the exception can reveal issuer/audience/IdP
+                    # config internals. The specifics are logged above.
+                    detail="Token validation failed",
                     headers={"WWW-Authenticate": "Bearer", "Connection": "close"},
                 )
             except Exception as e:
@@ -2443,7 +2923,8 @@ async def validate_request(request: Request):
                 if enriched_groups != current_groups:
                     validation_result["groups"] = enriched_groups
                     logger.info(
-                        f"Groups enriched from MongoDB for client {client_id}: {enriched_groups}"
+                        f"Groups enriched from MongoDB for client {client_id}: "
+                        f"{len(current_groups)} -> {len(enriched_groups)} group(s)"
                     )
         except Exception as e:
             logger.warning(f"Failed to enrich groups from MongoDB: {e}")
@@ -2489,10 +2970,11 @@ async def validate_request(request: Request):
                 if enriched_user_groups != current_user_groups:
                     validation_result["groups"] = enriched_user_groups
                     logger.info(
-                        "Enriched user '%s' (provider=%s) from idp_user_groups: %s",
+                        "Enriched user '%s' (provider=%s) from idp_user_groups: %d -> %d group(s)",
                         username_for_lookup,
                         user_provider,
-                        enriched_user_groups,
+                        len(current_user_groups),
+                        len(enriched_user_groups),
                     )
         except Exception as e:
             logger.warning(f"Failed to enrich user groups from MongoDB: {e}")
@@ -2541,7 +3023,15 @@ async def validate_request(request: Request):
         if user_groups and auth_method in ["keycloak", "entra", "cognito", "okta", "auth0"]:
             # Map IdP groups to scopes using the group mappings (query DocumentDB)
             user_scopes = await map_groups_to_scopes(user_groups)
-            logger.debug("Mapped %s groups %s to scopes: %s", auth_method, user_groups, user_scopes)
+            # Log counts only: group names are organizational PII (Entra groups
+            # often encode org units / cost centers) and scope lists reveal the
+            # authz model.
+            logger.debug(
+                "Mapped %s: %d groups -> %d scopes",
+                auth_method,
+                len(user_groups),
+                len(user_scopes),
+            )
         elif (
             user_groups
             and not existing_scopes
@@ -2557,17 +3047,84 @@ async def validate_request(request: Request):
             # unchanged.
             user_scopes = await map_groups_to_scopes(user_groups)
             logger.debug(
-                "Re-mapped pingfederate groups %s to scopes: %s "
+                "Re-mapped pingfederate: %d groups -> %d scopes "
                 "after fallback enrichment (transport=%s)",
-                user_groups,
-                user_scopes,
+                len(user_groups),
+                len(user_scopes),
                 auth_method,
             )
         else:
             user_scopes = validation_result.get("scopes", [])
+
+        # A2A agent proxy requests: enforce per-agent invoke FGAC here at the
+        # auth subrequest, resolving the caller's scopes to an invoke_agent
+        # action that covers this agent (see validate_a2a_agent_access).
+        # a2a_agent_path was resolved once at the top of the handler so the token
+        # precedence and this FGAC check agree on whether the request is A2A.
+        if a2a_agent_path is not None:
+            if not await validate_a2a_agent_access(
+                a2a_agent_path, user_scopes, validation_result.get("groups", [])
+            ):
+                logger.warning(
+                    f"Access denied for user "
+                    f"{hash_username(validation_result.get('username', ''))} "
+                    f"to A2A agent {a2a_agent_path} - missing invoke scope"
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied to agent {a2a_agent_path} - no invoke scope",
+                    headers={"Connection": "close"},
+                )
+            logger.info(f"A2A per-agent scope validation passed for {a2a_agent_path}")
+            # This is an agent proxy request, not an MCP server; skip the MCP
+            # server/tool scope validation below.
+            server_name = None
+
         if server_name:
             # For ANY server access, enforce scope validation (fail closed principle)
             # This includes MCP initialization methods that may not have a specific tool
+
+            # Fail closed when the scope-relevant body could not be captured.
+            # capture_body.lua sets X-Body-Uninspectable when the request body
+            # spilled to a temp file (larger than client_body_buffer_size) and
+            # get_body_data() returned nil. In that state we would otherwise see
+            # no X-Body and default the method to the unprivileged "initialize"
+            # while the full (potentially privileged) body is forwarded upstream
+            # -- a scope-check bypass. Refuse rather than authorize an
+            # uninspectable body.
+            if body_uninspectable:
+                logger.warning(
+                    "Access denied for user %s to %s - request body was not "
+                    "captured for scope validation (spilled to temp file); "
+                    "failing closed",
+                    hash_username(validation_result.get("username", "")),
+                    server_name,
+                )
+                raise HTTPException(
+                    status_code=413,
+                    detail=(
+                        "Request body too large to authorize; scope validation "
+                        "requires an in-memory body"
+                    ),
+                    headers={"Connection": "close"},
+                )
+
+            # Fail closed when a non-empty body was present but could not be
+            # parsed into a scope-relevant payload. Defaulting to "initialize"
+            # here would authorize a request whose real method we could not
+            # determine; the forwarded body could still be a privileged call.
+            if body_parse_failed:
+                logger.warning(
+                    "Access denied for user %s to %s - request body could not "
+                    "be parsed for scope validation; failing closed",
+                    hash_username(validation_result.get("username", "")),
+                    server_name,
+                )
+                raise HTTPException(
+                    status_code=400,
+                    detail="Request body could not be parsed for authorization",
+                    headers={"Connection": "close"},
+                )
 
             # Determine the method to validate:
             # 1. If we have a tool_name from JSON-RPC payload, use that
@@ -2803,11 +3360,27 @@ async def validate_request(request: Request):
             "tool_name": tool_name,
         }
         if logger.isEnabledFor(logging.DEBUG):
+            # The validation result nests the full claims dict (email/name/groups
+            # under `data`); log only non-sensitive counts and claim NAMES.
+            _result_data = validation_result.get("data")
             logger.debug(
-                "Full validation result: %s",
-                json.dumps(_mask_sensitive_dict(validation_result)),
+                "Validation result summary: valid=%s, method=%s, group_count=%d, "
+                "scope_count=%d, data_claim_names=%s",
+                bool(validation_result.get("valid")),
+                validation_result.get("method") or "unknown",
+                len(validation_result.get("groups", []) or []),
+                len(validation_result.get("scopes", []) or []),
+                sorted(_result_data.keys()) if isinstance(_result_data, dict) else [],
             )
-            logger.debug("Response data being sent: %s", json.dumps(response_data))
+            logger.debug(
+                "Response data being sent: valid=%s, user=%s, group_count=%d, "
+                "scope_count=%d, server_name=%s",
+                response_data["valid"],
+                hash_username(response_data["username"]),
+                len(response_data["groups"] or []),
+                len(response_data["scopes"] or []),
+                server_name,
+            )
 
         # Log MCP server access event if this is an MCP request (has server_name)
         if server_name:
@@ -2816,8 +3389,13 @@ async def validate_request(request: Request):
             if mcp_logger:
                 try:
                     # Build identity from validation result
-                    identity = Identity(
-                        username=validation_result.get("username") or "anonymous",
+                    mcp_identity = Identity(
+                        # Human-readable identity for the audit record
+                        # (email -> preferred_username -> sub). The resolved
+                        # claims are surfaced under validation_result["data"];
+                        # the auth/vault/OBO plumbing continues to key on `sub`
+                        # via `username`, which this does not change.
+                        username=_audit_identity_display(validation_result),
                         auth_method=validation_result.get("method") or "unknown",
                         provider=validation_result.get("provider"),
                         groups=validation_result.get("groups", []),
@@ -2836,7 +3414,7 @@ async def validate_request(request: Request):
                     # Log the MCP access event
                     await mcp_logger.log_mcp_access(
                         request_id=request_id,
-                        identity=identity,
+                        identity=mcp_identity,
                         mcp_server=mcp_server,
                         request_body=body.encode("utf-8") if body else b"",
                         response_status="success",
@@ -2869,6 +3447,11 @@ async def validate_request(request: Request):
         # "oauth2" (the session record's value), not the literal "session_cookie".
         # Both internal tokens stamp THIS so consent-write and vend-read agree.
         _canon_auth_method = _canonical_auth_method(validation_result)
+        # Canonical egress vault user id (OIDC sub). Both internal tokens stamp
+        # THIS so the consent-write and vend paths key the vault on one value for
+        # one human -- avoids the preferred_username-vs-sub divergence that made
+        # the browser-consent and bearer-vend paths miss on Entra.
+        _egress_user = _canonical_egress_user(validation_result)
 
         _attach_mcp_proxy_token(
             request,
@@ -2877,6 +3460,7 @@ async def validate_request(request: Request):
             scopes=user_scopes,
             server_name=server_name or "",
             auth_method=_canon_auth_method,
+            egress_user=_egress_user,
         )
 
         # Registry /api/ hop token. Discriminate cookie vs JWT-bearer: the cookie
@@ -2897,6 +3481,7 @@ async def validate_request(request: Request):
             # disagreed. Stamp the canonical value so they match.
             auth_method=_canon_auth_method,
             client_id=validation_result.get("client_id") or "",
+            egress_user=_egress_user,
         )
 
         return response
@@ -2909,7 +3494,7 @@ async def validate_request(request: Request):
             mcp_logger = get_mcp_logger()
             if mcp_logger:
                 try:
-                    identity = Identity(
+                    mcp_identity = Identity(
                         username="anonymous",
                         auth_method="unknown",
                         credential_type="none",
@@ -2921,7 +3506,7 @@ async def validate_request(request: Request):
                     )
                     await mcp_logger.log_mcp_access(
                         request_id=request_id,
-                        identity=identity,
+                        identity=mcp_identity,
                         mcp_server=mcp_server,
                         request_body=body.encode("utf-8") if body else b"",
                         response_status="error",
@@ -2937,7 +3522,9 @@ async def validate_request(request: Request):
                     logger.warning(f"Failed to log MCP access error: {log_err}")
         raise HTTPException(
             status_code=401,
-            detail=str(e),
+            # Generic detail: the ValueError can reveal token/IdP internals; it is
+            # logged above.
+            detail="Authentication failed",
             headers={"WWW-Authenticate": "Bearer", "Connection": "close"},
         )
     except HTTPException as e:
@@ -3078,8 +3665,15 @@ async def _emit_token_mint_audit(
     expires_in_seconds: int | None,
     outcome: str,
     failure_reason: str | None = None,
+    display_username: str | None = None,
 ) -> None:
     """Emit a token-mint audit record and increment the mint metric.
+
+    ``username`` is what the record's DEPRECATED ``username_hash`` is derived
+    from (kept identical to preserve existing hash values / back-compat).
+    ``display_username`` is the raw, human-readable identity stored in the new
+    ``username`` field (email -> preferred_username -> sub); when omitted it
+    falls back to ``username`` (already human-readable on most mint paths).
 
     Best-effort: any failure here is logged and swallowed so token minting is
     never broken by observability.
@@ -3101,6 +3695,7 @@ async def _emit_token_mint_audit(
         record = TokenMintAuditRecord(
             request_id=request_id,
             correlation_id=correlation_id,
+            username=display_username or username or "anonymous",
             username_hash=hash_username(username),
             auth_method=auth_method,
             provider=provider,
@@ -3169,12 +3764,25 @@ async def generate_user_token(
     username = "unknown"
     auth_method = "unknown"
     provider = None
+    # Human-readable identity for the audit record; initialized before the try
+    # so the unexpected-error handler can reference it even if the failure
+    # happens before user_context is parsed.
+    audit_display_username = "unknown"
 
     try:
         # Extract user context
         user_context = request.user_context
         username = user_context.get("username")
         user_scopes = user_context.get("scopes", [])
+        # Human-readable identity for the audit record (email ->
+        # preferred_username -> username). `username` still drives the
+        # deprecated username_hash and all auth/vault logic unchanged.
+        audit_display_username = (
+            user_context.get("email")
+            or user_context.get("preferred_username")
+            or username
+            or "anonymous"
+        )
 
         if not username:
             raise HTTPException(
@@ -3189,13 +3797,14 @@ async def generate_user_token(
                 request_id=mint_request_id,
                 correlation_id=correlation_id,
                 username=username,
+                display_username=audit_display_username,
                 auth_method=user_context.get("auth_method", "unknown"),
                 provider=user_context.get("provider"),
                 internal_caller=caller,
                 token_kind=(TokenKind.RESOURCE.value if request.resource else TokenKind.USER.value),
                 resource_type=(request.resource.type.value if request.resource else None),
                 resource_id=(request.resource.id if request.resource else None),
-                token_path="unknown",
+                token_path="unknown",  # nosec B106 - audit metadata label, not a credential
                 requested_scopes=request.requested_scopes,
                 expires_in_seconds=None,
                 outcome="failure",
@@ -3300,13 +3909,14 @@ async def generate_user_token(
                 request_id=mint_request_id,
                 correlation_id=correlation_id,
                 username=username,
+                display_username=audit_display_username,
                 auth_method=auth_method,
                 provider=provider,
                 internal_caller=caller,
                 token_kind=(TokenKind.RESOURCE.value if request.resource else TokenKind.USER.value),
                 resource_type=(request.resource.type.value if request.resource else None),
                 resource_id=(request.resource.id if request.resource else None),
-                token_path="self_signed",
+                token_path="self_signed",  # nosec B106 - audit metadata label, not a credential
                 requested_scopes=requested_scopes,
                 expires_in_seconds=expires_in,
                 outcome="success",
@@ -3365,10 +3975,11 @@ async def generate_user_token(
                 request_id=mint_request_id,
                 correlation_id=correlation_id,
                 username=username,
+                display_username=audit_display_username,
                 auth_method=auth_method or "m2m",
                 provider=provider,
                 internal_caller=caller,
-                token_kind="user",
+                token_kind="user",  # nosec B106 - audit metadata label, not a credential
                 resource_type=None,
                 resource_id=None,
                 token_path="m2m",
@@ -3393,10 +4004,11 @@ async def generate_user_token(
                 request_id=mint_request_id,
                 correlation_id=correlation_id,
                 username=username,
+                display_username=audit_display_username,
                 auth_method=auth_method or "m2m",
                 provider=provider,
                 internal_caller=caller,
-                token_kind="user",
+                token_kind="user",  # nosec B106 - audit metadata label, not a credential
                 resource_type=None,
                 resource_id=None,
                 token_path="m2m",
@@ -3407,7 +4019,8 @@ async def generate_user_token(
             )
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to generate token: {e}",
+                # Generic detail: the internal error is logged above.
+                detail="Failed to generate token",
                 headers={"Connection": "close"},
             )
 
@@ -3419,13 +4032,14 @@ async def generate_user_token(
             request_id=mint_request_id,
             correlation_id=correlation_id,
             username=username,
+            display_username=audit_display_username,
             auth_method=auth_method,
             provider=provider,
             internal_caller=caller,
-            token_kind="unknown",
+            token_kind="unknown",  # nosec B106 - audit metadata label, not a credential
             resource_type=None,
             resource_id=None,
-            token_path="unknown",
+            token_path="unknown",  # nosec B106 - audit metadata label, not a credential
             requested_scopes=[],
             expires_in_seconds=None,
             outcome="failure",
@@ -3520,7 +4134,16 @@ def main():
     logger.info(f"Starting simplified auth server on {args.host}:{args.port}")
     logger.info(f"Default region: {args.region}")
 
-    uvicorn.run(app, host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="*")
+    # Loopback-only: trust forwarded headers only from a local peer so
+    # request.client can never be set from a caller-supplied X-Forwarded-For.
+    # See docker/auth-entrypoint.sh for the full rationale.
+    uvicorn.run(
+        app,
+        host=args.host,
+        port=args.port,
+        proxy_headers=True,
+        forwarded_allow_ips="127.0.0.1,::1",
+    )
 
 
 if __name__ == "__main__":
@@ -3635,6 +4258,21 @@ def get_mcp_logger() -> MCPLogger | None:
                         logger.warning(f"Failed to initialize MCP audit MongoDB repository: {e}")
                         mongodb_enabled = False
 
+                # Durability guard (fail closed), same posture as the registry
+                # process (registry/main.py). The auth-server owns the
+                # token-mint audit trail — the most forensically critical
+                # records (who was issued which scoped token, when) — so a
+                # silent degradation to a non-durable (or dropped) trail here is
+                # exactly the repudiation gap the guard closes. Refuse to
+                # initialize the logger when AUDIT_LOG_REQUIRE_DURABLE is set and
+                # no durable sink is available, instead of quietly logging to
+                # nowhere. Re-raised below so it fails startup rather than being
+                # swallowed as a generic init failure.
+                enforce_durable_audit_sink(
+                    durable_sink_available=mongodb_enabled,
+                    require_durable=getattr(settings, "audit_log_require_durable", True),
+                )
+
                 _mcp_audit_logger = AuditLogger(
                     log_dir=settings.audit_log_dir,
                     rotation_hours=settings.audit_log_rotation_hours,
@@ -3650,6 +4288,11 @@ def get_mcp_logger() -> MCPLogger | None:
                 )
             else:
                 logger.info("MCP audit logging is disabled")
+        except NonDurableAuditError:
+            # Fail closed: a required-but-unavailable durable audit sink must
+            # stop the process, not degrade to a silent no-op logger. Do not
+            # swallow into the generic handler below.
+            raise
         except Exception as e:
             logger.warning(f"Failed to initialize MCP audit logger: {e}")
             _mcp_logger = None
@@ -4033,7 +4676,10 @@ async def oauth2_callback(
                             token_data["access_token"], user_pool_id, client_id, region
                         )
 
-                        logger.info(f"Token validation result: {token_validation}")
+                        logger.debug(
+                            "Cognito token validation succeeded (groups=%d)",
+                            len(token_validation.get("groups", []) or []),
+                        )
 
                         # Extract user info from token validation
                         mapped_user = {
@@ -4042,9 +4688,14 @@ async def oauth2_callback(
                                 "username"
                             ),  # Cognito username is usually email
                             "name": token_validation.get("username"),
+                            "subject": token_validation.get("sub")
+                            or token_validation.get("username"),
                             "groups": token_validation.get("groups", []),
                         }
-                        logger.info(f"User extracted from JWT token: {mapped_user}")
+                        logger.info(
+                            "User extracted from Cognito JWT token: %s",
+                            safe_identity_summary(mapped_user),
+                        )
                     else:
                         logger.warning(
                             "Missing Cognito configuration for JWT validation, falling back to userInfo"
@@ -4060,7 +4711,10 @@ async def oauth2_callback(
                         id_token_claims = _verify_id_token_or_deny(
                             "keycloak", token_data["id_token"], expected_nonce=expected_nonce
                         )
-                        logger.info(f"ID token claims: {id_token_claims}")
+                        logger.info(
+                            "Keycloak ID token verified: %s",
+                            safe_identity_summary(id_token_claims),
+                        )
 
                         # Extract user info from ID token claims
                         mapped_user = {
@@ -4069,9 +4723,13 @@ async def oauth2_callback(
                             "email": id_token_claims.get("email"),
                             "name": id_token_claims.get("name")
                             or id_token_claims.get("given_name"),
+                            "subject": id_token_claims.get("sub"),
                             "groups": id_token_claims.get("groups", []),
                         }
-                        logger.info(f"User extracted from Keycloak ID token: {mapped_user}")
+                        logger.info(
+                            "User extracted from Keycloak ID token: %s",
+                            safe_identity_summary(mapped_user),
+                        )
                     else:
                         logger.warning(
                             "No ID token found in Keycloak response, falling back to userInfo"
@@ -4089,9 +4747,17 @@ async def oauth2_callback(
                 # Fallback to userInfo endpoint (only reached when there is no
                 # id_token to verify, or for non-verification config errors).
                 user_info = await get_user_info(token_data["access_token"], provider_config)
-                logger.info(f"Raw user info from {provider}: {user_info}")
+                logger.info(
+                    "User info fetched from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(user_info),
+                )
                 mapped_user = map_user_info(user_info, provider_config)
-                logger.info(f"Mapped user info from userInfo: {mapped_user}")
+                logger.info(
+                    "User mapped from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(mapped_user),
+                )
         elif provider == "entra":
             # For Entra ID, prioritize ID token claims over userinfo endpoint
             try:
@@ -4104,7 +4770,10 @@ async def oauth2_callback(
                     id_token_claims = _verify_id_token_or_deny(
                         "entra", token_data["id_token"], expected_nonce=expected_nonce
                     )
-                    logger.info(f"Entra ID token claims: {id_token_claims}")
+                    logger.info(
+                        "Entra ID token verified: %s",
+                        safe_identity_summary(id_token_claims),
+                    )
 
                     # Extract user info from ID token claims
                     # Entra ID can return groups as either 'groups' or 'roles' depending on configuration
@@ -4134,9 +4803,13 @@ async def oauth2_callback(
                         "email": id_token_claims.get("email")
                         or id_token_claims.get("preferred_username"),
                         "name": id_token_claims.get("name") or id_token_claims.get("given_name"),
+                        "subject": id_token_claims.get("sub"),
                         "groups": groups,
                     }
-                    logger.info(f"User extracted from Entra ID token: {mapped_user}")
+                    logger.info(
+                        "User extracted from Entra ID token: %s",
+                        safe_identity_summary(mapped_user),
+                    )
                 else:
                     logger.warning("No ID token found in Entra response, falling back to userInfo")
                     raise ValueError("Missing ID token")
@@ -4149,9 +4822,17 @@ async def oauth2_callback(
                 )
                 # Fallback to userInfo endpoint (only when no id_token present).
                 user_info = await get_user_info(token_data["access_token"], provider_config)
-                logger.info(f"Raw user info from {provider}: {user_info}")
+                logger.info(
+                    "User info fetched from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(user_info),
+                )
                 mapped_user = map_user_info(user_info, provider_config)
-                logger.info(f"Mapped user info from userInfo: {mapped_user}")
+                logger.info(
+                    "User mapped from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(mapped_user),
+                )
         elif provider == "okta":
             # For Okta, verify the ID token to get groups (userinfo doesn't include groups)
             try:
@@ -4162,7 +4843,10 @@ async def oauth2_callback(
                     id_token_claims = _verify_id_token_or_deny(
                         "okta", token_data["id_token"], expected_nonce=expected_nonce
                     )
-                    logger.info(f"Okta ID token claims: {id_token_claims}")
+                    logger.info(
+                        "Okta ID token verified: %s",
+                        safe_identity_summary(id_token_claims),
+                    )
 
                     mapped_user = {
                         "username": id_token_claims.get("preferred_username")
@@ -4170,9 +4854,13 @@ async def oauth2_callback(
                         or id_token_claims.get("sub"),
                         "email": id_token_claims.get("email"),
                         "name": id_token_claims.get("name") or id_token_claims.get("given_name"),
+                        "subject": id_token_claims.get("sub"),
                         "groups": id_token_claims.get("groups", []),
                     }
-                    logger.info(f"User extracted from Okta ID token: {mapped_user}")
+                    logger.info(
+                        "User extracted from Okta ID token: %s",
+                        safe_identity_summary(mapped_user),
+                    )
                 else:
                     logger.warning("No ID token found in Okta response, falling back to userInfo")
                     raise ValueError("Missing ID token")
@@ -4184,9 +4872,17 @@ async def oauth2_callback(
                     f"Okta ID token parsing failed: {e}, falling back to userInfo endpoint"
                 )
                 user_info = await get_user_info(token_data["access_token"], provider_config)
-                logger.info(f"Raw user info from {provider}: {user_info}")
+                logger.info(
+                    "User info fetched from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(user_info),
+                )
                 mapped_user = map_user_info(user_info, provider_config)
-                logger.info(f"Mapped user info from userInfo: {mapped_user}")
+                logger.info(
+                    "User mapped from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(mapped_user),
+                )
         elif provider == "auth0":
             # For Auth0, delegate ID token parsing to the Auth0Provider
             # which verifies signature/issuer/audience against the Auth0 JWKS
@@ -4210,7 +4906,10 @@ async def oauth2_callback(
                         raise HTTPException(
                             status_code=401, detail="ID token verification failed"
                         ) from e
-                    logger.info(f"User extracted from Auth0 ID token: {mapped_user}")
+                    logger.info(
+                        "User extracted from Auth0 ID token: %s",
+                        safe_identity_summary(mapped_user),
+                    )
                 else:
                     logger.warning("No ID token found in Auth0 response, falling back to userInfo")
                     raise ValueError("Missing ID token")
@@ -4223,9 +4922,17 @@ async def oauth2_callback(
                 )
                 # Fallback to userInfo endpoint (only when no id_token present).
                 user_info = await get_user_info(token_data["access_token"], provider_config)
-                logger.info(f"Raw user info from {provider}: {user_info}")
+                logger.info(
+                    "User info fetched from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(user_info),
+                )
                 mapped_user = map_user_info(user_info, provider_config)
-                logger.info(f"Mapped user info from userInfo: {mapped_user}")
+                logger.info(
+                    "User mapped from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(mapped_user),
+                )
         elif provider == "pingfederate":
             # For PingFederate, verify the ID token to get groups
             try:
@@ -4236,7 +4943,10 @@ async def oauth2_callback(
                     id_token_claims = _verify_id_token_or_deny(
                         "pingfederate", token_data["id_token"], expected_nonce=expected_nonce
                     )
-                    logger.info(f"PingFederate ID token claims: {id_token_claims}")
+                    logger.info(
+                        "PingFederate ID token verified: %s",
+                        safe_identity_summary(id_token_claims),
+                    )
 
                     groups_claim_name = os.getenv("PINGFEDERATE_GROUPS_CLAIM", "groups")
                     mapped_user = {
@@ -4245,9 +4955,13 @@ async def oauth2_callback(
                         or id_token_claims.get("sub"),
                         "email": id_token_claims.get("email"),
                         "name": id_token_claims.get("name") or id_token_claims.get("given_name"),
+                        "subject": id_token_claims.get("sub"),
                         "groups": id_token_claims.get(groups_claim_name, []),
                     }
-                    logger.info(f"User extracted from PingFederate ID token: {mapped_user}")
+                    logger.info(
+                        "User extracted from PingFederate ID token: %s",
+                        safe_identity_summary(mapped_user),
+                    )
                 else:
                     logger.warning(
                         "No ID token found in PingFederate response, falling back to userInfo"
@@ -4261,9 +4975,17 @@ async def oauth2_callback(
                     f"PingFederate ID token parsing failed: {e}, falling back to userInfo endpoint"
                 )
                 user_info = await get_user_info(token_data["access_token"], provider_config)
-                logger.info(f"Raw user info from {provider}: {user_info}")
+                logger.info(
+                    "User info fetched from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(user_info),
+                )
                 mapped_user = map_user_info(user_info, provider_config)
-                logger.info(f"Mapped user info from userInfo: {mapped_user}")
+                logger.info(
+                    "User mapped from %s userInfo: %s",
+                    provider,
+                    safe_identity_summary(mapped_user),
+                )
         else:
             # For other providers (e.g. GitHub, which is OAuth2, not OIDC, and
             # never returns an id_token), use the userInfo endpoint: the
@@ -4277,9 +4999,17 @@ async def oauth2_callback(
             # verification nor nonce binding and must not be used to trust
             # claims lifted from an unverified id_token.
             user_info = await get_user_info(token_data["access_token"], provider_config)
-            logger.info(f"Raw user info from {provider}: {user_info}")
+            logger.info(
+                "User info fetched from %s userInfo: %s",
+                provider,
+                safe_identity_summary(user_info),
+            )
             mapped_user = map_user_info(user_info, provider_config)
-            logger.info(f"Mapped user info: {mapped_user}")
+            logger.info(
+                "User mapped from %s userInfo: %s",
+                provider,
+                safe_identity_summary(mapped_user),
+            )
 
         # Issue #1127: PingFederate (and any IdP in the fallback allow-list)
         # may return an empty groups claim because group memberships are not
@@ -4310,11 +5040,11 @@ async def oauth2_callback(
                 if enriched != session_groups:
                     logger.info(
                         "Session groups enriched at OAuth2 callback for user "
-                        "'%s' (provider=%s): %s -> %s",
+                        "'%s' (provider=%s): %d -> %d group(s)",
                         mapped_user["username"],
                         provider,
-                        session_groups,
-                        enriched,
+                        len(session_groups),
+                        len(enriched),
                     )
                     session_groups = enriched
         except Exception as e:
@@ -4355,6 +5085,7 @@ async def oauth2_callback(
             auth_method="oauth2",
             max_age_seconds=session_max_age,
             id_token=token_data.get("id_token"),
+            subject=mapped_user.get("subject"),
         )
         registry_session = signer.dumps(session_id)
 
@@ -4496,13 +5227,19 @@ def map_user_info(user_info: dict, provider_config: dict) -> dict:
         "username": user_info.get(provider_config["username_claim"]),
         "email": user_info.get(provider_config["email_claim"]),
         "name": user_info.get(provider_config["name_claim"]),
+        # OIDC subject: stable across id_tokens and access_tokens for the same
+        # (user, app) on every provider. Persisted into the session so the egress
+        # vault can key on it consistently (see canonical_egress_user); "sub" is
+        # the standard claim name across IdPs.
+        "subject": user_info.get("sub"),
         "groups": [],
     }
 
     # Handle groups if provider supports them
     groups_claim = provider_config.get("groups_claim")
     logger.info(f"Looking for groups claim (configured={'yes' if groups_claim else 'no'})")
-    logger.info(f"Available claims in user_info: {list(user_info.keys())}")
+    # Log claim NAMES only, never their values (userInfo carries email/name/PII).
+    logger.debug(f"Available claim names in user_info: {sorted(user_info.keys())}")
 
     if groups_claim and groups_claim in user_info:
         groups = user_info[groups_claim]
@@ -4510,7 +5247,7 @@ def map_user_info(user_info: dict, provider_config: dict) -> dict:
             mapped["groups"] = groups
         elif isinstance(groups, str):
             mapped["groups"] = [groups]
-        logger.info(f"Found groups via {groups_claim}: {mapped['groups']}")
+        logger.info(f"Found {len(mapped['groups'])} group(s) via claim '{groups_claim}'")
     else:
         # Try alternative group claims for Cognito
         for possible_group_claim in ["cognito:groups", "groups", "custom:groups"]:
@@ -4521,13 +5258,14 @@ def map_user_info(user_info: dict, provider_config: dict) -> dict:
                 elif isinstance(groups, str):
                     mapped["groups"] = [groups]
                 logger.info(
-                    f"Found groups via alternative claim {possible_group_claim}: {mapped['groups']}"
+                    f"Found {len(mapped['groups'])} group(s) via "
+                    f"alternative claim '{possible_group_claim}'"
                 )
                 break
 
         if not mapped["groups"]:
             logger.warning(
-                f"No groups found in user_info. Available fields: {list(user_info.keys())}"
+                f"No groups found in user_info. Available claim names: {sorted(user_info.keys())}"
             )
 
     return mapped
@@ -4785,6 +5523,12 @@ def _forward_headers(
         if lower == "x-upstream-url":
             # Never leak this internal routing header to the upstream.
             continue
+        if lower in ("x-body", "x-body-uninspectable"):
+            # Gateway-internal body-capture headers set by capture_body.lua for
+            # the /validate hop. Their value is the raw request body, which is
+            # not a legal HTTP header value (braces/spaces) and must never be
+            # forwarded to the upstream.
+            continue
         if lower in ("x-authorization", "cookie"):
             # Ingress-only credentials; never forwarded to any upstream.
             continue
@@ -4873,6 +5617,93 @@ async def _vend_egress_token(
 _ELICITATION_PERMITTED_METHODS: frozenset[str] = frozenset(
     {"tools/call", "prompts/get", "resources/read"}
 )
+
+
+def _ingress_subject_token(request: "Request") -> str:
+    """Extract the raw ingress JWT to use as the OBO exchange subject.
+
+    nginx forwards both ``X-Authorization`` and ``Authorization`` to this hop.
+    Precedence matches /validate (X-Authorization first), then Authorization.
+    Returns "" when neither carries a bearer token -- e.g. session-cookie or
+    M2M callers, for which OBO is impossible (the caller must use a JWT).
+    """
+    for header in ("X-Authorization", "Authorization"):
+        raw = request.headers.get(header, "")
+        if raw and raw.lower().startswith("bearer "):
+            return raw[len("bearer ") :].strip()
+    return ""
+
+
+def _obo_subject_matches_principal(subject_token: str, internal_claims: dict) -> bool:
+    """True if the OBO subject token belongs to the /validate-authorized principal.
+
+    The internal mcp-proxy token (``internal_claims``) is minted at /validate with
+    ``subject == validation_result["username"]``. For an Entra ingress JWT that
+    username is ``preferred_username`` (falling back to ``sub``); for other paths
+    it is ``sub``. So we accept a match against EITHER the subject token's
+    ``preferred_username`` or its ``sub`` -- whichever the provider used to derive
+    the authorized username. This re-checks that the raw subject token we are
+    about to exchange identifies the SAME principal the internal token authorized,
+    removing reliance on the implicit "nginx forwards the same header to both the
+    auth_request subrequest and this hop" invariant.
+
+    The subject token's signature was already verified by /validate; here we only
+    read identity claims (unverified decode) to compare. A missing internal
+    principal, no matching claim, or an undecodable token fails closed.
+    """
+    principal = (internal_claims or {}).get("sub") or ""
+    if not principal:
+        return False
+    try:
+        subject_claims = jwt.decode(subject_token, options={"verify_signature": False})
+    except jwt.InvalidTokenError:
+        return False
+    candidates = {
+        str(subject_claims.get("preferred_username") or ""),
+        str(subject_claims.get("sub") or ""),
+    }
+    candidates.discard("")
+    return principal in candidates
+
+
+def _obo_failure_reason(exc: OboExchangeError) -> str:
+    """Map a typed OBO exchange error to a short, stable audit failure_reason.
+
+    Mirrors the typed hierarchy in egress_obo so audit consumers can group by
+    failure class (re-auth vs consent vs config vs unsupported-idp) without
+    parsing the free-text detail.
+    """
+    if isinstance(exc, OboReauthRequired):
+        return "reauth_required"
+    if isinstance(exc, OboConsentRequired):
+        return "consent_required"
+    if isinstance(exc, OboConfigError):
+        return "config_error"
+    if isinstance(exc, OboUnsupportedIdpError):
+        return "unsupported_idp"
+    return "exchange_failed"
+
+
+def _obo_error_response(req_id: object, detail: str):
+    """Terminal JSON-RPC error for an obo_exchange failure.
+
+    Unlike the oauth_user consent path, obo_exchange is non-interactive: there is
+    no browser login an agent can perform mid-tool-call. A failure is terminal,
+    so we surface a plain JSON-RPC error (NOT a -32042 URL elicitation, which a
+    client would try to satisfy by opening a connect URL that does not exist).
+    """
+    return JSONResponse(
+        status_code=200,
+        content={
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {
+                "code": -32001,
+                "message": "obo_exchange_failed",
+                "data": {"detail": detail},
+            },
+        },
+    )
 
 
 # Protocol version the gateway advertises when it answers `initialize` locally
@@ -5099,6 +5930,130 @@ def _select_forwarded_response_headers(
     return selected
 
 
+async def _authorize_forwarded_mcp_body(
+    server_name: str,
+    request_body: bytes,
+    user_scopes: list[str],
+) -> None:
+    """Re-authorize the caller's scopes against the EXACT body being forwarded.
+
+    The nginx /validate hop authorizes on a separately-captured copy of the
+    request body (the ``X-Body`` header built by ``capture_body.lua``). That
+    copy can diverge from the body this handler actually forwards upstream --
+    e.g. when the body spills to an on-disk temp file, nginx captures no
+    ``X-Body`` and /validate falls back to treating the request as the
+    unprivileged ``initialize`` method while a privileged ``tools/call`` body
+    is forwarded. To close that gap, we authorize the forwarded bytes here,
+    independently of whatever /validate saw.
+
+    Fail-closed rules:
+      * A non-empty body that cannot be parsed as a JSON-RPC object is
+        rejected -- we cannot determine the scope-relevant method, so we must
+        not forward it.
+      * A body with no ``method`` (or an empty body) is treated as the
+        ``initialize`` method, mirroring the /validate default so an
+        unauthenticated-for-this-server caller is still denied.
+      * ``tools/call`` requires the specific tool named in ``params.name`` to
+        be allowed; a missing/blank tool name is rejected.
+
+    Args:
+        server_name: The full ``/mcp-proxy/{server_name:path}`` value. The
+            registered server name (scope key) is derived from it the same way
+            /validate derives it from X-Original-URL, so both hops authorize
+            against the identical key.
+        request_body: The exact bytes being forwarded to the upstream.
+        user_scopes: The scopes from the verified X-Internal-Token claims.
+
+    Raises:
+        HTTPException: 403 when the forwarded body is not authorized by the
+            caller's scopes, or when the body is present but cannot be parsed
+            to determine the scope-relevant method/tool.
+    """
+    # Strip only a trailing MCP transport segment (mcp/sse/messages) so the
+    # scope key matches what /validate authorized against -- including federated
+    # "peer/server" keys, which the naive first-segment split would truncate.
+    registered_server = _registered_server_from_proxy_path(server_name)
+
+    method: str | None = None
+    actual_tool_name: str | None = None
+
+    if request_body:
+        try:
+            payload = json.loads(request_body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "mcp_proxy: rejecting forwarded body for server=%s that is not "
+                "parseable JSON-RPC (cannot authorize): %s",
+                registered_server,
+                exc,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Request body could not be authorized",
+                headers={"Connection": "close"},
+            ) from exc
+
+        if isinstance(payload, dict):
+            method = payload.get("method")
+            if method == "tools/call":
+                params = payload.get("params")
+                if isinstance(params, dict):
+                    actual_tool_name = params.get("name")
+        else:
+            # A well-formed JSON value that is not a JSON-RPC object (e.g. a
+            # bare array/string/number) has no method we can authorize.
+            logger.warning(
+                "mcp_proxy: rejecting forwarded body for server=%s that is not "
+                "a JSON-RPC object (type=%s)",
+                registered_server,
+                type(payload).__name__,
+            )
+            raise HTTPException(
+                status_code=403,
+                detail="Request body could not be authorized",
+                headers={"Connection": "close"},
+            )
+
+    # Mirror /validate: absent method defaults to the unprivileged
+    # "initialize" so a caller with no scope on this server is still denied.
+    effective_method = method or "initialize"
+
+    if not user_scopes:
+        logger.warning(
+            "mcp_proxy: access denied to %s.%s (tool=%s) -- no scopes in token",
+            registered_server,
+            effective_method,
+            actual_tool_name,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied: no scopes configured",
+            headers={"Connection": "close"},
+        )
+
+    if not await validate_server_tool_access(
+        registered_server, effective_method, actual_tool_name, user_scopes
+    ):
+        logger.warning(
+            "mcp_proxy: access denied to %s.%s (tool=%s) on forwarded body",
+            registered_server,
+            effective_method,
+            actual_tool_name,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail=f"Access denied to {registered_server}.{effective_method}",
+            headers={"Connection": "close"},
+        )
+
+    logger.debug(
+        "mcp_proxy: forwarded-body authorization passed for %s.%s (tool=%s)",
+        registered_server,
+        effective_method,
+        actual_tool_name,
+    )
+
+
 @app.post("/mcp-proxy/{server_name:path}", dependencies=[Depends(verify_mcp_proxy_token)])
 async def mcp_proxy(
     server_name: str,
@@ -5206,7 +6161,131 @@ async def mcp_proxy(
         if internal_proxy_token:
             server_first_segment = (server_name or "").split("/", 1)[0]
             vend = await _vend_egress_token(internal_proxy_token, server_first_segment)
-            if vend and vend.get("access_token"):
+            if vend and vend.get("mode") == "obo_exchange":
+                # OBO exchange: re-audience the user's ingress JWT to the internal
+                # MCP server's app via the gateway's OWN IdP credentials. The
+                # registry returned only the DIRECTIVE (target_audience+scopes),
+                # never a token; the exchange runs HERE because this hop holds the
+                # raw ingress JWT and the gateway's IdP client creds. This branch
+                # is FIRST: the directive has no access_token, so it must not fall
+                # through to the vault-hit / consent checks below.
+                req_id = incoming_payload.get("id") if isinstance(incoming_payload, dict) else None
+                subject_token = _ingress_subject_token(request)
+                if not subject_token:
+                    # No raw JWT (session-cookie / M2M caller): OBO is impossible.
+                    # Terminal error, never a consent affordance.
+                    logger.warning(
+                        "mcp_proxy: obo_exchange server=%s but no bearer ingress JWT; "
+                        "rejecting (session-cookie/M2M caller cannot do OBO)",
+                        server_name,
+                    )
+                    return _obo_error_response(
+                        req_id, "OBO exchange requires a bearer JWT on the ingress request"
+                    )
+                # Bind the OBO assertion to the authorized principal. /validate
+                # authorized this request and minted the internal token over the
+                # ingress token's `sub`; the internal token is verified (claims,
+                # above) but does NOT carry the ingress token itself. Rather than
+                # rely solely on nginx forwarding the same header to both the
+                # auth_request subrequest and this hop, re-check that the raw
+                # subject token we are about to exchange belongs to the same
+                # principal the internal token authorized. Signature was already
+                # verified at /validate; here we only compare the `sub` claim.
+                if not _obo_subject_matches_principal(subject_token, claims):
+                    logger.warning(
+                        "mcp_proxy: obo_exchange server=%s subject-token principal does not "
+                        "match the /validate-authorized principal; refusing to exchange",
+                        server_name,
+                    )
+                    return _obo_error_response(
+                        req_id, "OBO subject token does not match the authorized principal"
+                    )
+                # Audit context for the OBO mint. This is a per-user delegated
+                # token mint (the exchanged token bakes in the caller's `sub`),
+                # so it is attributable in the same audit stream as the 3LO vault
+                # vend: actor principal, target server, scopes, outcome. The
+                # username is the /validate-authorized principal (the internal
+                # token's `sub`); _emit_token_mint_audit hashes it before storing.
+                obo_principal = str((claims or {}).get("sub") or "")
+                obo_auth_method = str((claims or {}).get("auth_method") or "") or "unknown"
+                obo_target_audience = vend.get("obo_target_audience") or ""
+                obo_scopes = vend.get("obo_scopes") or []
+                # Human-readable identity for the audit record. The internal
+                # proxy claims carry only `sub`; the raw ingress JWT (already
+                # signature-verified at /validate) carries email/preferred_
+                # username, so decode it unverified here purely to surface a
+                # contactable identity. Falls back to the sub principal.
+                try:
+                    _obo_ingress_claims = jwt.decode(
+                        subject_token, options={"verify_signature": False}
+                    )
+                except jwt.InvalidTokenError:
+                    _obo_ingress_claims = {}
+                # `username=obo_principal` makes the sub the fallback (ahead of
+                # the resolver's "anonymous"), so a token missing email/
+                # preferred_username still records the sub, not "anonymous".
+                obo_display = _audit_identity_display(
+                    {"data": _obo_ingress_claims, "username": obo_principal}
+                )
+                try:
+                    obo_token = await obo_exchange(
+                        get_auth_provider(),
+                        subject_token=subject_token,
+                        target_audience=obo_target_audience,
+                        scopes=obo_scopes,
+                    )
+                except OboExchangeError as exc:
+                    logger.warning(
+                        "mcp_proxy: obo_exchange failed for server=%s: %s", server_name, exc
+                    )
+                    await _emit_token_mint_audit(
+                        request_id=str(uuid.uuid4()),
+                        correlation_id=None,
+                        username=obo_principal,
+                        display_username=obo_display,
+                        auth_method=obo_auth_method,
+                        provider=settings.auth_provider,
+                        internal_caller="mcp-proxy",
+                        token_kind=TokenKind.USER.value,
+                        resource_type="server",
+                        resource_id=server_first_segment,
+                        token_path="obo_exchange",  # nosec B106 - audit metadata label, not a credential
+                        requested_scopes=list(obo_scopes),
+                        expires_in_seconds=None,
+                        outcome="failure",
+                        failure_reason=_obo_failure_reason(exc),
+                    )
+                    return _obo_error_response(req_id, str(exc))
+                await _emit_token_mint_audit(
+                    request_id=str(uuid.uuid4()),
+                    correlation_id=None,
+                    username=obo_principal,
+                    display_username=obo_display,
+                    auth_method=obo_auth_method,
+                    provider=settings.auth_provider,
+                    internal_caller="mcp-proxy",
+                    token_kind=TokenKind.USER.value,
+                    resource_type="server",
+                    resource_id=server_first_segment,
+                    token_path="obo_exchange",  # nosec B106 - audit metadata label, not a credential
+                    requested_scopes=list(obo_scopes),
+                    expires_in_seconds=None,
+                    outcome="success",
+                )
+                # Reuse the egress strip+inject: drop the user's gateway creds /
+                # internal identity headers before injecting the exchanged token.
+                forward_headers = {
+                    k: v
+                    for k, v in forward_headers.items()
+                    if k.lower() not in _EGRESS_STRIP_HEADERS
+                }
+                forward_headers["Authorization"] = f"Bearer {obo_token}"
+                # We injected an egress token (the exchanged OBO token). Mark it so
+                # that if the upstream still 401s, its foreign WWW-Authenticate /
+                # resource_metadata is dropped rather than relayed to the client
+                # (same cross-resource-PRM protection as the vaulted-token path).
+                egress_token_injected = True
+            elif vend and vend.get("access_token"):
                 # Token is vaulted (consent done): strip the user's gateway
                 # credentials/identity and inject the vaulted upstream token.
                 forward_headers = {
@@ -5278,6 +6357,18 @@ async def mcp_proxy(
                     req_id=req_id,
                     vend=vend,
                 )
+
+    # Re-authorize the caller's scopes against the EXACT body we are about to
+    # forward upstream. /validate authorizes on a separately-captured copy
+    # (X-Body) that can diverge from this body (e.g. a large body that spilled to
+    # disk, which /validate then treats as an unprivileged "initialize"), so we
+    # authorize the forwarded bytes here and fail closed on any body we cannot
+    # parse (TM-15). This runs AFTER the egress-consent block above so methods the
+    # gateway answers LOCALLY for a tokenless egress server (initialize,
+    # notifications/*, tools/list, tools/call consent) are never gated here --
+    # they are not forwarded upstream. Only the request we actually forward is
+    # re-authorized. Raises 403 before the outbound call.
+    await _authorize_forwarded_mcp_body(server_name, request_body, user_scopes)
 
     logger.info(
         f"mcp_proxy: server={server_name} method={incoming_method} filter_enabled={filter_enabled} timeout={proxy_timeout}"

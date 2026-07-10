@@ -56,6 +56,9 @@ coverage.xml
 cover/
 tests/reports/
 frontend/tests/reports/
+# pytest report artifacts from the agents/a2a subproject (its own test runs)
+agents/a2a/tests/reports/
+agents/a2a/src/*/tests/reports/
 
 # Translations
 *.mo
@@ -137,6 +140,9 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+# Allow committed env EXAMPLES (never real .env). Covers variants like
+# .env.ecs.example / .env.local.example that .env.* would otherwise ignore.
+!.env.*.example
 .env.backup
 .env.user
 .env.docker
@@ -152,6 +158,12 @@ credentials-provider/agentcore-auth/config.yaml
 credentials-provider/oauth/config.yaml
 cli/examples/peer-registry-lob-1.json
 cli/examples/peer-sales-registry.json
+
+# One-time credential dumps written by management/CLI helpers to the CWD.
+# These hold a freshly-minted API key / M2M client secret and must never be
+# committed; operators are told to delete them after use.
+.api_key_*.txt
+.m2m_client_secret_*.txt
 .venv
 env/
 venv/
@@ -455,3 +467,6 @@ docker-compose.override.yml
 
 # Local MCP connect command with bearer token (never commit)
 .mcp
+
+# Generated landing page (built by scripts/build_landing_page.py in CI)
+site/

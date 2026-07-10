@@ -27,11 +27,8 @@
 #   AWS_REGION                    AWS region (default: us-east-1)
 #   KEYCLOAK_ADMIN_PASSWORD       Keycloak admin password (or loaded from SSM)
 #   INITIAL_ADMIN_PASSWORD        Password for admin user in mcp-gateway realm
-#
-# Optional Environment Variables:
-#   INITIAL_USER_PASSWORD         Password for testuser (default: testpass)
-#   LOB1_USER_PASSWORD            Password for lob1-user (default: lob1pass)
-#   LOB2_USER_PASSWORD            Password for lob2-user (default: lob2pass)
+#   LOB1_USER_PASSWORD            Password for lob1-user (required, no default)
+#   LOB2_USER_PASSWORD            Password for lob2-user (required, no default)
 #
 ################################################################################
 
@@ -217,7 +214,7 @@ _validate_terraform_outputs() {
         "keycloak_url"
         "mcp_gateway_efs_id"
     )
-    
+
     # Note: registry_url is only set in custom domain mode
     # cloudfront_mcp_gateway_url is only set in CloudFront mode
     # At least one of these should be available for a valid deployment
@@ -246,11 +243,11 @@ _validate_terraform_outputs() {
         export KEYCLOAK_ADMIN_URL=$(jq -r '.keycloak_url.value' "$OUTPUTS_FILE")
         export AUTH_SERVER_EXTERNAL_URL=$(jq -r '.mcp_gateway_auth_url.value' "$OUTPUTS_FILE")
         export ECS_CLUSTER_NAME=$(jq -r '.ecs_cluster_name.value' "$OUTPUTS_FILE")
-        
+
         # REGISTRY_URL: prefer custom domain, fallback to CloudFront URL
         local registry_url=$(jq -r '.registry_url.value // empty' "$OUTPUTS_FILE")
         local cloudfront_url=$(jq -r '.cloudfront_mcp_gateway_url.value // empty' "$OUTPUTS_FILE")
-        
+
         if [[ -n "$registry_url" && "$registry_url" != "null" ]]; then
             export REGISTRY_URL="$registry_url"
         elif [[ -n "$cloudfront_url" && "$cloudfront_url" != "null" ]]; then
@@ -260,7 +257,7 @@ _validate_terraform_outputs() {
             export REGISTRY_URL=$(jq -r '.mcp_gateway_url.value' "$OUTPUTS_FILE")
             log_warning "Using ALB URL as REGISTRY_URL (no HTTPS configured)"
         fi
-        
+
         # Also export CloudFront URL if available (for init-keycloak.sh)
         if [[ -n "$cloudfront_url" && "$cloudfront_url" != "null" ]]; then
             export CLOUDFRONT_REGISTRY_URL="$cloudfront_url"
@@ -457,7 +454,7 @@ _initialize_keycloak() {
     # Try to load INITIAL_ADMIN_PASSWORD from Secrets Manager if not set
     if [[ -z "${INITIAL_ADMIN_PASSWORD:-}" ]]; then
         log_info "INITIAL_ADMIN_PASSWORD not set, attempting to load from Secrets Manager..."
-        
+
         # Find the admin password secret by name pattern (mcp-gateway-v2-admin-password-*)
         local secret_name
         secret_name=$(aws secretsmanager list-secrets \
@@ -465,14 +462,14 @@ _initialize_keycloak() {
             --filter Key=name,Values=mcp-gateway-v2-admin-password \
             --query 'SecretList[0].Name' \
             --output text 2>/dev/null)
-        
+
         if [[ -n "$secret_name" && "$secret_name" != "None" ]]; then
             INITIAL_ADMIN_PASSWORD=$(aws secretsmanager get-secret-value \
                 --secret-id "$secret_name" \
                 --region "$AWS_REGION" \
                 --query 'SecretString' \
                 --output text 2>/dev/null)
-            
+
             if [[ -n "$INITIAL_ADMIN_PASSWORD" ]]; then
                 export INITIAL_ADMIN_PASSWORD
                 log_success "Loaded INITIAL_ADMIN_PASSWORD from Secrets Manager ($secret_name)"
@@ -485,6 +482,17 @@ _initialize_keycloak() {
         log_error "INITIAL_ADMIN_PASSWORD could not be loaded from Secrets Manager."
         log_error "Either set it manually or ensure the secret exists:"
         log_error "  export INITIAL_ADMIN_PASSWORD='YourSecurePassword123'"
+        STEPS_FAILED=$((STEPS_FAILED + 1))
+        return 1
+    fi
+
+    # SA-9: init-keycloak.sh now requires explicit LOB user passwords (no weak
+    # defaults). Fail early here with a clear message rather than mid-run.
+    if [[ -z "${LOB1_USER_PASSWORD:-}" || -z "${LOB2_USER_PASSWORD:-}" ]]; then
+        log_error "LOB1_USER_PASSWORD and LOB2_USER_PASSWORD are required (no default)."
+        log_error "Export both before running post-deployment setup, e.g.:"
+        log_error "  export LOB1_USER_PASSWORD='YourSecurePassword1'"
+        log_error "  export LOB2_USER_PASSWORD='YourSecurePassword2'"
         STEPS_FAILED=$((STEPS_FAILED + 1))
         return 1
     fi

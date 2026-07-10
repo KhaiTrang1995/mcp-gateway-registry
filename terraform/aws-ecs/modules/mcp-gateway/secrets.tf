@@ -479,6 +479,35 @@ resource "aws_secretsmanager_secret_version" "metrics_api_key" {
   secret_string = random_password.metrics_api_key[0].result
 }
 
+# Metrics API-key HMAC pepper. The metrics-service peppers stored API-key hashes
+# with this per-deployment secret and refuses to start unless it is present and
+# high-entropy. Generated (not operator-supplied) so a fresh deploy does not
+# fail closed; hex output keeps it length-safe (>= 32 chars) with no special
+# characters. Rotating it invalidates existing API-key hashes -- re-issue keys.
+resource "random_password" "metrics_key_pepper" {
+  count   = var.enable_observability ? 1 : 0
+  length  = 64
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "metrics_key_pepper" {
+  #checkov:skip=CKV2_AWS_57:Application-generated pepper - rotation invalidates existing API-key hashes and requires re-issuing keys
+  count = var.enable_observability ? 1 : 0
+
+  name_prefix             = "${local.name_prefix}-metrics-key-pepper-"
+  description             = "Per-deployment HMAC pepper for metrics-service API-key hashing"
+  recovery_window_in_days = 0
+  kms_key_id              = aws_kms_key.secrets.id
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "metrics_key_pepper" {
+  count = var.enable_observability ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.metrics_key_pepper[0].id
+  secret_string = random_password.metrics_key_pepper[0].result
+}
+
 # Grafana admin password (issue #1325). Previously injected as a plaintext
 # container env value, exposing it via `aws ecs describe-task-definition` and in
 # Terraform state. Now stored in Secrets Manager and referenced via valueFrom so

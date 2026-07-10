@@ -27,7 +27,7 @@ The MCP Gateway Registry implements a sophisticated fine-grained access control 
 - Uses hierarchical scope validation for precise permission control
 - Follows the principle of least privilege by default
 
-The access control system is stored in DocumentDB / MongoDB (the `mcp_scopes` collection) and enforced by the validation logic in [`auth_server/server.py`](../auth_server/server.py). Default scopes are seeded at initialization time from the JSON seed files in [`scripts/`](../scripts/) (for example `registry-admins.json` and `federation-service.json`); additional scopes can be created through the scope management API. The legacy `scopes.yml` file was removed in v1.24.8.
+The access control system is stored in DocumentDB / MongoDB (the `mcp_scopes` collection) and enforced by the validation logic in [`auth_server/server.py`](../auth_server/server.py). Default scopes are seeded at initialization time from the JSON seed files in [`scripts/`](../scripts) (for example `registry-admins.json` and `federation-service.json`); additional scopes can be created through the scope management API. The legacy `scopes.yml` file was removed in v1.24.8.
 
 ## Scope System Architecture
 
@@ -35,7 +35,7 @@ The access control system is stored in DocumentDB / MongoDB (the `mcp_scopes` co
 
 The access control system consists of three main components:
 
-1. **Scope Configuration** (the `mcp_scopes` collection in DocumentDB / MongoDB, seeded from the JSON files in [`scripts/`](../scripts/)): Defines all available scopes and their permissions
+1. **Scope Configuration** (the `mcp_scopes` collection in DocumentDB / MongoDB, seeded from the JSON files in [`scripts/`](../scripts)): Defines all available scopes and their permissions
 2. **Group Mappings**: Maps Amazon Cognito groups to both UI and server scopes
 3. **Validation Engine** ([`auth_server/server.py`](../auth_server/server.py)): Enforces access control decisions
 
@@ -230,7 +230,7 @@ The scope validation is implemented in the [`validate_server_tool_access()`](../
 def validate_server_tool_access(server_name: str, method: str, tool_name: str, user_scopes: List[str]) -> bool:
     """
     Validate if the user has access to the specified server method/tool based on scopes.
-    
+
     Returns True if access is allowed, False otherwise
     """
 ```
@@ -281,7 +281,7 @@ Grant Access   Continue to next scope
 Create a basic user with read-only access to specific servers. The examples
 below use YAML for readability; the equivalent scope documents are stored in
 the DocumentDB `mcp_scopes` collection (one document per scope, keyed by `_id`)
-and can be seeded from a JSON file in [`scripts/`](../scripts/) or created via
+and can be seeded from a JSON file in [`scripts/`](../scripts) or created via
 the scope management API:
 
 ```yaml

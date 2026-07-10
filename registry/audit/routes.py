@@ -270,8 +270,7 @@ class AuditStatisticsResponse(BaseModel):
     activity_timeline_prior: list[TimeSeriesBucket] = Field(
         default_factory=list,
         description=(
-            "Daily event counts for the prior window of equal length, "
-            "for week-over-week overlay"
+            "Daily event counts for the prior window of equal length, for week-over-week overlay"
         ),
     )
     status_distribution: StatusDistribution = Field(
@@ -462,7 +461,10 @@ def _build_query(
         # Escape special regex characters in the username
         escaped_username = re.escape(username)
         if stream == "token_mint":
-            query["username_hash"] = {"$regex": escaped_username, "$options": "i"}
+            # token_mint now stores the raw, human-readable `username` (email ->
+            # preferred_username -> sub); `username_hash` is deprecated. Match the
+            # raw field; pre-reconciliation records without it simply won't match.
+            query["username"] = {"$regex": escaped_username, "$options": "i"}
         else:
             query["identity.username"] = {"$regex": escaped_username, "$options": "i"}
 
@@ -547,7 +549,7 @@ async def get_filter_options(
 
     repository = get_audit_repository()
 
-    username_field = "username_hash" if stream == "token_mint" else "identity.username"
+    username_field = "username" if stream == "token_mint" else "identity.username"
     usernames = await repository.distinct(username_field, query)
 
     server_names: list[str] = []
@@ -609,8 +611,8 @@ async def get_statistics(
         escaped_username = re.escape(username)
         if stream == "token_mint":
             username_filter = {"$regex": escaped_username, "$options": "i"}
-            base_match["username_hash"] = username_filter
-            prior_match["username_hash"] = username_filter
+            base_match["username"] = username_filter
+            prior_match["username"] = username_filter
         else:
             username_filter = {"$regex": f"^{escaped_username}$", "$options": "i"}
             base_match["identity.username"] = username_filter
@@ -619,10 +621,12 @@ async def get_statistics(
     repository = get_audit_repository()
 
     # Build all pipelines upfront
-    user_field = "$username_hash" if stream == "token_mint" else "$identity.username"
+    user_field = "$username" if stream == "token_mint" else "$identity.username"
     op_field = (
-        "$token_kind" if stream == "token_mint"
-        else "$mcp_request.method" if stream == "mcp_access"
+        "$token_kind"
+        if stream == "token_mint"
+        else "$mcp_request.method"
+        if stream == "mcp_access"
         else "$action.operation"
     )
 
@@ -757,7 +761,7 @@ async def get_statistics(
             )
         )
 
-    results = await asyncio.gather(*tasks)
+    results: list[Any] = await asyncio.gather(*tasks)
 
     # Unpack results
     total_events = results[0]
@@ -1019,7 +1023,7 @@ async def _compute_executive_summary(
     maa_match = _window_match(now - timedelta(days=30), now, agent_filter)
 
     # Run all independent queries concurrently
-    results = await asyncio.gather(
+    results: list[Any] = await asyncio.gather(
         _count_distinct_usernames(repository, cur_window),
         repository.distinct("mcp_server.name", cur_mcp),
         repository.distinct("mcp_request.tool_name", cur_mcp),

@@ -36,6 +36,7 @@ import argparse
 import base64
 import json
 import logging
+import os
 import sys
 import time
 from datetime import UTC, datetime
@@ -154,8 +155,14 @@ def _save_token_file(token_file_path: Path, token_data: dict[str, Any]) -> None:
         token_data: Token data dictionary
     """
     try:
-        with open(token_file_path, "w") as f:
+        # Create the file atomically with owner-only (0600) permissions; the
+        # payload carries a JWT access token, so it must never be briefly
+        # world/group-readable (a plain open() honors the process umask, which
+        # is commonly 0644).
+        fd = os.open(str(token_file_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(token_data, f, indent=2)
+        os.chmod(token_file_path, 0o600)  # enforce 0600 even if the file pre-existed
         logger.info(f"Saved updated tokens to: {token_file_path}")
     except OSError as e:
         logger.error(f"Failed to save token file: {e}")

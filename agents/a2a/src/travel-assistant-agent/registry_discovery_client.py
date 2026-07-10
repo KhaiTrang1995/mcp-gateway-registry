@@ -77,8 +77,9 @@ class RegistryDiscoveryClient:
             try:
                 async with session.post(token_url, data=data) as response:
                     if response.status != 200:
-                        error_text = await response.text()
-                        logger.error(f"Token request failed: {response.status} - {error_text}")
+                        # Do not log the response body: a token-endpoint error
+                        # can echo client_id or partial credential context.
+                        logger.error(f"Token request failed: HTTP {response.status} (body omitted)")
                         raise Exception(f"Failed to get token: {response.status}")
 
                     token_data = await response.json()
@@ -114,7 +115,10 @@ class RegistryDiscoveryClient:
 
         token = await self._get_token()
         discovery_url = f"{self.registry_url}/api/agents/discover/semantic"
-        headers = {"Authorization": f"Bearer {token}", "Host": "localhost"}
+        # Do NOT override Host: the client derives it from registry_url. A hardcoded
+        # "localhost" is rejected (403) by a real CDN/ALB (e.g. CloudFront) that
+        # matches on the distribution host.
+        headers = {"Authorization": f"Bearer {token}"}
         # This endpoint uses query parameters, not JSON body
         params = {"query": query, "max_results": max_results}
 
@@ -137,10 +141,6 @@ class RegistryDiscoveryClient:
                     logger.info(f"Found {len(agents)} agents")
 
                     return agents
-
-            except aiohttp.ClientError as e:
-                logger.error(f"Network error during discovery: {e}")
-                raise Exception(f"Network error: {e}")
 
             except aiohttp.ClientError as e:
                 logger.error(f"Network error during discovery: {e}")

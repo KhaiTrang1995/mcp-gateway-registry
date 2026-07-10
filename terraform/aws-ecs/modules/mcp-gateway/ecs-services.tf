@@ -220,6 +220,14 @@ module "ecs_service_auth" {
           value = var.okta_auth_server_id
         },
         {
+          name  = "OKTA_M2M_ALLOWED_AUDIENCES"
+          value = var.okta_m2m_allowed_audiences
+        },
+        {
+          name  = "OKTA_M2M_CLIENT_GROUPS"
+          value = var.okta_m2m_client_groups
+        },
+        {
           name  = "AUTH0_DOMAIN"
           value = var.auth0_domain
         },
@@ -238,6 +246,10 @@ module "ecs_service_auth" {
         {
           name  = "AUTH0_M2M_CLIENT_ID"
           value = var.auth0_m2m_client_id
+        },
+        {
+          name  = "AUTH0_M2M_CLIENT_GROUPS"
+          value = var.auth0_m2m_client_groups
         },
         {
           name  = "AUTH0_MANAGEMENT_API_TOKEN"
@@ -277,12 +289,24 @@ module "ecs_service_auth" {
           value = var.pingfederate_groups_claim
         },
         {
+          name  = "PINGFEDERATE_M2M_ALLOWED_AUDIENCES"
+          value = var.pingfederate_m2m_allowed_audiences
+        },
+        {
           name  = "SESSION_COOKIE_SECURE"
           value = tostring(var.session_cookie_secure)
         },
         {
           name  = "SESSION_COOKIE_DOMAIN"
           value = var.session_cookie_domain
+        },
+        {
+          name  = "TRUSTED_PROXY_HOPS"
+          value = tostring(var.trusted_proxy_hops)
+        },
+        {
+          name  = "TRUSTED_EXTERNAL_HOSTS"
+          value = var.trusted_external_hosts
         },
         {
           name  = "REGISTRY_STATIC_TOKEN_AUTH_ENABLED"
@@ -385,6 +409,10 @@ module "ecs_service_auth" {
         {
           name  = "AUDIT_LOG_MONGODB_TTL_DAYS"
           value = tostring(var.audit_log_ttl_days)
+        },
+        {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
         },
         {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
@@ -910,6 +938,14 @@ module "ecs_service_registry" {
           value = var.okta_auth_server_id
         },
         {
+          name  = "OKTA_M2M_ALLOWED_AUDIENCES"
+          value = var.okta_m2m_allowed_audiences
+        },
+        {
+          name  = "OKTA_M2M_CLIENT_GROUPS"
+          value = var.okta_m2m_client_groups
+        },
+        {
           name  = "AUTH0_ENABLED"
           value = tostring(var.auth0_enabled)
         },
@@ -932,6 +968,10 @@ module "ecs_service_registry" {
         {
           name  = "AUTH0_M2M_CLIENT_ID"
           value = var.auth0_m2m_client_id
+        },
+        {
+          name  = "AUTH0_M2M_CLIENT_GROUPS"
+          value = var.auth0_m2m_client_groups
         },
         {
           name  = "AUTH0_MANAGEMENT_API_TOKEN"
@@ -965,6 +1005,10 @@ module "ecs_service_registry" {
         {
           name  = "PINGFEDERATE_GROUPS_CLAIM"
           value = var.pingfederate_groups_claim
+        },
+        {
+          name  = "PINGFEDERATE_M2M_ALLOWED_AUDIENCES"
+          value = var.pingfederate_m2m_allowed_audiences
         },
         # PingFederate Admin API (registry only; PF_ADMIN_PASS via Secrets Manager below)
         {
@@ -1016,6 +1060,22 @@ module "ecs_service_registry" {
         {
           name  = "SESSION_COOKIE_DOMAIN"
           value = var.session_cookie_domain
+        },
+        {
+          name  = "TRUSTED_PROXY_HOPS"
+          value = tostring(var.trusted_proxy_hops)
+        },
+        {
+          name  = "TRUSTED_EXTERNAL_HOSTS"
+          value = var.trusted_external_hosts
+        },
+        {
+          # Trusted proxy CIDRs for nginx real-IP recovery (set_real_ip_from).
+          # nginx runs in the registry container, so this is registry-only. Empty
+          # by default; set to the VPC CIDR when behind an ALB to record the real
+          # client IP instead of the load balancer's internal address.
+          name  = "TRUSTED_REAL_IP_CIDRS"
+          value = var.trusted_real_ip_cidrs
         },
         {
           name  = "CORS_ALLOWED_ORIGINS"
@@ -1159,6 +1219,10 @@ module "ecs_service_registry" {
           value = tostring(var.audit_log_ttl_days)
         },
         {
+          name  = "AUDIT_LOG_REQUIRE_DURABLE"
+          value = tostring(var.audit_log_require_durable)
+        },
+        {
           name  = "APP_LOG_CENTRALIZED_ENABLED"
           value = tostring(var.app_log_centralized_enabled)
         },
@@ -1259,6 +1323,24 @@ module "ecs_service_registry" {
         {
           name  = "REGISTRY_MODE"
           value = var.registry_mode
+        },
+        # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled
+        # A2A agent gets nginx location blocks proxying its card + JSON-RPC.
+        {
+          name  = "A2A_REVERSE_PROXY_ENABLED"
+          value = tostring(var.a2a_reverse_proxy_enabled)
+        },
+        # SSRF guard bypass for internal upstreams at private IPs. The health
+        # checker and proxy validate each MCP-server / A2A-agent upstream URL
+        # through the SSRF guard, which blocks private IPs by default. List exact
+        # hosts or CIDR ranges; the cloud metadata address is never permitted.
+        {
+          name  = "SSRF_ALLOWED_HOSTS"
+          value = var.ssrf_allowed_hosts
+        },
+        {
+          name  = "SSRF_ALLOWED_CIDRS"
+          value = var.ssrf_allowed_cidrs
         },
         # Internal/workshop deployment classification (telemetry labels; issue #1216)
         {
@@ -1534,6 +1616,14 @@ module "ecs_service_registry" {
         {
           name  = "EGRESS_STATE_TTL_SECONDS"
           value = tostring(var.egress_state_ttl_seconds)
+        },
+        # obo_exchange target_audience allowlist (whitespace-separated). When set,
+        # the authoritative positive control; when empty a shape rule applies
+        # (api:// App ID URI / bare client-id only, no https host URLs), so shared
+        # first-party APIs (Graph/ARM/Key Vault) are rejected at registration.
+        {
+          name  = "EGRESS_OBO_ALLOWED_AUDIENCES"
+          value = var.egress_obo_allowed_audiences
         },
         # AUTH_SERVER_NGINX_MARKER_SECRET is injected via secrets/valueFrom below
         # (required unconditionally, not just for egress).

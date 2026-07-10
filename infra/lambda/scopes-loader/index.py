@@ -10,6 +10,7 @@ Env:
   DOCUMENTDB_SECRET_ARN  (Secrets Manager ARN with username/password keys)
   SCOPES_YML             (full YAML content, inlined at synth time)
 """
+
 import json
 import logging
 import os
@@ -23,7 +24,9 @@ log.setLevel(logging.INFO)
 
 
 def _connect():
-    secret = boto3.client("secretsmanager").get_secret_value(SecretId=os.environ["DOCUMENTDB_SECRET_ARN"])
+    secret = boto3.client("secretsmanager").get_secret_value(
+        SecretId=os.environ["DOCUMENTDB_SECRET_ARN"]
+    )
     creds = json.loads(secret["SecretString"])
     uri = (
         f"mongodb://{creds['username']}:{creds['password']}@"
@@ -42,9 +45,16 @@ def handler(event, _context):
     if event.get("debug"):
         namespace = os.environ.get("DOCUMENTDB_NAMESPACE", "default")
         coll = _connect()[f"mcp_scopes_{namespace}"]
-        return {"docs": [{"_id": d["_id"], "group_mappings": d.get("group_mappings", []),
-                          "ui_permissions_keys": list(d.get("ui_permissions", {}).keys())}
-                         for d in coll.find({})]}
+        return {
+            "docs": [
+                {
+                    "_id": d["_id"],
+                    "group_mappings": d.get("group_mappings", []),
+                    "ui_permissions_keys": list(d.get("ui_permissions", {}).keys()),
+                }
+                for d in coll.find({})
+            ]
+        }
 
     # Mirrors Terraform's `scopes-init` busybox task: ship scopes.yml to EFS
     # so the auth-server reads the canonical file. Failure aborts the deploy.

@@ -1,6 +1,6 @@
 import re
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -13,6 +13,295 @@ _IMAGE_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 
 
 _RFC7230_TOKEN_RE = re.compile(r"[A-Za-z0-9!#$%&'*+\-.^_`|~]+")
+
+
+# A registered server path is interpolated into generated nginx config (location
+# directives, `set` directives, regex maps) and into per-server discovery URLs.
+# Restrict it to a safe slug so a hostile value can never carry nginx
+# metacharacters (quotes, semicolons, braces, whitespace, newlines, backslashes)
+# that could break out of a directive/string context. Allowed: alphanumerics and
+# `-` `_` `.` `/` (multi-segment paths, optional leading/trailing slash -- the
+# registration write path normalizes the leading slash, and some callers build
+# ServerInfo with the bare segment). This is the systemic guard behind the
+# per-site nginx sanitization in NginxConfigService (defense-in-depth: reject the
+# dangerous character class at the model, escape at every render site).
+_SERVER_PATH_RE = re.compile(r"^[A-Za-z0-9._\-/]+$")
+
+
+# obo_exchange target-audience GUID handling. A GUID could be an internal server's
+# app id OR a Microsoft first-party resource, so form matters:
+#   - A BARE GUID is how first-party resources are DIRECTLY addressable (Graph
+#     00000003-..., ARM 797f4846-..., Key Vault cfa8b339-..., Storage, SQL, ...).
+#     The set cannot be enumerated safely, so ANY bare GUID is rejected by shape
+#     and only permitted via the operator allowlist (EGRESS_OBO_ALLOWED_AUDIENCES).
+#   - The ``api://<guid>`` form is Entra's standard auto-generated App ID URI for a
+#     CUSTOM (tenant-local) app, so it is accepted by shape -- with one caveat: we
+#     do NOT rely on the assumption that Entra never scheme-normalizes
+#     ``api://<appId>`` to a bare-GUID first-party service-principal-name match.
+#     As defense-in-depth we still reject the ``api://`` form of the KNOWN
+#     first-party app-id GUIDs below, so the documented confused-deputy targets
+#     (Graph/ARM/Key Vault) are blocked in both bare and api:// spellings even if
+#     that normalization exists. A genuinely-GUID first-party resource outside
+#     this set would still require the operator to have granted the gateway app
+#     delegated permissions on it AND to register the obo server for it.
+_GUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# Known Microsoft first-party resource app-id GUIDs -- rejected as an obo target in
+# BOTH bare and ``api://<guid>`` forms (see _GUID_RE comment). These are also an
+# ALWAYS-ON floor: EGRESS_OBO_ALLOWED_AUDIENCES cannot re-enable them (see
+# _is_first_party_obo_audience / _is_disallowed_obo_audience). There is no
+# legitimate reason to OBO-exchange into Graph/ARM/Key Vault and forward that
+# broad delegated token to an MCP server's upstream -- that IS the confused deputy
+# the control exists to stop -- so the operator override does not extend to them.
+_FIRST_PARTY_APPID_GUIDS: frozenset[str] = frozenset(
+    {
+        "00000003-0000-0000-c000-000000000000",  # Microsoft Graph
+        "00000002-0000-0000-c000-000000000000",  # Azure AD Graph (legacy)
+        "797f4846-ba00-4fd7-ba43-dac1f8f63013",  # Azure Resource Manager
+        "cfa8b339-82a2-471a-a3c9-0fc0be7a4093",  # Azure Key Vault
+    }
+)
+
+# Host portions of the same first-party resources' canonical https:// audiences,
+# for the always-on floor (an allowlisted 'https://graph.microsoft.com' must still
+# be blocked). Matched against the target's host regardless of scheme/port/path.
+_FIRST_PARTY_HOSTS: frozenset[str] = frozenset(
+    {
+        "graph.microsoft.com",
+        "graph.microsoft.us",  # GCC-High / DoD
+        "dod-graph.microsoft.us",
+        "graph.microsoft.de",  # legacy Germany
+        "microsoftgraph.chinacloudapi.cn",  # China
+        "management.azure.com",
+        "management.core.windows.net",
+        "management.usgovcloudapi.net",
+        "management.chinacloudapi.cn",
+        "vault.azure.net",
+        "vault.usgovcloudapi.net",
+        "vault.azure.cn",
+        "vault.microsoftazure.de",
+    }
+)
+
+
+def _is_first_party_obo_audience(target: str) -> bool:
+    """True if ``target`` names a blocked first-party resource in ANY form.
+
+    Detects Microsoft Graph / Azure AD Graph / ARM / Key Vault whether expressed
+    as a bare app-id GUID, an ``api://<guid>`` URI, or an ``http(s)://<host>``
+    URL (any port/path). This is the ALWAYS-ON floor: it is checked before the
+    operator allowlist, so ``EGRESS_OBO_ALLOWED_AUDIENCES`` cannot re-enable these.
+    ``target`` must already be lowercased/stripped.
+    """
+    # api://<guid> or bare guid
+    bare = target[len("api://") :] if target.startswith("api://") else target
+    if bare in _FIRST_PARTY_APPID_GUIDS:
+        return True
+    # http(s)://<host>[:port][/...] -- extract the host and compare.
+    if target.startswith("https://") or target.startswith("http://"):
+        rest = target.split("://", 1)[1]
+        host = rest.split("/", 1)[0].split(":", 1)[0]
+        if host in _FIRST_PARTY_HOSTS:
+            return True
+    return False
+
+
+# The authority of an accepted ``api://<authority>`` target, and the accepted bare
+# (schemeless) client-id form. Deliberately narrow so the shape rule fails CLOSED:
+# only these two shapes are ever accepted; every other/unknown form is dropped.
+# Allowed chars are those Entra App ID URIs and Keycloak client-ids actually use
+# (alphanumerics and ``. _ - :`` for host:port-style App ID URIs). No slashes,
+# quotes, whitespace, or scheme markers -- so ``spiffe://x``, ``urn:uuid:...``,
+# ``{guid}``, ``http(s)://...`` etc. never match.
+_OBO_API_AUTHORITY_RE = re.compile(r"^[A-Za-z0-9._:-]+$")
+_OBO_BARE_CLIENT_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _gateway_own_client_id() -> str:
+    """The gateway's own IdP client id, resolved by the configured auth provider.
+
+    Used to reject an obo_exchange target_audience that points back at the
+    gateway's own app (a same-app OBO is not a valid exchange). Returns "" when
+    the provider's client id is not configured (then no same-app check applies).
+    """
+    from registry.core.config import settings
+
+    provider = (settings.auth_provider or "").lower()
+    if provider == "entra":
+        return settings.entra_client_id or ""
+    if provider == "keycloak":
+        return settings.keycloak_client_id or ""
+    return ""
+
+
+def _gateway_own_audiences() -> set[str]:
+    """All audience forms that refer to the gateway's own IdP app.
+
+    Includes the bare client id, the Entra ``api://<client_id>`` App ID URI, and
+    the gateway's own public resource URL (``registry_url``, which is an App ID
+    URI the gateway app owns and advertises in its PRM). Covering these means a
+    same-app OBO cannot be smuggled past the check by using a non-client-id
+    audience form the gateway app also owns. Returned lower-cased for
+    case-insensitive comparison (Entra audiences are GUIDs/URIs, not
+    case-sensitive).
+    """
+    from registry.core.config import settings
+
+    own = _gateway_own_client_id().strip().lower()
+    auds: set[str] = set()
+    if own:
+        auds.add(own)
+        auds.add(f"api://{own}")
+    # The gateway's own public resource URL is an audience of the gateway app
+    # (advertised in its PRM as the gateway-wide resource), so a target_audience
+    # equal to it is still a same-app OBO (Entra rejects it at runtime).
+    registry_url = (getattr(settings, "registry_url", "") or "").strip().lower()
+    if registry_url:
+        auds.add(registry_url)
+        auds.add(registry_url.rstrip("/"))
+    return auds
+
+
+def _is_gateway_own_audience(target_audience: str) -> bool:
+    """True if target_audience refers to the gateway's own IdP app.
+
+    Matches the bare client id, the Entra ``api://<client_id>`` App ID URI form,
+    and any configured gateway App ID URI, case-insensitively.
+    """
+    own = _gateway_own_audiences()
+    if not own:
+        return False
+    target = target_audience.strip().lower()
+    return target in own or target.rstrip("/") in own
+
+
+def _obo_audience_allowlist() -> set[str]:
+    """Operator allowlist of permitted obo_exchange target_audience values.
+
+    From ``EGRESS_OBO_ALLOWED_AUDIENCES`` (whitespace-separated). When non-empty
+    it is the authoritative positive control: only these exact audiences (compared
+    case-insensitively, trailing slash ignored) may be registered. Empty => the
+    shape heuristic in :func:`_is_disallowed_obo_audience` applies instead.
+    """
+    from registry.core.config import settings
+
+    raw = getattr(settings, "egress_obo_allowed_audiences", "") or ""
+    return {a.strip().lower().rstrip("/") for a in raw.split() if a.strip()}
+
+
+def _is_disallowed_obo_audience(target_audience: str) -> bool:
+    """True if target_audience is not an acceptable obo_exchange target.
+
+    An obo target must be an internal MCP server's OWN IdP audience, never a
+    shared first-party resource (Microsoft Graph / ARM / Key Vault / any sovereign
+    cloud), or the exchange would mint a broadly-scoped delegated token and forward
+    it to the server's upstream (confused-deputy token exfiltration).
+
+    A denylist of hosts/GUIDs cannot express this (new first-party hosts, ports,
+    path suffixes, sovereign clouds, and the full first-party app-id GUID set all
+    evade it), so this is a positive control that fails closed:
+
+    0. A fixed set of first-party resources (Graph/ARM/Key Vault, in any form) is
+       ALWAYS disallowed, checked before the operator allowlist -- the allowlist
+       cannot re-enable them.
+    1. If the operator set ``EGRESS_OBO_ALLOWED_AUDIENCES``, the target must be in
+       that exact set (authoritative for everything not blocked by (0)). Anything
+       else is disallowed.
+    2. Otherwise a shape allowlist: ONLY two shapes are accepted, everything else
+       (unknown schemes, host URLs, bare GUIDs, braced/urn forms, garbage) is
+       disallowed:
+         a. ``api://<authority>`` where the authority is a well-formed token --
+            an Entra App ID URI for an internal server. This is the standard form,
+            INCLUDING the auto-generated ``api://<app-guid>`` (e.g.
+            ``api://aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee``): an ``api://`` string
+            names a custom (tenant-local) app registration, so no per-server
+            allowlist entry is required for the normal case. As defense-in-depth we
+            still reject the ``api://`` form of the KNOWN first-party app-id GUIDs
+            (Graph/ARM/Key Vault -- see _FIRST_PARTY_APPID_GUIDS), so the documented
+            confused-deputy targets are blocked in both bare and api:// spellings
+            regardless of Entra's internal SPN-matching semantics.
+         b. a bare, schemeless non-GUID client-id token (Keycloak -- e.g.
+            ``outlook-mcp-client``).
+       A BARE GUID is NOT accepted by shape -- that IS how first-party resources
+       are directly addressable (Graph 00000003-..., ARM 797f4846-..., ...), and
+       the set is not safely enumerable -- so a bare-GUID target must be pinned via
+       the operator allowlist in (1). ``http(s)://`` hosts (all shared first-party
+       APIs) and every unrecognized form fail the allowlist and are dropped.
+    """
+    target = target_audience.strip().lower().rstrip("/")
+    if not target:
+        # Empty is handled as "missing" by the caller; not this function's job.
+        return False
+
+    # Always-on floor (checked BEFORE the operator allowlist): the fixed set of
+    # first-party resources (Graph/ARM/Key Vault, any spelling) are never a valid
+    # obo target, and EGRESS_OBO_ALLOWED_AUDIENCES cannot re-enable them. There is
+    # no legitimate reason to OBO-exchange into them and forward that broad
+    # delegated token to an MCP server's upstream.
+    if _is_first_party_obo_audience(target):
+        return True
+
+    allowlist = _obo_audience_allowlist()
+    if allowlist:
+        return target not in allowlist
+
+    # Shape allowlist (no operator allowlist). Fail closed: disallowed UNLESS the
+    # target matches one of exactly two accepted shapes.
+    if target.startswith("api://"):
+        authority = target[len("api://") :]
+        # Reject a malformed/empty authority. (The api:// form of the blocked
+        # first-party GUIDs is already handled by the always-on floor above.)
+        if not _OBO_API_AUTHORITY_RE.match(authority):
+            return True
+        # Any well-formed api:// authority (a named App ID URI or the auto-generated
+        # api://<guid> for a custom app) is accepted.
+        return False
+    # No scheme: accept only a bare non-GUID client-id token; reject a BARE GUID
+    # (directly addresses a first-party resource) or any value carrying a scheme
+    # marker / disallowed characters.
+    if "://" in target or ":" in target:
+        return True
+    if _GUID_RE.match(target):
+        return True
+    return not bool(_OBO_BARE_CLIENT_ID_RE.match(target))
+
+
+def _obo_scope_resource(scope: str) -> str:
+    """The resource prefix a requested OBO scope grants against.
+
+    Entra scopes are ``<resource>/<permission>`` (e.g.
+    ``api://outlook-mcp-server/.default`` or ``https://graph.microsoft.com/User.Read``).
+    The resource is the scope minus the final permission segment; a scope with no
+    permission segment is its own resource. The ``scheme://`` prefix is split off
+    first so the authority's ``//`` is never mistaken for the permission separator
+    (otherwise ``api://app`` would wrongly yield ``api:/``).
+    """
+    s = scope.strip().rstrip("/")
+    if "://" in s:
+        scheme, _, rest = s.partition("://")
+        # Strip only a trailing permission segment AFTER the authority.
+        if "/" in rest:
+            return f"{scheme}://{rest.rsplit('/', 1)[0]}"
+        return s  # bare scheme://authority (no permission segment)
+    # No scheme (bare client-id / GUID): strip a trailing permission if present.
+    if "/" in s:
+        return s.rsplit("/", 1)[0]
+    return s
+
+
+def _obo_scope_mismatches_target(scope: str, target_audience: str) -> bool:
+    """True if a requested OBO scope grants against a resource other than the target.
+
+    The exchange engine (auth_server.egress_obo) sends ``egress_oauth.scopes``
+    verbatim when present, IGNORING target_audience. So an unvalidated scope like
+    ``https://graph.microsoft.com/.default`` would exchange for a Graph token even
+    when target_audience is a benign internal app. We bind every scope to the
+    validated target: the scope's resource prefix must equal target_audience (both
+    normalized). This is what keeps the target check meaningful.
+    """
+    resource = _obo_scope_resource(scope).lower().rstrip("/")
+    target = target_audience.strip().lower().rstrip("/")
+    return bool(resource) and resource != target
 
 
 class CustomHeader(BaseModel):
@@ -53,20 +342,42 @@ class CustomHeaderEncrypted(BaseModel):
 
 
 class EgressOAuthConfig(BaseModel):
-    """Per-server egress OAuth config for the per-user credential vault.
+    """Per-server egress OAuth config for the egress credential paths.
 
-    None on ServerInfo == no per-user egress auth. The operator supplies
-    client_id/client_secret/scopes at registration time (write path not yet
-    implemented); custom_* fields apply only when provider == 'custom'.
+    None on ServerInfo == no egress auth. Two modes share this container:
+
+    - ``oauth_user`` (3LO vault): the operator supplies
+      ``provider``/``client_id``/``client_secret``/``scopes`` at registration;
+      ``custom_*`` fields apply only when ``provider == 'custom'``.
+    - ``obo_exchange`` (same-IdP OBO): the gateway re-audiences the user's ingress
+      token to the internal MCP server's app via the gateway's OWN IdP
+      credentials. No per-server provider/client_id/secret is needed; only
+      ``target_audience`` (and audience-scoped ``scopes``) are required.
+
+    ``provider`` is therefore optional at the model level and required only for
+    ``oauth_user`` (enforced by ServerInfo's egress validator, since the mode
+    lives on ServerInfo, not here).
     """
 
-    provider: str = Field(..., description="Provider key: 'github', 'google', 'custom', ...")
+    provider: str | None = Field(
+        default=None,
+        description="Provider key ('github', 'google', 'custom', ...). Required for "
+        "oauth_user; unused for obo_exchange (same-IdP exchange uses the gateway's own IdP).",
+    )
     client_id: str = Field(default="", description="Operator-supplied OAuth app client_id.")
     client_secret_encrypted: str | None = Field(
         default=None,
         description="Fernet-encrypted client_secret. Never returned in API responses.",
     )
     scopes: list[str] = Field(default_factory=list)
+    # OBO exchange (obo_exchange mode only): the internal MCP server's audience.
+    target_audience: str | None = Field(
+        default=None,
+        description="obo_exchange only: the internal MCP server's App ID URI (Entra, "
+        "e.g. 'api://outlook-mcp-server') or client id (Keycloak). The 'aud' the gateway "
+        "requests in the OBO exchange. IdP-shaped; the exchange engine formats the request "
+        "per IdP.",
+    )
     # Custom-OIDC overrides (only when provider == 'custom')
     custom_authorize_url: str | None = None
     custom_token_url: str | None = None
@@ -363,11 +674,13 @@ class ServerInfo(BaseModel):
     # today's behavior; the registration write path is not yet implemented.
     egress_auth_mode: str = Field(
         default="none",
-        description="Egress auth to the upstream: 'none' or 'oauth_user'.",
+        description="Egress auth to the upstream: 'none', 'oauth_user' (3LO vault), "
+        "or 'obo_exchange' (same-IdP OBO).",
     )
     egress_oauth: EgressOAuthConfig | None = Field(
         default=None,
-        description="Per-user egress OAuth config; required when egress_auth_mode == 'oauth_user'.",
+        description="Egress OAuth config. Required when egress_auth_mode is 'oauth_user' "
+        "(provider/client_id/secret) or 'obo_exchange' (target_audience).",
     )
 
     # Lifecycle and federation metadata fields
@@ -392,7 +705,7 @@ class ServerInfo(BaseModel):
         description="Tags from external/source system (separate from local tags)",
     )
     deployment: Literal["remote", "local"] = Field(
-        default=DeploymentType.REMOTE,
+        default=cast(Literal["remote", "local"], DeploymentType.REMOTE),
         description=(
             "Deployment model: 'remote' (HTTP-reachable, registry proxies) or "
             "'local' (stdio, runs on developer's machine via launch recipe)."
@@ -427,6 +740,29 @@ class ServerInfo(BaseModel):
 
         return validate_visibility(v)
 
+    @field_validator("path")
+    @classmethod
+    def _validate_path(
+        cls,
+        v: str,
+    ) -> str:
+        """Reject server paths carrying nginx/URL-unsafe characters.
+
+        The path is interpolated into generated nginx config (location and `set`
+        directives, regex maps) and into per-server discovery URLs. A value with
+        a double-quote, semicolon, brace, whitespace, or newline could break out
+        of a directive/string context and inject nginx config. Restrict to a safe
+        slug (alphanumerics and ``. _ - /``) so the class of injection is
+        impossible at the source, not only escaped at each render site
+        (defense-in-depth with NginxConfigService._sanitize_for_nginx_set).
+        """
+        if not v or not _SERVER_PATH_RE.fullmatch(v):
+            raise ValueError(
+                f"invalid server path {v!r}: must be non-empty and contain only "
+                "letters, digits, '.', '_', '-', and '/'"
+            )
+        return v
+
     @model_validator(mode="after")
     def _populate_provider_default(self) -> "ServerInfo":
         """Populate default provider from config if not set."""
@@ -443,6 +779,87 @@ class ServerInfo(BaseModel):
     def _validate_deployment_consistency(self) -> "ServerInfo":
         """Enforce remote/local field invariants. See _validate_deployment_invariants."""
         _validate_deployment_invariants(self)
+        return self
+
+    @model_validator(mode="after")
+    def _validate_egress_auth(self) -> "ServerInfo":
+        """Enforce per-mode egress config invariants.
+
+        - oauth_user: requires egress_oauth with a provider (3LO needs a provider).
+        - obo_exchange: requires egress_oauth.target_audience, and that audience
+          MUST (a) differ from the gateway's own IdP client id / app ID URI (Entra
+          rejects a same-app OBO -- it is a passthrough, not an exchange), and
+          (b) not be a shared first-party IdP resource (Microsoft Graph / ARM /
+          Key Vault / ...): an obo target must be an internal MCP server's own
+          app, never a broad first-party API whose delegated token would be
+          exfiltrated to the server's upstream. Both are rejected at registration
+          rather than at the first live request.
+        """
+        mode = self.egress_auth_mode
+        if mode not in ("none", "oauth_user", "obo_exchange"):
+            raise ValueError(
+                f"invalid egress_auth_mode {mode!r}; expected 'none', 'oauth_user', "
+                "or 'obo_exchange'"
+            )
+        if mode == "none":
+            return self
+        if self.egress_oauth is None:
+            raise ValueError(f"egress_auth_mode={mode!r} requires egress_oauth config")
+        if mode == "oauth_user":
+            if not self.egress_oauth.provider:
+                raise ValueError("egress_auth_mode='oauth_user' requires egress_oauth.provider")
+            return self
+        # mode == "obo_exchange"
+        target = (self.egress_oauth.target_audience or "").strip()
+        if not target:
+            raise ValueError(
+                "egress_auth_mode='obo_exchange' requires egress_oauth.target_audience"
+            )
+        # Reject a malformed scheme audience (e.g. 'api://', 'api:/', 'api:'): a
+        # value carrying a ':' scheme separator must be a well-formed
+        # 'scheme://<non-empty-authority>'. A degenerate scheme would collapse to a
+        # bare scheme in scope-resource extraction, letting a scope for another
+        # resource appear to "match" it.
+        if ":" in target:
+            scheme, sep, rest = target.partition("://")
+            if not sep or not rest.strip() or not scheme.strip():
+                raise ValueError(
+                    f"egress_oauth.target_audience {target!r} is malformed: a scheme "
+                    "audience must be 'scheme://<authority>' with a non-empty authority "
+                    "(e.g. 'api://<app-id>')"
+                )
+        if _is_gateway_own_audience(target):
+            raise ValueError(
+                "egress_oauth.target_audience must differ from the gateway's own IdP "
+                "client id / app ID URI; same-app OBO is not a valid exchange"
+            )
+        if _is_disallowed_obo_audience(target):
+            raise ValueError(
+                f"egress_oauth.target_audience {target!r} is not an allowed obo_exchange "
+                "target. It must be an internal MCP server's own IdP audience: an "
+                "'api://...' Entra App ID URI (including the 'api://<app-guid>' form) or "
+                "a bare non-GUID client-id. It must NEVER be an 'https://' host URL or a "
+                "bare GUID, which is how a shared first-party API (Microsoft Graph, ARM, "
+                "Key Vault) is directly addressable -- a delegated token for such a "
+                "resource would be exfiltrated to the server's upstream (confused deputy). "
+                "Pin a bare-GUID audience explicitly via EGRESS_OBO_ALLOWED_AUDIENCES."
+            )
+        # Bind scopes to the target. The exchange engine sends egress_oauth.scopes
+        # verbatim (ignoring target_audience) when present, so an unvalidated scope
+        # for a different resource (e.g. https://graph.microsoft.com/.default) would
+        # defeat the target check entirely. Require every scope to grant against the
+        # validated target.
+        for scope in self.egress_oauth.scopes or []:
+            if not scope or not scope.strip():
+                raise ValueError("egress_oauth.scope entries must be non-empty")
+            if _obo_scope_mismatches_target(scope, target):
+                raise ValueError(
+                    f"egress_oauth.scope {scope!r} grants against a resource other than "
+                    f"target_audience {target!r}. obo_exchange scopes must be audience-"
+                    "scoped to the target (e.g. '<target_audience>/.default'); a scope "
+                    "for a different resource would exchange the user's token for THAT "
+                    "resource (confused deputy)."
+                )
         return self
 
 
@@ -553,6 +970,3 @@ class OAuth2Provider(BaseModel):
     name: str
     display_name: str
     icon: str | None = None
-
-
-

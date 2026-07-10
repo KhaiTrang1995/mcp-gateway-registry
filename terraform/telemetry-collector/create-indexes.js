@@ -31,4 +31,3 @@ printjson(db.heartbeat_events.getIndexes());
 print("\n=== Stored Startup Events ===");
 print("Count: " + db.startup_events.count());
 db.startup_events.find().forEach(printjson);
-

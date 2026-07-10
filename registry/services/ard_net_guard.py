@@ -46,7 +46,7 @@ _BLOCKED_NETS: list[ipaddress._BaseNetwork] = [
 ]
 
 
-def _is_blocked_ip(ip: ipaddress._BaseAddress) -> bool:
+def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     """Return True if an IP is private/loopback/link-local/reserved/blocked.
 
     IPv4-mapped IPv6 addresses (``::ffff:10.0.0.1``) are unwrapped to their

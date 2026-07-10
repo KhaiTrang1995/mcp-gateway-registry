@@ -129,7 +129,7 @@ def _get_cognito_token(
             "scope": "invoke:gateway",
         }
         # Send as JSON for Auth0
-        response_method = lambda: requests.post(url, headers=headers, json=data, timeout=30)
+        send_as_json = True
     else:
         # Cognito format
         url = f"{cognito_domain_url.rstrip('/')}/oauth2/token"
@@ -140,11 +140,14 @@ def _get_cognito_token(
             "client_secret": client_secret,
         }
         # Send as form data for Cognito
-        response_method = lambda: requests.post(url, headers=headers, data=data, timeout=30)
+        send_as_json = False
 
     try:
         # Make the request
-        response = response_method()
+        if send_as_json:
+            response = requests.post(url, headers=headers, json=data, timeout=30)
+        else:
+            response = requests.post(url, headers=headers, data=data, timeout=30)
         response.raise_for_status()  # Raise exception for bad status codes
 
         provider_type = "Auth0" if is_auth0 else "Cognito"
@@ -209,12 +212,15 @@ def _save_egress_token(
     else:
         filename = f"{provider}-egress.json"
 
-    # Save to file
+    # Save to file. Create atomically with owner-only (0600) permissions so the
+    # egress access token is never briefly world/group-readable between create
+    # and chmod.
     egress_path = tokens_dir / filename
-    with open(egress_path, "w") as f:
+    fd = os.open(str(egress_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
         json.dump(egress_data, f, indent=2)
 
-    # Set secure file permissions
+    # Enforce 0600 even if the file pre-existed with looser permissions.
     egress_path.chmod(0o600)
 
     logger.info(f"Egress token saved to {egress_path}")

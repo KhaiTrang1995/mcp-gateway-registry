@@ -50,33 +50,14 @@ docker compose up mongodb-init
 docker compose restart auth-server
 
 # 7. Initialize Keycloak (wait for Keycloak to start first)
-# Disable SSL for master realm
-ADMIN_TOKEN=$(curl -s -X POST "http://localhost:8080/realms/master/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=${KEYCLOAK_ADMIN}" \
-    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" | jq -r '.access_token') && \
-curl -X PUT "http://localhost:8080/admin/realms/master" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"sslRequired": "none"}'
+# Note: both realms ship with sslRequired=external, which requires TLS for
+# external requests but allows plaintext HTTP from loopback. These commands talk
+# to Keycloak over http://localhost, so no SSL change is needed. Do NOT set
+# sslRequired=none (that would disable TLS enforcement for external requests too).
 
 # Initialize realm and clients
 chmod +x keycloak/setup/init-keycloak.sh
 ./keycloak/setup/init-keycloak.sh
-
-# Disable SSL for application realm
-ADMIN_TOKEN=$(curl -s -X POST "http://localhost:8080/realms/master/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=${KEYCLOAK_ADMIN}" \
-    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" | jq -r '.access_token') && \
-curl -X PUT "http://localhost:8080/admin/realms/mcp-gateway" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"sslRequired": "none"}'
 
 # Get client credentials
 chmod +x keycloak/setup/get-all-client-credentials.sh
@@ -150,33 +131,14 @@ podman compose up mongodb-init
 podman compose restart auth-server
 
 # 9. Initialize Keycloak (wait for Keycloak to start first)
-# Note: Podman uses port 18080 for Keycloak
-ADMIN_TOKEN=$(curl -s -X POST "http://localhost:18080/realms/master/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=${KEYCLOAK_ADMIN}" \
-    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" | jq -r '.access_token') && \
-curl -X PUT "http://localhost:18080/admin/realms/master" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"sslRequired": "none"}'
+# Note: Podman uses port 18080 for Keycloak.
+# Both realms ship with sslRequired=external (TLS required for external requests,
+# plaintext allowed from loopback). These commands talk to Keycloak over
+# http://localhost, so no SSL change is needed. Do NOT set sslRequired=none.
 
 # Initialize realm and clients
 chmod +x keycloak/setup/init-keycloak.sh
 KEYCLOAK_URL=http://localhost:18080 ./keycloak/setup/init-keycloak.sh
-
-# Disable SSL for application realm
-ADMIN_TOKEN=$(curl -s -X POST "http://localhost:18080/realms/master/protocol/openid-connect/token" \
-    -H "Content-Type: application/x-www-form-urlencoded" \
-    -d "username=${KEYCLOAK_ADMIN}" \
-    -d "password=${KEYCLOAK_ADMIN_PASSWORD}" \
-    -d "grant_type=password" \
-    -d "client_id=admin-cli" | jq -r '.access_token') && \
-curl -X PUT "http://localhost:18080/admin/realms/mcp-gateway" \
-    -H "Authorization: Bearer $ADMIN_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d '{"sslRequired": "none"}'
 
 # Get client credentials
 chmod +x keycloak/setup/get-all-client-credentials.sh
@@ -217,7 +179,7 @@ open http://localhost:8080  # macOS
 - Network: Ports 80, 443, 7860, 8080 accessible
 
 **Recommended (Production)**:
-- EC2 Instance: `t3.2xlarge` (8 vCPU, 32GB RAM)  
+- EC2 Instance: `t3.2xlarge` (8 vCPU, 32GB RAM)
 - Storage: 50GB+ SSD
 - Network: Multi-AZ with load balancer
 
@@ -249,7 +211,7 @@ open http://localhost:8080  # macOS
    # Configure OAuth credentials
    cp credentials-provider/oauth/.env.example credentials-provider/oauth/.env
    nano credentials-provider/oauth/.env
-   
+
    # Generate tokens and client configurations
    ./credentials-provider/generate_creds.sh
    ```
@@ -260,7 +222,7 @@ open http://localhost:8080  # macOS
    curl -LsSf https://astral.sh/uv/install.sh | sh
    source $HOME/.local/bin/env
    uv venv --python 3.14 && source .venv/bin/activate
-   
+
    # Install Docker
    sudo apt-get update
    sudo apt-get install --reinstall docker.io -y
@@ -530,26 +492,26 @@ graph TB
             ALB[Application Load Balancer]
             IC[Ingress Controller]
         end
-        
+
         subgraph "Application Pods"
             RP[Registry Pod]
             AS[Auth Server Pod]
             NG[Nginx Pod]
         end
-        
+
         subgraph "MCP Servers"
             MS1[MCP Server 1]
             MS2[MCP Server 2]
             MSN[MCP Server N]
         end
     end
-    
+
     subgraph "AWS Services"
         COG[Amazon Cognito]
         CW[CloudWatch]
         ECR[Amazon ECR]
     end
-    
+
     ALB --> IC
     IC --> RP
     IC --> AS
@@ -644,7 +606,6 @@ sudo netstat -tlnp | grep -E ':(80|443|7860|8080)'
 curl -v http://localhost/health
 ```
 
-For more troubleshooting help, see [Troubleshooting Guide](troubleshooting.md).
 
 ## Next Steps
 

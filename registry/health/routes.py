@@ -36,7 +36,9 @@ async def websocket_endpoint(websocket: WebSocket):
         if not session_cookie and hasattr(websocket, "headers"):
             cookie_header = websocket.headers.get("cookie", "")
             if cookie_header:
-                logger.debug(f"WebSocket cookie header: {cookie_header}")
+                # Never log the raw Cookie header: it carries the session cookie
+                # value. Presence is enough for this diagnostic.
+                logger.debug("WebSocket cookie header present")
                 # Parse cookie header manually
                 cookies = {}
                 for cookie_pair in cookie_header.split(";"):
@@ -80,8 +82,10 @@ async def websocket_endpoint(websocket: WebSocket):
             try:
                 await asyncio.wait_for(websocket.receive_text(), timeout=30.0)
             except TimeoutError:
-                # Send ping to keep connection alive
-                await websocket.ping()
+                # No client message within the window. Starlette manages
+                # protocol-level keepalive, so just loop again and keep
+                # waiting (Starlette's WebSocket exposes no ping() method).
+                continue
 
     except WebSocketDisconnect:
         logger.debug(f"WebSocket client disconnected: {websocket.client}")

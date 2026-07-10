@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import ipaddress
 import json
 import logging
 import math
@@ -25,6 +26,17 @@ logger = logging.getLogger(__name__)
 # currently has so an operator's chmod isn't silently reverted.
 DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 
+# Route prefix under which enabled A2A agents are reverse-proxied through the
+# gateway. An agent registered at path "/flight-booking-agent" is
+# reachable at "{ROOT_PATH}/agent/flight-booking-agent/".
+AGENT_ROUTE_PREFIX: str = "/agent"
+
+# Agent path and backend url come from registry data and are interpolated into
+# nginx directive positions, so they must be validated to prevent config
+# injection (e.g. "}", ";", newlines breaking out of the location block).
+_NGINX_AGENT_PATH_SAFE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_NGINX_AGENT_URL_SAFE = re.compile(r"^https?://[A-Za-z0-9.\-]+(?::\d+)?(?:/[A-Za-z0-9._~\-/]*)?$")
+
 
 # Headroom added on top of the auth-server mcp-proxy hop's own upstream timeout
 # (MCP_PROXY_TIMEOUT) when deriving nginx's proxy_read_timeout for the
@@ -35,6 +47,16 @@ DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 # blocks, so behavior is unchanged unless MCP_PROXY_TIMEOUT is raised.
 # Credit: derivation approach contributed by @go-faustino (PR #1321).
 MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS: int = 30
+
+
+# Minimum sane prefix length for a TRUSTED_REAL_IP_CIDRS entry. A prefix shorter
+# than this (e.g. 0.0.0.0/1, 10.0.0.0/4) trusts an implausibly large peer range
+# for a proxy subnet and edges toward the catch-all footgun, so we warn (but still
+# honour it — unlike a /0, which is rejected outright). IPv4-scale; IPv6 prefixes
+# are compared on their IPv4-equivalent host-bit width so a normal /48–/64 proxy
+# subnet does not trip the warning.
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V4: int = 8
+MIN_TRUSTED_REAL_IP_PREFIXLEN_V6: int = 32
 
 
 def _resolve_mcp_proxy_read_timeout_seconds() -> int:
@@ -57,11 +79,107 @@ def _resolve_mcp_proxy_read_timeout_seconds() -> int:
         if value is not None:
             upstream = max(float(value), minimum_upstream)
     except (TypeError, ValueError) as e:
-        logger.debug(
-            f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}"
-        )
+        logger.debug(f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}")
         upstream = default_upstream
     return int(math.ceil(upstream)) + MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS
+
+
+def _render_real_ip_config() -> str:
+    """Render nginx realip directives from the ``TRUSTED_REAL_IP_CIDRS`` env var.
+
+    ``TRUSTED_REAL_IP_CIDRS`` is a comma-separated list of CIDRs (or bare IPs)
+    identifying the trusted proxy hop(s) directly in front of nginx — typically
+    the VPC/subnet CIDR an ALB's ENI lives in. When set, nginx recovers the real
+    client IP from ``X-Forwarded-For`` for connections whose immediate peer falls
+    in one of these ranges, so the audited client IP is the end user rather than
+    the load balancer's internal address.
+
+    Fails closed on bad input: each entry is validated as a well-formed network,
+    and any malformed entry is dropped with a warning rather than emitting an
+    invalid directive that would break nginx config generation. When the variable
+    is unset or yields no valid entries, an EMPTY string is returned — no realip
+    directives are emitted, which is the correct behaviour for edge deployments
+    (compose / single host) where nginx's peer already IS the client.
+
+    ``real_ip_recursive`` walks the forwarded chain right-to-left skipping the
+    trusted CIDRs, stopping at the first untrusted address (the real client). It
+    is emitted as ``on`` ONLY when more than one trusted CIDR is configured (a
+    stacked-proxy topology, e.g. CloudFront in front of an ALB). For the common
+    single-hop case (one ALB) recursion is left off: nginx takes the single
+    right-most entry, which is what the one trusted proxy appended, and a spoofed
+    left-most entry can never win. Recursion + an over-broad trusted range would
+    let a client whose own source falls inside that range inject a left-most
+    entry, so we don't enable it unless the topology actually needs it.
+
+    Catch-all ranges (``0.0.0.0/0`` / ``::/0``) are rejected: they would make
+    nginx trust EVERY peer and take the spoofable left-most XFF entry — a
+    fail-open misconfiguration — so they are dropped with a warning like any other
+    invalid entry. Narrow the trust to the load balancer's specific subnet(s).
+
+    Returns:
+        The nginx directive block (``set_real_ip_from`` lines + ``real_ip_header``
+        + optional ``real_ip_recursive on``), or an empty string when no valid
+        CIDRs are configured.
+    """
+    raw = os.environ.get("TRUSTED_REAL_IP_CIDRS", "").strip()
+    if not raw:
+        return ""
+
+    valid_cidrs: list[str] = []
+    for entry in raw.split(","):
+        candidate = entry.strip()
+        if not candidate:
+            continue
+        try:
+            # strict=False so a host address (e.g. 10.1.3.39) is accepted as a
+            # /32 rather than rejected for having host bits set.
+            network = ipaddress.ip_network(candidate, strict=False)
+        except ValueError:
+            logger.warning("Ignoring malformed entry in TRUSTED_REAL_IP_CIDRS: %r", candidate)
+            continue
+        # Reject a catch-all range: trusting every peer defeats the guard and
+        # makes the spoofable left-most XFF entry win (fail-open). prefixlen == 0
+        # is 0.0.0.0/0 or ::/0.
+        if network.prefixlen == 0:
+            logger.warning(
+                "Refusing catch-all range %r in TRUSTED_REAL_IP_CIDRS "
+                "(would trust every peer); narrow it to the proxy's subnet",
+                candidate,
+            )
+            continue
+        # Warn (but honour) an implausibly broad, non-catch-all range. A proxy
+        # subnet is realistically a /16-/28 (v4) or /48-/64 (v6); anything much
+        # broader trusts far more peers than a real LB tier occupies and edges
+        # toward the same spoofing risk as a catch-all.
+        floor = (
+            MIN_TRUSTED_REAL_IP_PREFIXLEN_V6
+            if network.version == 6
+            else MIN_TRUSTED_REAL_IP_PREFIXLEN_V4
+        )
+        if network.prefixlen < floor:
+            logger.warning(
+                "TRUSTED_REAL_IP_CIDRS entry %r is very broad (/%d); trusting this "
+                "many peers is risky — narrow it to the proxy's actual subnet",
+                candidate,
+                network.prefixlen,
+            )
+        valid_cidrs.append(str(network))
+
+    if not valid_cidrs:
+        logger.warning(
+            "TRUSTED_REAL_IP_CIDRS was set but contained no valid CIDRs; "
+            "not emitting realip directives"
+        )
+        return ""
+
+    logger.info("Configuring nginx realip trust for CIDRs: %s", ", ".join(valid_cidrs))
+    lines = [f"set_real_ip_from {cidr};" for cidr in valid_cidrs]
+    lines.append("real_ip_header X-Forwarded-For;")
+    # Only recurse for stacked proxies (>1 trusted hop). A single trusted CIDR
+    # needs no recursion — the right-most entry is the one that proxy appended.
+    if len(valid_cidrs) > 1:
+        lines.append("real_ip_recursive on;")
+    return "\n".join(lines)
 
 
 def _atomic_write_text(
@@ -120,7 +238,7 @@ def _atomic_write_text(
         NGINX_CONFIG_WRITES.labels(status="failure").inc()
         try:
             tmp.close()
-        except Exception:
+        except Exception:  # nosec B110 - best-effort cleanup of temp file on write failure
             pass
         try:
             tmp_path.unlink()
@@ -699,6 +817,15 @@ class NginxConfigService:
 
                 unprotected_api_block = """    # API endpoints - FastAPI handles authentication (session cookie / bearer)
     location {{ROOT_PATH}}/api/ {
+        # Inbound rate limits still apply even though auth_request is bypassed:
+        # /api/ is the highest-volume surface and must stay bounded at the edge,
+        # and the registration endpoints keep their stricter per-source cap (the
+        # register zone key is empty for non-registration URIs, so it is a no-op
+        # for the rest of /api/).
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_req zone=mcp_gateway_register burst=10 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # Proxy to FastAPI service
         proxy_pass http://127.0.0.1:7860/api/;
         proxy_http_version 1.1;
@@ -935,6 +1062,11 @@ class NginxConfigService:
             config_content = config_content.replace("{{AUTH_SERVER_HOST}}", auth_host)
             config_content = config_content.replace("{{AUTH_SERVER_PORT}}", auth_port)
 
+            # Real client-IP recovery (TRUSTED_REAL_IP_CIDRS). Empty by default so
+            # edge deployments emit nothing; when trusted proxy CIDRs are set, the
+            # audited client IP becomes the end user instead of the load balancer.
+            config_content = config_content.replace("{{REAL_IP_CONFIG}}", _render_real_ip_config())
+
             # Generate registry-only block (503 response for MCP proxy requests)
             registry_only_block = self._generate_registry_only_block()
             config_content = config_content.replace("{{REGISTRY_ONLY_BLOCK}}", registry_only_block)
@@ -970,6 +1102,18 @@ class NginxConfigService:
             except Exception as e:
                 logger.error(f"Failed to generate virtual server config: {e}", exc_info=True)
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", "")
+
+            # Generate A2A agent reverse-proxy blocks. Opt-in via
+            # A2A_REVERSE_PROXY_ENABLED, and only effective in with-gateway mode
+            # (a2a_reverse_proxy_effective is the shared flag-AND-with-gateway
+            # gate). In registry-only mode they are skipped: the registry-only
+            # 503 block already returns 503 for any /agent/* path that is not an
+            # API route.
+            if settings.a2a_reverse_proxy_effective:
+                agent_blocks = await self._generate_agent_location_blocks()
+            else:
+                agent_blocks = ""
+            config_content = config_content.replace("{{AGENT_LOCATION_BLOCKS}}", agent_blocks)
 
             root_path = os.environ.get("ROOT_PATH", "").rstrip("/")
             config_content = config_content.replace("{{ROOT_PATH}}", root_path)
@@ -1299,7 +1443,15 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
     ) -> str:
         """Sanitize a string for safe use inside an nginx set directive's double quotes.
 
-        Escapes double quotes and backslashes, and strips newlines.
+        Escapes double quotes and backslashes, strips newlines, and neutralizes
+        the ``$`` sigil. nginx has no backslash escape for ``$`` inside a quoted
+        string -- it always begins a variable reference -- so a stray ``$`` cannot
+        be safely represented and is stripped (like newlines). None of this
+        helper's legitimate inputs (backend URLs, hosts, paths, ids) contain a
+        live nginx variable, and a ``$`` reaching here is already malformed; a
+        rendered ``$undefined`` would otherwise fail ``nginx -t`` and block the
+        reload. It cannot break out to a new directive (that needs ``"`` + ``;``,
+        both handled), so this is defense-in-depth, not the primary guard.
 
         Args:
             value: Raw string (e.g., server_id from URL path)
@@ -1310,6 +1462,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         sanitized = re.sub(r"[\r\n]+", " ", value)
         sanitized = sanitized.replace("\\", "\\\\")
         sanitized = sanitized.replace('"', '\\"')
+        sanitized = sanitized.replace("$", "")
         return sanitized
 
     async def _generate_virtual_server_blocks(self) -> str:
@@ -1344,6 +1497,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 block = f"""
     # Virtual MCP Server: {safe_name}
     location {{{{ROOT_PATH}}}}{safe_vs_path} {{
+        # Inbound rate limiting: this path fans out to the shared /validate auth
+        # subrequest, so bound it at the edge (zones declared at http scope in
+        # docker/nginx_rev_proxy_*.conf) to keep a flood from exhausting /validate.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         set $virtual_server_id "{safe_id}";
         auth_request /validate;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
@@ -1485,7 +1644,18 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         proxy_http_version 1.1;
         proxy_ssl_server_name on;
         proxy_set_header Host {safe_upstream_host};
-        proxy_set_header Authorization $http_authorization;
+        # SECURITY: this location proxies directly to a registrant-controlled
+        # (not fully trusted) MCP backend. Never relay the caller's registry
+        # credential here -- clearing Authorization AND Cookie prevents a
+        # malicious registered upstream from capturing and replaying the
+        # caller's gateway bearer token or registry session cookie against the
+        # registry API. This location is reached via a Lua subrequest that
+        # inherits the parent request's headers, so Cookie must be explicitly
+        # cleared or the user's session cookie would be forwarded verbatim.
+        # The gateway authenticates the upstream via its own mechanism, not by
+        # forwarding the caller's credential.
+        proxy_set_header Authorization "";
+        proxy_set_header Cookie "";
         proxy_buffering off;
         proxy_set_header Accept "application/json, text/event-stream";
         proxy_set_header Content-Type $content_type;
@@ -1591,6 +1761,275 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         except Exception as e:
             logger.error(f"Failed to write virtual server mappings: {e}", exc_info=True)
 
+    @staticmethod
+    async def _agent_backend_resolves(
+        hostname: str,
+    ) -> bool:
+        """Return True if the agent backend hostname resolves right now.
+
+        Used to fail safe before emitting a literal ``proxy_pass`` in an agent
+        block: an unresolvable host would make the whole nginx reload fail. Runs
+        the blocking ``getaddrinfo`` in a thread so it does not block the event
+        loop. An IP literal or a resolvable name (including a bare docker/service
+        name valid on this host's network) returns True; a dead name returns
+        False. Fails safe to False on lookup error so a bad host is skipped, not
+        emitted.
+
+        Args:
+            hostname: Upstream host (no scheme or port); may be empty.
+
+        Returns:
+            True if the host resolves, else False.
+        """
+        if not hostname:
+            return False
+        import socket
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, socket.getaddrinfo, hostname, None)
+            return True
+        except (OSError, UnicodeError) as exc:
+            logger.debug(f"Agent backend host {hostname!r} did not resolve: {exc}")
+            return False
+
+    async def _generate_agent_location_blocks(self) -> str:
+        """Generate nginx reverse-proxy location blocks for enabled A2A agents.
+
+        Mirrors the MCP-server and virtual-server generators: each enabled
+        agent gets location blocks that proxy A2A traffic through the gateway
+        (centralized auth, metrics, network isolation) instead of clients
+        connecting directly to the agent backend.
+
+        Returns:
+            Nginx configuration string, or an empty string when there are no
+            enabled agents.
+        """
+        try:
+            from registry.services.agent_service import agent_service
+
+            enabled_paths = await agent_service.get_enabled_agents()
+            if not enabled_paths:
+                logger.debug("No enabled A2A agents found")
+                return ""
+
+            location_blocks = []
+            for path in enabled_paths:
+                agent = await agent_service.get_agent_info(path)
+                if agent is None:
+                    logger.warning(f"Enabled agent '{path}' has no card; skipping nginx block")
+                    continue
+
+                # Proxy to the real backend. In reverse-proxy mode the advertised
+                # url is the gateway-facing address, so the registrant's backend
+                # lives in proxy_pass_url; fall back to url for agents registered
+                # before the flag was on (proxy_pass_url unset).
+                backend_url = (getattr(agent, "proxy_pass_url", None) or agent.url or "").rstrip(
+                    "/"
+                )
+                if not backend_url:
+                    logger.warning(f"Agent '{path}' has no backend url; skipping nginx block")
+                    continue
+
+                # Only proxy true A2A agents. A non-A2A agent that happens to
+                # carry a URL must not get a JSON-RPC proxy route.
+                if (agent.supported_protocol or "").lower() != "a2a":
+                    logger.debug(
+                        f"Agent '{path}' protocol is {agent.supported_protocol!r} "
+                        "(not 'a2a'); skipping nginx block"
+                    )
+                    continue
+
+                # Never advertise a proxy path to a backend that is not
+                # known-healthy, so the gateway does not route to a dead agent.
+                if not HealthStatus.is_healthy(agent.health_status):
+                    logger.debug(
+                        f"Agent '{path}' health is {agent.health_status!r} "
+                        "(not healthy); skipping nginx block"
+                    )
+                    continue
+
+                # The agent block emits a LITERAL proxy_pass, which nginx resolves
+                # at config-load time; a backend host that does not resolve then
+                # makes the WHOLE nginx reload fail ("host not found in upstream"),
+                # taking every route down, not just this agent. Fail safe: verify
+                # the host resolves now and skip the block with a warning if it
+                # does not (same posture as the health and no-url skips above), so
+                # one dead backend host can never crash the reload. This is a real
+                # DNS check (not the dot heuristic) so a legitimately-resolvable
+                # bare docker/service name is kept and a dead FQDN is caught.
+                backend_host = urlparse(backend_url).hostname or ""
+                if not await self._agent_backend_resolves(backend_host):
+                    logger.warning(
+                        f"Agent '{path}' backend host {backend_host!r} does not "
+                        "resolve; skipping nginx block so the reload cannot fail"
+                    )
+                    continue
+
+                agent_path = (agent.path or path).strip("/")
+                try:
+                    block = self._create_agent_location_block(
+                        agent_path,
+                        backend_url,
+                        agent.name,
+                    )
+                except ValueError as exc:
+                    logger.warning(f"Skipping agent '{path}' with unsafe nginx input: {exc}")
+                    continue
+                location_blocks.append(block)
+                logger.debug(f"Generated A2A agent location block for {agent_path}")
+
+            logger.info(f"Generated {len(location_blocks)} A2A agent location blocks")
+            return "\n".join(location_blocks)
+
+        except Exception as e:
+            logger.error(f"Failed to generate agent location blocks: {e}", exc_info=True)
+            return ""
+
+    def _create_agent_location_block(
+        self,
+        agent_path: str,
+        backend_url: str,
+        agent_name: str,
+    ) -> str:
+        """Create nginx location blocks for a single A2A agent.
+
+        Emits two prefix locations under ``{ROOT_PATH}/agent/{agent_path}/``:
+          1. The agent card (``.well-known/agent-card.json``) for discovery.
+          2. The JSON-RPC endpoint for ``message/send`` / ``message/stream``.
+
+        Both are protected by the ``/validate`` auth subrequest (the same hop
+        used for MCP servers) and proxy straight to the agent backend. A2A is
+        JSON-RPC over HTTP, so no protocol translation is required.
+
+        Args:
+            agent_path: Agent path without surrounding slashes
+                (e.g. ``flight-booking-agent``).
+            backend_url: Agent backend base URL without a trailing slash.
+            agent_name: Human-readable agent name (used in a comment only).
+
+        Returns:
+            Nginx configuration string with the two location blocks.
+
+        Raises:
+            ValueError: If ``agent_path`` or ``backend_url`` contains characters
+                that are unsafe to interpolate into an nginx config.
+        """
+        if not _NGINX_AGENT_PATH_SAFE.match(agent_path):
+            raise ValueError(f"unsafe agent path: {agent_path!r}")
+        if not _NGINX_AGENT_URL_SAFE.match(backend_url):
+            raise ValueError(f"unsafe agent url: {backend_url!r}")
+
+        parsed_url = urlparse(backend_url)
+        upstream_host = parsed_url.netloc
+        # External services (https or FQDN) use the upstream hostname; bare
+        # internal hostnames preserve the original Host header.
+        if parsed_url.scheme == "https" or "." in upstream_host:
+            host_header = upstream_host
+        else:
+            host_header = "$host"
+
+        dns_resolver = os.environ.get("NGINX_DNS_RESOLVER", "8.8.8.8 8.8.4.4")
+        dns_resolver_timeout = os.environ.get("NGINX_DNS_RESOLVER_TIMEOUT", "5")
+        safe_name = self._sanitize_for_nginx_comment(agent_name)
+        route = f"{AGENT_ROUTE_PREFIX}/{agent_path}"
+
+        return f"""
+    # A2A agent card (discovery): {safe_name}
+    # Exact match so suffixes (e.g. /.well-known/agent-card.json/../secret)
+    # cannot be smuggled through this proxy.
+    location = {{{{ROOT_PATH}}}}{route}/.well-known/agent-card.json {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        proxy_pass {backend_url}/.well-known/agent-card.json;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host {host_header};
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie. The standard Authorization header is left intact: per
+        # the A2A spec, credentials are obtained out-of-band by the calling agent
+        # and passed end-to-end in Authorization for the target agent to
+        # authenticate -- the gateway is not a credential broker here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
+        # Rewrite the card's endpoint URLs from the backend to this gateway so
+        # clients send JSON-RPC back through the proxy. Body size changes, so
+        # Content-Length must be cleared before the rewrite runs.
+        header_filter_by_lua_block {{ ngx.header.content_length = nil }}
+        body_filter_by_lua_file /etc/nginx/lua/agent_card_rewrite.lua;
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}
+
+    # A2A agent JSON-RPC endpoint: {safe_name}
+    location {{{{ROOT_PATH}}}}{route}/ {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_user $upstream_http_x_user;
+        auth_request_set $auth_username $upstream_http_x_username;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        auth_request_set $auth_method $upstream_http_x_auth_method;
+
+        # Attribute metrics to this specific agent. Without this, emit_metrics
+        # derives the name from the first URI segment ("agent"), bucketing every
+        # agent together. agent_path is validated by _NGINX_AGENT_PATH_SAFE.
+        set $metrics_server_name "agent/{agent_path}";
+        # Capture the JSON-RPC body (rewrite phase) so emit_metrics can record
+        # the A2A method; per-agent invoke is enforced by the auth server via
+        # the /validate subrequest above.
+        rewrite_by_lua_file /etc/nginx/lua/capture_body.lua;
+        log_by_lua_file /etc/nginx/lua/emit_metrics.lua;
+
+        proxy_pass {backend_url}/;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        # message/stream (SSE) can stay open for minutes; override nginx's 60s
+        # default so streaming responses are not killed mid-flight.
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_set_header Host {host_header};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        # SECURITY (A2A egress trust model): X-Authorization carries the caller's
+        # gateway credential -- it is validated at /validate and MUST NOT reach
+        # this registrant-controlled backend, or a malicious agent could replay
+        # it against the registry (the B1 / #1391 class of bug). Strip it and the
+        # session Cookie (nginx forwards client request headers by default, so
+        # Cookie must be cleared explicitly). The standard Authorization header is
+        # left intact and forwarded end-to-end: per the A2A spec, the calling
+        # agent obtains the target agent's credential out-of-band and presents it
+        # in Authorization for the target to authenticate. The gateway is a policy
+        # gate, not a credential broker -- it never mints or vends the agent's
+        # credential. /validate authenticates the caller on X-Authorization only
+        # (no Authorization fallback for agent paths) and refuses to forward an
+        # Authorization equal to the validated X-Authorization, so a caller that
+        # duplicates its gateway token into both headers cannot leak it here.
+        proxy_set_header X-Authorization "";
+        proxy_set_header Cookie "";
+
+        # Forward validated auth context to the agent backend
+        proxy_set_header X-User $auth_user;
+        proxy_set_header X-Username $auth_username;
+        proxy_set_header X-Scopes $auth_scopes;
+        proxy_set_header X-Auth-Method $auth_method;
+
+        # message/stream uses SSE; disable buffering for incremental delivery
+        proxy_buffering off;
+        proxy_set_header Accept $http_accept;
+
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}"""
+
     def _generate_transport_location_blocks(self, path: str, server_info: dict[str, Any]) -> list:
         """Generate nginx location blocks for different transport types."""
         blocks = []
@@ -1673,6 +2112,41 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         # `set $backend_url "..."` context.
         safe_proxy_pass_url = self._sanitize_for_nginx_set(proxy_pass_url)
 
+        # For servers that need a per-server PRM (obo_exchange on any provider,
+        # oauth_user on Entra only -- see server_needs_per_server_prm), the 401
+        # WWW-Authenticate must point MCP clients at the PER-SERVER PRM (so the
+        # client discovers the per-server resource that matches its connection URL
+        # and the Entra App ID URI, not the bare-origin gateway PRM Entra rejects).
+        # Override the default global $mcp_resource_metadata in this location only.
+        # Keycloak/Cognito 3LO keeps the global PRM (unchanged working behavior).
+        # RFC 9728 clients follow the resource_metadata from the 401 header in
+        # preference to guessing.
+        from registry.api.wellknown_routes import server_needs_per_server_prm
+
+        obo_resource_metadata = ""
+        if server_info and server_needs_per_server_prm(server_info.get("egress_auth_mode")):
+            from registry.auth.oauth_metadata import build_per_server_prm_url
+
+            try:
+                append_mcp = server_info.get("append_mcp_path") is not False
+                per_server_prm = build_per_server_prm_url(
+                    settings.registry_url, path, append_mcp=append_mcp
+                )
+                # Defense-in-depth: the PRM URL embeds the registrant-supplied
+                # server path (build_per_server_prm_url does a raw concat, no
+                # escaping), so sanitize before it lands in the quoted
+                # `set $mcp_resource_metadata "..."` directive -- matching the
+                # escaping applied to every other interpolated value in this file
+                # (e.g. $backend_url above). Without it, a path containing a
+                # double-quote + semicolon could break out of the string and
+                # inject nginx directives into the obo location block.
+                safe_per_server_prm = self._sanitize_for_nginx_set(per_server_prm)
+                obo_resource_metadata = (
+                    f'\n        set $mcp_resource_metadata "{safe_per_server_prm}";'
+                )
+            except ValueError:
+                obo_resource_metadata = ""
+
         # Extract hostname from proxy_pass_url for external services
         parsed_url = urlparse(proxy_pass_url)
         upstream_host = parsed_url.netloc
@@ -1743,6 +2217,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Common proxy settings
         common_settings = f"""
+        # Inbound rate limiting: every MCP request fans out to the shared
+        # /validate auth subrequest, so bound it at the edge (zones + rationale
+        # are declared at http scope in docker/nginx_rev_proxy_*.conf). Keeps a
+        # flood on one server's /mcp-proxy/ path from exhausting /validate for
+        # all servers. burst+nodelay give bursty MCP clients headroom.
+        limit_req zone=mcp_gateway_edge burst=100 nodelay;
+        limit_conn mcp_gateway_conn 100;
+
         # DNS resolver for dynamic proxy_pass upstreams.
         # Default: 8.8.8.8 8.8.4.4 (public DNS).
         # Override with NGINX_DNS_RESOLVER env var for environments where
@@ -1814,7 +2296,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         # Handle auth errors
         error_page 401 = @auth_error;
-        error_page 403 = @forbidden_error;{version_headers}"""
+        error_page 403 = @forbidden_error;{obo_resource_metadata}{version_headers}"""
 
         # Transport-specific settings
         if transport_type == "sse":

@@ -10,6 +10,7 @@ from fastapi import WebSocket
 
 from registry.constants import DeploymentType, HealthStatus
 
+from ..common.log_redaction import redact_headers
 from ..core.config import settings
 from ..core.endpoint_utils import get_endpoint_url_from_server_info
 from ..exceptions import UrlValidationError
@@ -417,7 +418,7 @@ class HealthMonitoringService:
         # endpoint blocks type changes today, but direct DB manipulation could
         # leave one behind).
         if server_info.get("deployment") == DeploymentType.LOCAL:
-            new_status = HealthStatus.LOCAL
+            new_status: str = HealthStatus.LOCAL
             self.server_health_status[service_path] = new_status
             self.server_last_check_time.pop(service_path, None)
             return previous_status != new_status
@@ -512,7 +513,7 @@ class HealthMonitoringService:
             for header_dict in server_headers:
                 if isinstance(header_dict, dict):
                     headers.update(header_dict)
-                    logger.debug(f"Added server headers: {header_dict}")
+                    logger.debug(f"Added server headers: {redact_headers(header_dict)}")
 
         # Custom headers go first; auth_scheme below overwrites name collisions
         encrypted_custom = server_info.get("custom_headers_encrypted")
@@ -722,7 +723,9 @@ class HealthMonitoringService:
                         response = await client.get(
                             proxy_pass_url, headers=headers, follow_redirects=True, timeout=timeout
                         )
-                        return self._is_mcp_endpoint_healthy(response)
+                        if self._is_mcp_endpoint_healthy(response):
+                            return True, HealthStatus.HEALTHY
+                        return False, HealthStatus.UNHEALTHY_ENDPOINT_CHECK_FAILED
                     except (TimeoutError, httpx.TimeoutException) as e:
                         # For SSE endpoints, timeout while reading streaming response is normal after getting 200 OK
                         logger.debug(
@@ -972,21 +975,18 @@ class HealthMonitoringService:
         """
         Mask sensitive authentication headers for logging.
 
+        Delegates to the shared, fail-closed header redactor so any
+        credential-bearing header (Authorization, Cookie, and anything carrying
+        a token/secret/credential/api-key) is masked — not just an exact-match
+        allowlist that a new header name could slip past.
+
         Args:
             headers: Dictionary of HTTP headers
 
         Returns:
-            Dictionary with sensitive headers masked
+            Dictionary with sensitive header values redacted
         """
-        masked = headers.copy()
-        sensitive_headers = ["Authorization", "X-API-Key", "X-Api-Key", "Api-Key"]
-
-        for key in masked:
-            # Check for common auth headers (case-insensitive)
-            if key in sensitive_headers or key.lower() in [h.lower() for h in sensitive_headers]:
-                masked[key] = "***REDACTED***"
-
-        return masked
+        return redact_headers(headers)
 
     def _is_mcp_endpoint_healthy_streamable(self, response) -> bool:
         """

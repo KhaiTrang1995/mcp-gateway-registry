@@ -2,6 +2,7 @@ import React from 'react';
 import { ClipboardDocumentIcon } from '@heroicons/react/24/outline';
 import DetailsModal from './DetailsModal';
 import ResourceBoundTokenButton from './ResourceBoundTokenButton';
+import { SafeLink } from './SafeLink';
 
 interface AgentLike {
   name: string;
@@ -34,8 +35,16 @@ interface AgentDetailsModalProps {
  */
 const getAgentCardUrl = (agentUrl: string): string | null => {
   try {
-    const origin = new URL(agentUrl).origin;
-    return `${origin}/.well-known/agent-card.json`;
+    // The agent card is served relative to the agent's advertised url, which in
+    // reverse-proxy mode includes the gateway path (e.g.
+    // https://host/agent/flight-booking-agent/). Append the well-known suffix to
+    // that full base, do NOT collapse to the origin (that would drop the
+    // /agent/<path>/ prefix and 404).
+    const parsed = new URL(agentUrl);
+    const basePath = parsed.pathname.endsWith('/')
+      ? parsed.pathname
+      : `${parsed.pathname}/`;
+    return `${parsed.origin}${basePath}.well-known/agent-card.json`;
   } catch {
     return null;
   }
@@ -95,14 +104,14 @@ const AgentDetailsModal: React.FC<AgentDetailsModalProps> = ({
             <div className="bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-800 rounded-lg p-3 mt-2">
               <p className="text-sm text-cyan-800 dark:text-cyan-200">
                 <span className="font-medium">A2A Agent Card:</span>{' '}
-                <a
+                <SafeLink
                   href={cardUrl}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="text-cyan-600 dark:text-cyan-400 hover:underline break-all"
                 >
                   {cardUrl}
-                </a>
+                </SafeLink>
               </p>
             </div>
           ) : null;

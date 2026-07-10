@@ -15,13 +15,13 @@ Use this skill when the user wants to create release notes for a new version. Th
 
 The skill takes a version tag as input:
 - Format: `{major}.{minor}.{patch}` (e.g., `1.24.0`) - **no `v` prefix**, semver only
-- Older releases (pre-`1.23.0`) used a `v` prefix (e.g., `v1.0.22`) - existing artifacts under `release-notes/v*.md` and tags `v1.0.x` are preserved as-is, but **new releases must use the bare-semver convention**
+- Older releases (pre-`1.23.0`) used a `v` prefix (e.g., `v1.0.22`) - existing artifacts under `docs/release-notes/v*.md` and tags `v1.0.x` are preserved as-is, but **new releases must use the bare-semver convention**
 - If the user provides a `v`-prefixed version for a new release, strip the prefix and confirm
 
 ## Output
 
-Creates a release notes file in `release-notes/` and tags the repo:
-- `release-notes/{version}.md` - Release notes markdown file (e.g., `release-notes/1.24.0.md`)
+Creates a release notes file in `docs/release-notes/` and tags the repo:
+- `docs/release-notes/{version}.md` - Release notes markdown file (e.g., `docs/release-notes/1.24.0.md`)
 - Git tag `{version}` pointing to the commit that includes the release notes
 
 ## Workflow
@@ -39,7 +39,7 @@ The release notes are incremental from a previous version. Determine the base ve
 
 1. List existing release notes files (covers both old `v`-prefixed and new bare-semver names):
    ```bash
-   ls release-notes/*.md
+   ls docs/release-notes/*.md
    ```
 2. List existing git tags (any version-shaped tag, prefixed or bare):
    ```bash
@@ -162,8 +162,8 @@ Analyze all commits and PRs to categorize them:
 
 ### Step 5: Write Release Notes
 
-Create the file `release-notes/{version}.md` following this exact structure
-(note: bare semver, no `v` prefix, e.g. `release-notes/1.24.0.md`):
+Create the file `docs/release-notes/{version}.md` following this exact structure
+(note: bare semver, no `v` prefix, e.g. `docs/release-notes/1.24.0.md`):
 
 ```markdown
 # Release {version} - {Short Title Summarizing Major Features}
@@ -241,20 +241,6 @@ git checkout {version}
 cd terraform/aws-ecs
 terraform plan
 terraform apply
-```
-
-#### DockerHub Images
-
-Pre-built images are available:
-
-```bash
-docker pull mcpgateway/registry:{version}
-docker pull mcpgateway/auth-server:{version}
-docker pull mcpgateway/currenttime-server:{version}
-docker pull mcpgateway/realserverfaketools-server:{version}
-docker pull mcpgateway/mcpgw-server:{version}
-docker pull mcpgateway/fininfo-server:{version}
-docker pull mcpgateway/metrics-service:{version}
 ```
 
 ---
@@ -356,7 +342,7 @@ descending.}
 
 After writing the release notes file:
 
-1. Tell the user the file has been created at `release-notes/{version}.md`
+1. Tell the user the file has been created at `docs/release-notes/{version}.md`
 2. Present a brief summary:
    - Number of major features
    - Number of PRs included
@@ -370,18 +356,47 @@ After writing the release notes file:
 
 Once the user confirms the release notes are ready:
 
-1. **Commit the release notes:**
+1. **Confirm the new version appears in the `mkdocs.yml` Release Notes nav.** The nav uses a
+   single directory entry that auto-includes every file in `docs/release-notes/`:
+   ```yaml
+   - Release Notes:
+     - release-notes
+   ```
+   Because the whole directory is included automatically, **a new `docs/release-notes/{version}.md`
+   file needs no `mkdocs.yml` edit** — it is picked up on the next build. Verify with
+   `mkdocs build` (or check the built `site/release-notes/{version}/` directory exists) and
+   confirm no new build warnings were introduced. Do NOT hand-maintain a per-version nav list;
+   the directory entry owns ordering. If the maintainer later wants an explicit descending
+   order, that is a separate, deliberate `mkdocs.yml` change — not part of the routine release cut.
+
+2. **Add a highlight entry and rotate the README's "What's New" (regrowth prevention).** The
+   README's `## What's New` section holds **exactly the 3 most-recent highlights**; the full
+   history lives in `docs/overview/feature-release-highlights.md`. On a release with a notable
+   user-facing feature:
+   - **Prepend** one curated highlight entry (headline + 1-3 sentences + doc links) to the top of
+     `docs/overview/feature-release-highlights.md`, just under its intro, matching the existing
+     bullet format.
+   - **Rotate the README:** add that same highlight as the new first bullet under `## What's New`
+     in `README.md`, then **delete the now-fourth bullet** so exactly three remain (the dropped one
+     already lives in the archive — this is a delete, not a re-copy). Keep the
+     "Older highlights → Feature & Release Highlights" line in place.
+   - This is the ONLY change the release cut makes to `README.md`. **Never add a new `##` section,
+     never let What's New exceed 3 bullets, and never touch any other part of the README** — those
+     require their own dedicated PR. The README has a CI line-budget (350 lines) that will fail the
+     build otherwise. A patch release with no user-facing feature skips this step entirely.
+
+3. **Commit the release notes, highlights, README rotation, and nav together:**
    ```bash
-   git add release-notes/{version}.md
+   git add docs/release-notes/{version}.md docs/overview/feature-release-highlights.md README.md mkdocs.yml
    git commit -m "docs: Add {version} release notes"
    ```
 
-2. **Push the commit:**
+3. **Push the commit:**
    ```bash
    git push origin main
    ```
 
-3. **Create or move the git tag** to point at this latest commit (which includes the release notes):
+4. **Create or move the git tag** to point at this latest commit (which includes the release notes):
    ```bash
    # If tag already exists, delete it locally and remotely first
    git tag -d {version} 2>/dev/null || true
@@ -394,29 +409,24 @@ Once the user confirms the release notes are ready:
    git push origin {version}
    ```
 
-4. **Verify:**
+5. **Verify:**
    ```bash
    git log --oneline -1
    git tag -l {version} --format="%(refname:short) -> %(objectname:short)"
    ```
 
-5. Tell the user the tag is created and pushed, and provide the DockerHub push command:
-   ```
-   To publish images to DockerHub with this tag:
-   make publish-dockerhub-version VERSION={version}
-   ```
+6. Tell the user the release notes are committed and the tag is created and pushed.
 
 ## Important Rules
 
 - **Never skip the user confirmation** for base version in Step 2. The user may want to create release notes that span multiple versions.
 - **Never include emojis** in the release notes file. The project CLAUDE.md prohibits emojis in documentation.
 - **Never include Claude Code attribution** or "Co-Authored-By" lines in commits.
-- **Always use the `release-notes/` directory** at the project root for the output file.
+- **Always use the `docs/release-notes/` directory** for the output file.
 - **Always include upgrade instructions** for all three deployment methods (Docker Compose, Helm/EKS, Terraform/ECS).
 - **Always list breaking changes first** in the upgrade section -- this is the most critical information for operators.
 - **Always verify Helm Chart.yaml diffs** to detect dependency additions/removals -- these are the most common breaking changes for EKS users.
 - **Always check the full `charts/` tree diff**, not just `Chart.yaml`. If ANY file under `charts/` changed between base and HEAD, the upgrade instructions MUST include `helm dependency build` and `helm dependency update` for stack-chart consumers. The packaged `.tgz` subcharts inside `charts/mcp-gateway-registry-stack/charts/` are gitignored and only repackage when those commands run -- a plain `git pull` + `helm upgrade` will silently use stale subcharts.
-- **DockerHub image list** should match the components defined in `scripts/publish_containers.sh` in the `COMPONENTS` array. Read this file to get the current list rather than hardcoding.
 - **Always credit squash-merge co-authors.** `git log {base}..HEAD` only sees the squashed commit's single author, so co-authors on the source branch get dropped. Always also iterate every merged PR with `gh pr view <num> --json commits --jq '[.commits[].authors[].name] | unique'` and union the results into the contributor list.
 - **Never synthesize GitHub usernames from display names.** Resolve every login from a real PR (`gh pr view <num> --json author` for openers, or `.commits[].authors[].login` for co-authors), and verify uncertain ones with `gh api users/<candidate>` (404 = wrong guess). Past mistakes: "Amit Arora" -> `amitarora` (wrong; actual: `aarora79`); "Nathan Fernandes Pedroza" -> `nathanfernandes` (wrong; actual: `nathanzilgo`).
 

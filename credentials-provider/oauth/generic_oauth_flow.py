@@ -88,6 +88,22 @@ except ImportError:
     logger.debug("python-dotenv not available, skipping .env loading")
 
 
+def _safe_oauth_error(response: "requests.Response") -> str:
+    """Extract a non-sensitive OAuth error summary from a token-endpoint response.
+
+    The full response body can echo back the client_id or (on some providers)
+    partial credentials in ``error_description``, so never log ``response.text``.
+    Return only the standard ``error`` code when the body is JSON, else nothing.
+    """
+    try:
+        data = response.json()
+        if isinstance(data, dict) and data.get("error"):
+            return f"error={data['error']}"
+    except Exception:  # nosec B110 - best-effort parse of error body; never log raw response
+        pass
+    return "(body omitted)"
+
+
 def _validate_environment_variables() -> None:
     """Validate that all required INGRESS and EGRESS OAuth environment variables are set."""
     required_ingress_vars = [
@@ -182,6 +198,11 @@ OAUTH_PROVIDERS = _load_oauth_providers()
 # Global variables for callback handling
 authorization_code = None
 received_state = None
+# The CSRF state value the flow generated for this authorization request. The
+# callback handler compares the state echoed back by the browser against this
+# before performing any token exchange, so a forged/replayed callback fails
+# closed. Set by run_oauth_flow() when the state is minted.
+expected_state = None
 callback_received = False
 callback_error = None
 pkce_verifier = None
@@ -271,7 +292,8 @@ class OAuthConfig:
 
             if not response.ok:
                 logger.error(
-                    f"Token exchange failed with status {response.status_code}. Response: {response.text}"
+                    f"Token exchange failed with status {response.status_code}. "
+                    f"{_safe_oauth_error(response)}"
                 )
                 return False
 
@@ -430,10 +452,15 @@ class OAuthConfig:
                 "cloud_id": self.cloud_id,
             }
 
-            with open(token_path, "w") as f:
+            # Create atomically with owner-only (0600) permissions; the payload
+            # carries access and refresh tokens, so it must never be briefly
+            # world/group-readable between create and chmod (a plain open()
+            # honors the process umask, commonly 0644).
+            fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(essential_token_data, f, indent=2)
 
-            # Secure the file
+            # Enforce 0600 even if the file pre-existed
             token_path.chmod(0o600)
             logger.info(f"📁 Saved OAuth tokens to: {token_path}")
 
@@ -465,10 +492,13 @@ class OAuthConfig:
                 },
             }
 
-            with open(readable_token_path, "w") as f:
+            # Create atomically owner-only (0600); this payload also embeds the
+            # access and refresh tokens (and a Bearer curl example).
+            fd = os.open(str(readable_token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(readable_data, f, indent=2)
 
-            readable_token_path.chmod(0o600)
+            readable_token_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"📄 Saved readable token info to: {readable_token_path}")
 
             # Create VS Code MCP configuration file for supported providers
@@ -521,11 +551,13 @@ class OAuthConfig:
                     },
                 }
 
-            # Save the VS Code MCP configuration
-            with open(vscode_config_path, "w") as f:
+            # Save the VS Code MCP configuration atomically owner-only (0600);
+            # it embeds Bearer authorization headers.
+            fd = os.open(str(vscode_config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(mcp_config, f, indent=4)
 
-            vscode_config_path.chmod(0o600)
+            vscode_config_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"🔧 Created VS Code MCP configuration: {vscode_config_path}")
 
         except Exception as e:
@@ -575,11 +607,13 @@ class OAuthConfig:
                     "alwaysAllow": [],
                 }
 
-            # Save the Roocode MCP configuration
-            with open(roocode_config_path, "w") as f:
+            # Save the Roocode MCP configuration atomically owner-only (0600);
+            # it embeds Bearer authorization headers.
+            fd = os.open(str(roocode_config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
                 json.dump(mcp_config, f, indent=2)
 
-            roocode_config_path.chmod(0o600)
+            roocode_config_path.chmod(0o600)  # enforce 0600 even if the file pre-existed
             logger.info(f"🔧 Created Roocode MCP configuration: {roocode_config_path}")
 
         except Exception as e:
@@ -638,6 +672,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
             callback_received, \
             callback_error, \
             received_state, \
+            expected_state, \
             oauth_config_global
 
         parsed_path = urllib.parse.urlparse(self.path)
@@ -670,10 +705,30 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
 
         if "code" in params:
             authorization_code = params["code"][0]
-            if "state" in params:
-                received_state = params["state"][0]
+            received_state = params["state"][0] if "state" in params else None
+
+            # Validate the CSRF state BEFORE doing anything with the code. The
+            # token exchange happens inline in this handler, so the state check
+            # must gate it here rather than in the calling flow (which would run
+            # too late to prevent the exchange). Fail closed on any mismatch or
+            # missing state: an attacker-forged/replayed callback must never
+            # reach exchange_code_for_tokens.
+            if expected_state is None or received_state != expected_state:
+                callback_error = "state_mismatch"
+                callback_received = True
+                logger.error(
+                    "OAuth state mismatch on callback - rejecting to prevent CSRF. "
+                    "Ignoring the authorization code and aborting token exchange."
+                )
+                self._send_response(
+                    "Authorization failed: state validation error. "
+                    "Please restart the authorization flow.",
+                    status=400,
+                )
+                return
+
             callback_received = True
-            logger.info("Authorization code and state received successfully via callback.")
+            logger.info("Authorization code received and CSRF state verified via callback.")
 
             # Try immediate token exchange if config is available
             message = "Authorization successful! You can close this window now."
@@ -768,7 +823,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
         let timer = 5;
         const timerElement = document.getElementById('timer');
         const countdownElement = document.getElementById('countdown');
-        
+
         const interval = setInterval(() => {{
             timer--;
             timerElement.textContent = timer;
@@ -778,7 +833,7 @@ class CallbackHandler(http.server.BaseHTTPRequestHandler):
                 window.close();
             }}
         }}, 1000);
-        
+
         // Also try to close on click
         document.addEventListener('click', () => window.close());
     </script>
@@ -840,7 +895,9 @@ def wait_for_callback(timeout: int = 300) -> bool:
         logger.error("No authorization code received")
         return False
 
-    logger.info(f"Received authorization code: {authorization_code[:20]}...")
+    # Do not log any portion of the authorization code — it is a single-use
+    # credential that exchanges for tokens; log only that one was received.
+    logger.info("Received authorization code")
     return True
 
 
@@ -983,7 +1040,10 @@ def interactive_configuration() -> dict[str, Any]:
             import subprocess  # nosec B404
 
             public_ip = (
-                subprocess.check_output(["curl", "-s", "http://checkip.amazonaws.com/"])
+                subprocess.check_output(  # nosec B603 B607 - hardcoded command detecting public IP during interactive setup
+                    ["curl", "-s", "http://checkip.amazonaws.com/"],
+                    timeout=10,
+                )
                 .decode()
                 .strip()
             )
@@ -1102,7 +1162,8 @@ def run_m2m_flow(config: OAuthConfig) -> bool:
 
         if not response.ok:
             logger.error(
-                f"M2M token request failed with status {response.status_code}. Response: {response.text}"
+                f"M2M token request failed with status {response.status_code}. "
+                f"{_safe_oauth_error(response)}"
             )
             return False
 
@@ -1161,6 +1222,7 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
         pkce_verifier, \
         authorization_code, \
         received_state, \
+        expected_state, \
         callback_received, \
         callback_error, \
         oauth_config_global
@@ -1168,6 +1230,7 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
     # Reset global variables
     authorization_code = None
     received_state = None
+    expected_state = None
     callback_received = False
     callback_error = None
     oauth_config_global = config  # Make config available to callback handler
@@ -1194,8 +1257,11 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
                 if config.refresh_access_token():
                     return True
 
-    # Generate state for CSRF protection
+    # Generate state for CSRF protection. Publish it to the module global so the
+    # callback handler can validate the state the browser echoes back before it
+    # performs the inline token exchange.
     state = secrets.token_urlsafe(16)
+    expected_state = state
 
     # Generate PKCE pair if required
     pkce_challenge = None
@@ -1237,13 +1303,18 @@ def run_oauth_flow(config: OAuthConfig, force_new: bool = False) -> bool:
             httpd.shutdown()
         return False
 
-    # Verify state to prevent CSRF attacks
+    # Verify state to prevent CSRF attacks. The callback handler already
+    # rejects a mismatched state before token exchange; this is a defense-in-
+    # depth backstop that fails closed rather than proceeding. Do NOT continue
+    # on mismatch - a mismatched or absent state means the callback cannot be
+    # trusted to belong to this authorization request.
     if received_state != state:
-        logger.warning(f"State mismatch! Expected: {state}, Received: {received_state}")
-        logger.warning("This might be from a previous authorization attempt. Continuing anyway...")
-        # Don't fail on state mismatch in case of VS Code port forwarding or browser refresh
-    else:
-        logger.info("CSRF state verified successfully")
+        logger.error("OAuth state mismatch - aborting flow to prevent CSRF (no token exchange)")
+        if httpd:
+            httpd.shutdown()
+        return False
+
+    logger.info("CSRF state verified successfully")
 
     # Check if token exchange already happened in the callback
     if config.access_token:
@@ -1542,8 +1613,12 @@ Supported providers: """
     # Run the OAuth flow
     success = run_oauth_flow(oauth_config, force_new=args.force)
 
-    # Output token data as JSON if successful (for integration with other scripts)
-    # This stdout output is consumed by egress_oauth.py and other scripts in the pipeline
+    # Output token data as JSON on success. This is a deliberate IPC channel:
+    # egress_oauth.py runs this module as a child process with
+    # subprocess.run(capture_output=True) and json.loads() the last stdout line.
+    # The token therefore travels only over the private parent<->child pipe (in
+    # memory), never to a terminal, log, or file. The consumer must NOT log the
+    # captured stdout (see egress_oauth.py) or the token would leak in clear text.
     if success and oauth_config.access_token:
         token_output = {
             "provider": oauth_config.provider,

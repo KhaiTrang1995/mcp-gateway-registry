@@ -3109,9 +3109,7 @@ class RegistryClient:
             requests.HTTPError on 400/403/404/502.
         """
         normalized = path if path.startswith("/") else f"/{path}"
-        logger.info(
-            f"Pulling agent card for '{normalized}' (dry_run={dry_run})"
-        )
+        logger.info(f"Pulling agent card for '{normalized}' (dry_run={dry_run})")
 
         response = self._make_request(
             method="POST",
@@ -5134,9 +5132,7 @@ class RegistryClient:
         Raises:
             requests.HTTPError: 401 if unauthenticated.
         """
-        logger.info(
-            f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})"
-        )
+        logger.info(f"Listing user-groups (skip={skip}, limit={limit}, provider={provider}, q={q})")
 
         params: dict[str, Any] = {"skip": skip, "limit": limit}
         if provider is not None:
@@ -5352,9 +5348,7 @@ class RegistryClient:
                 limit is reached; 422 on schema validation errors.
         """
         logger.info(f"Creating custom type: {descriptor.get('name')}")
-        response = self._make_request(
-            method="POST", endpoint="/api/custom-types", data=descriptor
-        )
+        response = self._make_request(method="POST", endpoint="/api/custom-types", data=descriptor)
         logger.info(f"Custom type created: {descriptor.get('name')}")
         return response.json()
 
@@ -5405,9 +5399,7 @@ class RegistryClient:
         Returns:
             Dict with records list and total_count.
         """
-        response = self._make_request(
-            method="GET", endpoint=f"/api/custom/{type_name}"
-        )
+        response = self._make_request(method="GET", endpoint=f"/api/custom/{type_name}")
         return response.json()
 
 

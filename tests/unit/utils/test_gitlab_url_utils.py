@@ -47,12 +47,8 @@ class TestParseGitlabUrl:
 
     def test_parts_properties(self):
         """file_dir and encoded_project should expose API-ready components."""
-        nested = parse_gitlab_url(
-            "https://gitlab.example.com/g/sub/r/-/raw/main/a/b/c/SKILL.md"
-        )
-        root = parse_gitlab_url(
-            "https://gitlab.example.com/g/r/-/raw/main/SKILL.md"
-        )
+        nested = parse_gitlab_url("https://gitlab.example.com/g/sub/r/-/raw/main/a/b/c/SKILL.md")
+        root = parse_gitlab_url("https://gitlab.example.com/g/r/-/raw/main/SKILL.md")
 
         assert nested is not None and root is not None
         assert nested.file_dir == "a/b/c"
@@ -149,9 +145,7 @@ class TestDeriveGitlabResourceUrl:
 
     def test_derives_sibling_resource_in_same_directory(self):
         """Should resolve a sibling resource relative to the SKILL.md dir."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
 
         result = derive_gitlab_resource_url(skill_md_url, "reference/notes.md")
 
@@ -184,9 +178,7 @@ class TestDeriveGitlabResourceUrl:
     def test_returns_none_for_non_gitlab_url(self):
         """Should return None when the skill URL is not a GitLab URL."""
         assert (
-            derive_gitlab_resource_url(
-                "https://github.com/o/r/blob/main/SKILL.md", "ref.md"
-            )
+            derive_gitlab_resource_url("https://github.com/o/r/blob/main/SKILL.md", "ref.md")
             is None
         )
 
@@ -196,9 +188,7 @@ class TestTranslateGitlabTreeApiUrl:
 
     def test_builds_tree_api_url_for_skill_directory(self):
         """Should return tree URL plus encoded project, ref, and skill_dir."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/skills/demo/SKILL.md"
 
         result = translate_gitlab_tree_api_url(skill_md_url)
 
@@ -214,9 +204,7 @@ class TestTranslateGitlabTreeApiUrl:
 
     def test_encodes_nested_skill_directories(self):
         """Should percent-encode every slash in deeply nested skill paths."""
-        skill_md_url = (
-            "https://gitlab.example.com/g/r/-/raw/main/a/b/c/SKILL.md"
-        )
+        skill_md_url = "https://gitlab.example.com/g/r/-/raw/main/a/b/c/SKILL.md"
 
         result = translate_gitlab_tree_api_url(skill_md_url)
 
@@ -234,8 +222,6 @@ class TestTranslateGitlabTreeApiUrl:
     def test_returns_none_for_non_gitlab_url(self):
         """Should return None for non-GitLab URLs."""
         assert (
-            translate_gitlab_tree_api_url(
-                "https://github.com/o/r/blob/main/skills/demo/SKILL.md"
-            )
+            translate_gitlab_tree_api_url("https://github.com/o/r/blob/main/skills/demo/SKILL.md")
             is None
         )

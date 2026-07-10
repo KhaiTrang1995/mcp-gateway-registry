@@ -31,11 +31,64 @@ logger = logging.getLogger(__name__)
 _ROOT_PATH: str = os.environ.get("ROOT_PATH", "").rstrip("/")
 
 
+def _fallback_external_host() -> str:
+    """Return the host (host[:port]) to use when the inbound Host is untrusted.
+
+    Derived from the configured ``registry_url`` so the redirect target is a
+    deployment-controlled hostname rather than an attacker-supplied one. Fails
+    closed to ``localhost:7860`` if ``registry_url`` cannot be parsed.
+    """
+    try:
+        parsed = urllib.parse.urlparse(settings.registry_url)
+        if parsed.hostname:
+            if parsed.port:
+                return f"{parsed.hostname}:{parsed.port}"
+            return parsed.netloc or parsed.hostname
+    except ValueError:
+        pass
+    return "localhost:7860"
+
+
+def _resolve_trusted_host(request: Request) -> str:
+    """Resolve a trusted host for external-URL construction.
+
+    The inbound ``Host`` header is attacker-controlled and feeds the OAuth
+    ``redirect_uri``; a spoofed Host would redirect the login flow to an
+    attacker origin. Validate it against the configured allowlist
+    (:attr:`settings.trusted_external_hosts_set`) and, on any mismatch or
+    missing header, fall back to the deployment's own ``registry_url`` host
+    (fail closed).
+
+    Args:
+        request: The FastAPI request object.
+
+    Returns:
+        A trusted host string (host or host:port).
+    """
+    host = (request.headers.get("host") or "").strip()
+    allowlist = settings.trusted_external_hosts_set
+
+    if host and host.lower() in allowlist:
+        return host
+
+    if host:
+        logger.warning(
+            "Rejected untrusted Host header %r for external URL; "
+            "falling back to configured registry host",
+            host,
+        )
+    return _fallback_external_host()
+
+
 def _build_external_url(
     request: Request,
     path: str = "",
 ) -> str:
     """Build an external URL with proper scheme, host, and ROOT_PATH.
+
+    The host is validated against a configured allowlist rather than trusting
+    the inbound Host header (which feeds the OAuth redirect_uri). An unexpected
+    Host falls back to the deployment's own configured host (fail closed).
 
     Args:
         request: The FastAPI request object
@@ -44,7 +97,7 @@ def _build_external_url(
     Returns:
         Full external URL (e.g., "https://host/registry/logout")
     """
-    host = request.headers.get("host", "localhost:7860")
+    host = _resolve_trusted_host(request)
 
     cloudfront_proto = request.headers.get("x-cloudfront-forwarded-proto", "")
     x_forwarded_proto = request.headers.get("x-forwarded-proto", "")

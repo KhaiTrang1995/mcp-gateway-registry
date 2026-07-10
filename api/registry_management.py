@@ -431,7 +431,9 @@ def _get_jwt_token(aws_region: str | None = None, keycloak_url: str | None = Non
             cmd.extend(["--keycloak-url", keycloak_url])
         cmd.append(client_name)
 
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        result = subprocess.run(  # nosec B603 - hardcoded internal script path; args are validated flags
+            cmd, capture_output=True, text=True, check=True, timeout=60
+        )
 
         token = result.stdout.strip()
 
@@ -2776,14 +2778,12 @@ def cmd_agent_pull_card(args: argparse.Namespace) -> int:
         else:
             for change in response.changes:
                 logger.info(f"\n  Field: {change.field}")
-                logger.info(
-                    f"    current: {json.dumps(change.current_value, default=str)[:200]}"
-                )
-                logger.info(
-                    f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}"
-                )
+                logger.info(f"    current: {json.dumps(change.current_value, default=str)[:200]}")
+                logger.info(f"    remote:  {json.dumps(change.remote_value, default=str)[:200]}")
             if dry_run:
-                logger.info("\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist.")
+                logger.info(
+                    "\n  Dry-run: no A2A-spec writes performed. Re-run with --apply to persist."
+                )
             elif response.applied:
                 logger.info(f"\n  Applied {len(response.changes)} change(s).")
             else:
@@ -3745,12 +3745,24 @@ def cmd_user_create_m2m(args: argparse.Namespace) -> int:
 
         logger.info("M2M account created successfully\n")
         print(f"Client ID: {result.client_id}")
-        print(f"Client Secret: {result.client_secret[:8]}...{result.client_secret[-4:]}")
         print(f"Groups: {', '.join(result.groups)}")
         if result.service_principal_id:
             print(f"Service Principal ID: {result.service_principal_id}")
+
+        # The client secret is shown only once and cannot be retrieved later.
+        # Write it to an owner-only (0600) file created atomically so it is not
+        # emitted to stdout/logs (which land in CI, shell history, CloudWatch).
+        secret_file = Path(f".m2m_client_secret_{result.client_id}.txt")
+        fd = os.open(str(secret_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(f"CLIENT_ID={result.client_id}\n")
+            f.write(f"CLIENT_SECRET={result.client_secret}\n")
+        os.chmod(secret_file, 0o600)  # enforce 0600 even if the file pre-existed
+
         print()
-        print("IMPORTANT: Save the client secret securely - it cannot be retrieved later.")
+        print(f"Client secret written to: {secret_file}")
+        print("IMPORTANT: Save the client secret securely and delete this file after use.")
+        print("It cannot be retrieved later.")
 
         return 0
 
@@ -5939,9 +5951,7 @@ Examples:
     custom_record_list_parser = subparsers.add_parser(
         "custom-record-list", help="List records of a custom type"
     )
-    custom_record_list_parser.add_argument(
-        "--type", required=True, help="Custom type name"
-    )
+    custom_record_list_parser.add_argument("--type", required=True, help="Custom type name")
     custom_record_list_parser.add_argument(
         "--json", action="store_true", help="Print raw JSON response"
     )
@@ -6204,14 +6214,20 @@ Examples:
     )
     ard_search_parser.add_argument("--query", required=True, help="Natural-language query")
     ard_search_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=mcp_server --filter tags=finance",
     )
     ard_search_parser.add_argument(
-        "--federation", default="auto", choices=["auto", "referrals", "none"],
+        "--federation",
+        default="auto",
+        choices=["auto", "referrals", "none"],
         help="Federation mode (default: auto)",
     )
-    ard_search_parser.add_argument("--page-size", type=int, default=10, help="Results per page (1-100)")
+    ard_search_parser.add_argument(
+        "--page-size", type=int, default=10, help="Results per page (1-100)"
+    )
     ard_search_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_search_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6219,14 +6235,20 @@ Examples:
         "ard-agents", help="ARD Registry browse over all asset types (GET /api/ard/agents)"
     )
     ard_agents_parser.add_argument(
-        "--filter", action="append", default=None,
+        "--filter",
+        action="append",
+        default=None,
         help="ARD filter key=value (repeatable), e.g. --filter type=a2a_agent",
     )
     ard_agents_parser.add_argument(
-        "--order-by", default="identifier", choices=["identifier", "displayName", "updatedAt"],
+        "--order-by",
+        default="identifier",
+        choices=["identifier", "displayName", "updatedAt"],
         help="Sort field (default: identifier)",
     )
-    ard_agents_parser.add_argument("--page-size", type=int, default=20, help="Items per page (1-100)")
+    ard_agents_parser.add_argument(
+        "--page-size", type=int, default=20, help="Items per page (1-100)"
+    )
     ard_agents_parser.add_argument("--page-token", default=None, help="Opaque pagination cursor")
     ard_agents_parser.add_argument("--json", action="store_true", help="Output raw ARD JSON")
 
@@ -6803,9 +6825,7 @@ Examples:
     user_group_list_parser.add_argument(
         "--provider", help="Filter by provider (e.g. manual, pingfederate)"
     )
-    user_group_list_parser.add_argument(
-        "--q", help="Substring filter on username/email"
-    )
+    user_group_list_parser.add_argument("--q", help="Substring filter on username/email")
     user_group_list_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6814,9 +6834,7 @@ Examples:
         "user-group-get",
         help="Get a single user-group record by username",
     )
-    user_group_get_parser.add_argument(
-        "--username", required=True, help="IdP username to look up"
-    )
+    user_group_get_parser.add_argument("--username", required=True, help="IdP username to look up")
     user_group_get_parser.add_argument(
         "--json", action="store_true", help="Output raw JSON instead of formatted text"
     )
@@ -6832,9 +6850,7 @@ Examples:
         "--groups",
         help="Comma-separated new groups list; empty string clears groups; omit to leave unchanged",
     )
-    user_group_update_parser.add_argument(
-        "--email", help="New email (omit to leave unchanged)"
-    )
+    user_group_update_parser.add_argument("--email", help="New email (omit to leave unchanged)")
     user_group_update_enabled = user_group_update_parser.add_mutually_exclusive_group()
     user_group_update_enabled.add_argument(
         "--enabled", action="store_true", help="Set enabled=True"

@@ -144,3 +144,107 @@ async def test_audit_sink_failure_is_swallowed(_mock_metric, mock_emit, _mock_lo
         **_COMMON,
     )
     assert result is None
+
+
+@patch("auth_server.server.get_audit_logger", return_value=None)
+@patch("auth_server.server.emit_audit_event")
+@patch("auth_server.server.token_mint_total")
+async def test_display_username_stored_raw_and_hash_still_populated(
+    _mock_metric, mock_emit, _mock_logger
+):
+    # The raw human-readable field is stored verbatim while the deprecated
+    # username_hash keeps being derived from `username` (back-compat).
+    await _emit_token_mint_audit(
+        token_kind="user",
+        resource_type=None,
+        resource_id=None,
+        token_path="self_signed",
+        outcome="success",
+        display_username="alice@example.com",
+        **_COMMON,
+    )
+    record = mock_emit.call_args.args[0]
+    assert record.username == "alice@example.com"  # raw, human-readable
+    assert record.username_hash == hash_username("alice@example.com")  # still hashed
+    assert record.username_hash.startswith("user_")
+
+
+@patch("auth_server.server.get_audit_logger", return_value=None)
+@patch("auth_server.server.emit_audit_event")
+@patch("auth_server.server.token_mint_total")
+async def test_display_username_falls_back_to_username(_mock_metric, mock_emit, _mock_logger):
+    # When no display identity is supplied, the raw field falls back to the
+    # (possibly opaque) username so a record is never left blank.
+    await _emit_token_mint_audit(
+        token_kind="user",
+        resource_type=None,
+        resource_id=None,
+        token_path="self_signed",
+        outcome="success",
+        **_COMMON,
+    )
+    record = mock_emit.call_args.args[0]
+    assert record.username == "alice@example.com"
+
+
+class TestMcpLoggerDurabilityGuard:
+    """The auth-server owns the token-mint audit trail — the most forensically
+    critical records — so its MCP audit logger must obey the same durable-sink
+    fail-closed guard as the registry process (registry/main.py). Without it a
+    MongoDB misconfiguration on the auth-server would silently drop every
+    token-issuance record while the operator believes AUDIT_LOG_REQUIRE_DURABLE
+    is protecting them.
+    """
+
+    def _reset_mcp_logger_globals(self) -> None:
+        import auth_server.server as srv
+
+        srv._mcp_logger = None
+        srv._mcp_audit_logger = None
+        srv._mcp_audit_repository = None
+
+    def test_no_durable_sink_fails_closed_by_default(self) -> None:
+        """Audit enabled + no durable sink + require_durable=True -> refuse to init."""
+        import auth_server.server as srv
+        from registry.audit.service import NonDurableAuditError
+
+        self._reset_mcp_logger_globals()
+        with (
+            patch.object(srv.settings, "audit_log_enabled", True),
+            patch.object(srv.settings, "audit_log_mongodb_enabled", False),
+            patch.object(srv.settings, "audit_log_require_durable", True),
+        ):
+            with pytest.raises(NonDurableAuditError):
+                srv.get_mcp_logger()
+
+        # Fail-closed must not leave a half-initialized logger cached.
+        assert srv._mcp_logger is None
+        self._reset_mcp_logger_globals()
+
+    def test_no_durable_sink_allowed_on_explicit_optout(self) -> None:
+        """require_durable=False lets it degrade to a best-effort logger, no raise."""
+        import auth_server.server as srv
+
+        self._reset_mcp_logger_globals()
+        with (
+            patch.object(srv.settings, "audit_log_enabled", True),
+            patch.object(srv.settings, "audit_log_mongodb_enabled", False),
+            patch.object(srv.settings, "audit_log_require_durable", False),
+        ):
+            logger_obj = srv.get_mcp_logger()
+
+        assert logger_obj is not None
+        self._reset_mcp_logger_globals()
+
+    def test_disabled_audit_never_triggers_guard(self) -> None:
+        """When audit logging is disabled the guard is not reached (no raise)."""
+        import auth_server.server as srv
+
+        self._reset_mcp_logger_globals()
+        with (
+            patch.object(srv.settings, "audit_log_enabled", False),
+            patch.object(srv.settings, "audit_log_require_durable", True),
+        ):
+            # Disabled -> returns None without raising.
+            assert srv.get_mcp_logger() is None
+        self._reset_mcp_logger_globals()

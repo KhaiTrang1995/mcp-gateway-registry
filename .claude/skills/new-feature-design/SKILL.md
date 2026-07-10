@@ -386,6 +386,18 @@ When working from an existing GitHub issue, create a summary document:
 
 **CRITICAL:** Before writing the LLD, you MUST thoroughly understand all relevant code in the repository. This is not optional - a design that doesn't account for existing code patterns will fail during implementation.
 
+> **REQUIRED: theory alignment.** Read [Theory of the System](../../../docs/design/theory-of-the-system.md)
+> and check the proposed feature against its core invariants (single control plane for all asset
+> types; the gateway is a generic reverse proxy and the registry is the control plane; registry is
+> control-plane-not-data-path for A2A; `DEPLOYMENT_MODE` vs `REGISTRY_MODE`; three-surface config
+> parity; fail-closed admission vs fail-open notification; IdP-agnostic across a closed provider
+> factory; MCP spec compliance). Use the doc's
+> "[how to change this system without breaking its theory](../../../docs/design/theory-of-the-system.md#6-how-to-change-this-system-without-breaking-its-theory)"
+> checklist. **If the design would violate an invariant, flag it explicitly to the user** in the
+> LLD (a "Theory impact" note) and in the Expert Review — a deliberate theory change is allowed, but
+> it must be called out and argued, never slipped in. State which invariant is affected and the
+> justification.
+
 ### What to Analyze
 
 1. **Existing Models and Data Structures**
@@ -482,6 +494,12 @@ Create a detailed technical design document. This is the most critical document 
 
 ### Non-Goals
 - {What this design explicitly does NOT address}
+
+### Theory Impact
+{State whether this feature upholds or changes any core invariant in
+[Theory of the System](../../../docs/design/theory-of-the-system.md). Default: "No invariant
+affected." If an invariant IS affected, name it, explain why the change is deliberate and
+justified, and note the consequence — this is a flag for the reviewer, not something to bury.}
 
 ## Codebase Analysis
 
@@ -1169,6 +1187,8 @@ it unless the item count is small and bounded.
 **Reviewer:** Cipher
 **Focus Areas:** Authentication, authorization, input validation, data protection, OWASP
 
+> **Before writing this section, read [security-patterns.md](../pr-review/personas/security-patterns.md)** — the catalog of security defects that have shipped and been fixed in this project. Design the feature so it does not reintroduce any of them (SSRF on outbound fetches, broken access control / info disclosure on new endpoints, weak defaults, token-boundary confusion, missing CSRF, injection, log/secret leakage, agent execution safety). Call out in the Concerns/Recommendations below which patterns this feature touches and how the design avoids them.
+
 ### Assessment
 
 #### Strengths
@@ -1178,12 +1198,15 @@ it unless the item count is small and bounded.
 - {Issues or risks identified}
 
 #### Security Checklist
-- [ ] Input validation adequate
-- [ ] Authentication/authorization correct
-- [ ] No sensitive data exposure
-- [ ] No injection vulnerabilities
-- [ ] Rate limiting considered
-- [ ] Audit logging included
+See [security-patterns.md#review-checklist](../pr-review/personas/security-patterns.md#review-checklist) for the full per-pattern list. Key items:
+- [ ] Outbound fetches of stored/request-supplied URLs go through the SSRF guard (pattern #1)
+- [ ] New GET endpoints strip backend URLs for non-admins; mutations 404-then-403 on resolved identity (pattern #2)
+- [ ] No new secret ships with a working default; new env vars added to reserved-name + weak-secret lists (pattern #3)
+- [ ] Inbound auth headers stripped on egress; JWTs verified; no client-supplied session id trusted (pattern #4)
+- [ ] Every mutating endpoint carries the CSRF dependency (pattern #5)
+- [ ] No untrusted input interpolated into nginx/query/HTML/href without escaping (pattern #6)
+- [ ] No secrets/headers/OIDC claim values logged; secret fields write-only in responses (pattern #7)
+- [ ] Mutating agent tools gated behind confirmation; agent endpoints authenticate (pattern #9)
 
 #### Recommendations
 1. {Specific recommendation}
@@ -1266,6 +1289,12 @@ it unless the item count is small and bounded.
 4. **Specify Files**: Always mention which files to create/modify and approximate line numbers
 5. **Consider All Aspects**: Think about error handling, logging, testing, and deployment
 6. **Expert Reviews**: Make the reviews realistic - identify actual issues, not just praise
+7. **Never announce the feature in `README.md`**: feature documentation goes to the feature's own
+   docs page (create one if it lacks one) and, on release, to `docs/release-notes/` plus a single
+   curated highlight in `docs/overview/feature-release-highlights.md`. The README's "What's New"
+   section is limited to the 3 most-recent highlights and is rotated only by the `release-notes`
+   skill; it has a CI-enforced 350-line budget. A design must not plan to add README sections or
+   inline feature blurbs — call out the docs page it will add instead.
 
 ## Example Usage
 

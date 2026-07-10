@@ -53,6 +53,22 @@ def _setup_auth_server_mocks() -> None:
 _setup_auth_server_mocks()
 
 
+@pytest.fixture(autouse=True)
+def _accept_internal_token_replay_check():
+    """Bypass the single-use consumed-jti store in auth-server unit tests.
+
+    ``validate_internal_auth`` records each internal token's ``jti`` in the
+    shared MongoDB/DocumentDB store and fails closed (401) if it cannot. These
+    unit tests do not run against a live datastore, so without this the gate
+    would reject every otherwise-valid internal token. We patch the store to
+    accept, which isolates these tests to the endpoint logic they cover. The
+    single-use / replay-rejection behaviour itself is covered by the dedicated
+    suite in ``tests/unit/auth/test_internal_token_replay.py``.
+    """
+    with patch("registry.auth.internal.consume_jti", new=AsyncMock(return_value=True)):
+        yield
+
+
 # =============================================================================
 # MOCK JWKS FIXTURES
 # =============================================================================

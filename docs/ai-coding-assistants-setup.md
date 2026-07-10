@@ -150,7 +150,7 @@ ln -sf "$(pwd)/.oauth-tokens/mcp.json" ~/.vscode/mcp_settings.json
 
 **Enterprise Tool Catalog**
 - Curated MCP servers approved by IT
-- Consistent across all developer environments  
+- Consistent across all developer environments
 - Centralized authentication and governance
 - Real-time health monitoring
 
@@ -176,7 +176,7 @@ ln -sf "$(pwd)/.oauth-tokens/mcp.json" ~/.vscode/mcp_settings.json
 - Consistent tool availability regardless of developer setup
 - Rapid deployment of new tools to entire organization
 
-**Secure Authentication**  
+**Secure Authentication**
 - All tool access routes through enterprise identity systems (Amazon Cognito)
 - No individual API key management required
 - Automatic token refresh and rotation via [Token Refresh Service](token-refresh-service.md)
@@ -323,7 +323,7 @@ cp .oauth-tokens/dev-* ~/.vscode/
 
 **Production Environment:**
 ```bash
-# Generate production configurations  
+# Generate production configurations
 ENVIRONMENT=prod ./credentials-provider/generate_creds.sh
 cp .oauth-tokens/prod-* ~/.vscode/
 ```
@@ -558,7 +558,6 @@ The registry supports three backend authentication schemes:
 
 **Screenshot Example:**
 
-![MCP Configuration Modal showing dual authentication headers](img/mcp-config-dual-auth.png)
 
 ### Registry-Only Mode
 
@@ -586,6 +585,6 @@ See [Registry Deployment Modes](registry-deployment-modes.md) for more details o
 - [Configuration Reference](configuration.md) - Complete configuration options
 - [Authentication Guide](auth.md) - Identity provider setup and server credential management
 - [Server Registration](auth.md#server-authentication-credentials) - How to register servers with auth credentials
-- [Troubleshooting Guide](troubleshooting.md) - Common issues and solutions
+- Troubleshooting Guide - Common issues and solutions
 - [API Reference](registry_api.md) - Programmatic management
 - [GitHub Discussions](https://github.com/agentic-community/mcp-gateway-registry/discussions) - Community support

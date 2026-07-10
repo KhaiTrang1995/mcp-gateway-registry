@@ -12,7 +12,7 @@ never handles the token. Here is the end-to-end flow.
 ### 1. Register the server
 
 Three ready-to-use registration files are provided under
-[`cli/examples/`](../../cli/examples/):
+[`cli/examples/`](../../cli/examples):
 
 | Server | File | `proxy_pass_url` (edit as needed) |
 |--------|------|-----------------------------------|

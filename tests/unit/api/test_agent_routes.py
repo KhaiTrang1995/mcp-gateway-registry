@@ -633,6 +633,30 @@ class TestListAgents:
             assert data["has_next"] is False
 
     @pytest.mark.asyncio
+    async def test_list_agents_does_not_log_authorization_header(
+        self, test_app_admin, mock_admin_context, sample_agent_card, caplog
+    ):
+        """The entry diagnostics must never emit the Authorization header value."""
+        secret_bearer = "Bearer super-secret-jwt.header.payload.signature-value"
+        with patch("registry.api.agent_routes.agent_service") as mock_agent_service:
+            mock_agent_service.get_agents_paginated = AsyncMock(
+                return_value=([sample_agent_card], 1)
+            )
+            mock_agent_service.is_agent_enabled = AsyncMock(return_value=True)
+
+            with caplog.at_level(logging.DEBUG, logger="registry.api.agent_routes"):
+                response = test_app_admin.get(
+                    "/agents",
+                    headers={"Authorization": secret_bearer},
+                )
+
+        assert response.status_code == status.HTTP_200_OK
+        combined = "\n".join(record.getMessage() for record in caplog.records)
+        # Neither the full header nor the raw token may appear at any level.
+        assert secret_bearer not in combined
+        assert "super-secret-jwt" not in combined
+
+    @pytest.mark.asyncio
     async def test_list_agents_enabled_only_filter(self, test_app, mock_user_context):
         """Test listing only enabled agents."""
         # Arrange
@@ -1873,9 +1897,14 @@ class TestRunSecurityScanOnRegistrationUpdatesViaUpdateAgent:
         # tag. register_agent must NOT be called inside this helper because
         # the agent was already inserted by the caller.
         assert service_mock.update_agent.await_count == 1
-        called_path, called_card = service_mock.update_agent.await_args.args
+        called_path, called_updates = service_mock.update_agent.await_args.args
         assert called_path == path
-        assert "security-pending" in called_card.tags
+        # update_agent takes a DICT of fields to merge (it calls updates.get()).
+        # Passing an AgentCard instance raised
+        # "'AgentCard' object has no attribute 'get'". Regression: must be a dict
+        # whose tags include the security-pending marker.
+        assert isinstance(called_updates, dict)
+        assert "security-pending" in called_updates["tags"]
         assert service_mock.register_agent.await_count == 0
 
         # block_unsafe_agents was False, so the scan helper does not toggle
@@ -1961,9 +1990,9 @@ class TestRunSecurityScanOnRegistrationUpdatesViaUpdateAgent:
         assert search_repo_mock.index_agent.await_count == 1
         called_path, called_card = search_repo_mock.index_agent.await_args.args
         assert called_path == path
-        assert isinstance(
-            called_card, AgentCard
-        ), f"index_agent was called with {type(called_card).__name__}, expected AgentCard"
+        assert isinstance(called_card, AgentCard), (
+            f"index_agent was called with {type(called_card).__name__}, expected AgentCard"
+        )
 
     @pytest.mark.asyncio
     async def test_safe_scan_does_not_call_update_agent(

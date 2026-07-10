@@ -27,6 +27,16 @@ ingress_cidr_blocks = [
   "YOUR.EC2.INSTANCE.IP/32",   # Your EC2 instance or NAT Gateway IP
 ]
 
+# WAFv2 Web ACLs on the ALBs (AWS managed rule sets + WAF-level rate rules) as
+# optional defense-in-depth. NOT required for per-client-IP rate limiting: the
+# container nginx already rate-limits the auth-validation fan-out, and behind an
+# ALB you get true per-client-IP limiting out of the box because trusted_real_ip_cidrs
+# defaults to the VPC CIDR (nginx's realip module then rewrites the rate-limit key
+# from the ALB's IP to the real client). WAF is OFF by default as a cost decision (WAFv2 has a
+# per-Web-ACL and per-request cost and needs wafv2:* IAM permissions). Turn it on
+# for an extra managed-rules layer on internet-facing deployments:
+# enable_waf = true
+
 # ============================================================================
 # DOMAIN CONFIGURATION
 # ============================================================================
@@ -94,6 +104,15 @@ keycloak_admin_password = "CHANGE-ME-SECURE-PASSWORD"
 # Keycloak database credentials
 keycloak_database_username = "keycloak"
 keycloak_database_password = "CHANGE-ME-DB-PASSWORD"
+
+# Password character policy (issue #1354). By default keycloak_database_password
+# and documentdb_admin_password may NOT contain / @ " ' + : ? # & ! = % or
+# spaces -- they break RDS/DocumentDB, connection-string/URI parsing, or curl
+# form-encoding. Leave this false and pick a compliant password for new installs.
+# Set true ONLY for an existing install whose databases were already created with
+# such a password, to avoid rotating a live master password. Prints a loud
+# warning at plan/apply when enabled.
+# allow_unsafe_password_chars = false
 
 # ============================================================================
 # CONTAINER IMAGES (Optional - pre-built public ECR images used by default)
@@ -255,6 +274,32 @@ session_cookie_secure = true
 # Default: Empty (cookie scoped to exact host only - safest option)
 session_cookie_domain = ""
 
+# Number of trusted reverse-proxy hops in front of the app. The audit client IP
+# is taken from the Nth-from-the-right X-Forwarded-For entry (never the
+# client-controlled left-most one). On ECS behind an ALB (+ optional CloudFront),
+# raise this to match the number of trusted proxies. Default 1.
+# trusted_proxy_hops = 2
+
+# Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front
+# of the bundled nginx. nginx's realip module recovers the real client IP from
+# X-Forwarded-For for peers in these ranges. This does double duty: the audited
+# client IP becomes the end user (not the ALB), AND the inbound rate-limit zones —
+# which key on the connection peer — then throttle per real client IP instead of
+# collapsing to a single global bucket at the ALB's IP. LEAVE EMPTY (default): ECS
+# is always behind an ALB, so the module auto-populates this with your VPC CIDR.
+# Override only for a stacked proxy (CloudFront in front of an ALB: list the VPC
+# CIDR AND CloudFront's origin ranges) or to narrow the trusted range.
+# trusted_real_ip_cidrs = "10.0.0.0/16"
+
+# ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+# when building OAuth external URLs. Your primary domain is ALREADY covered — the
+# allowlist always includes the registry domain — so leave this empty for a normal
+# single-domain deployment. Set it only if the app is ALSO reached at a hostname
+# that differs from the registry domain: most commonly an ECS deployment fronted by
+# BOTH a custom domain and the CloudFront domain (REGISTRY_URL names only one, so
+# list the other here). A Host not on the allowlist falls back to the configured host.
+# trusted_external_hosts = "dxxxx.cloudfront.net"
+
 # Control whether OAuth provider tokens are stored in session cookies
 # ============================================================================
 # EMBEDDINGS CONFIGURATION
@@ -319,11 +364,11 @@ storage_backend = "documentdb"
 # DocumentDB Elastic Cluster credentials (REQUIRED)
 # RECOMMENDED: Set via environment variables instead of tfvars for security:
 #   export TF_VAR_documentdb_admin_username="docdbadmin"
-#   export TF_VAR_documentdb_admin_password="YourSecurePassword123!"
+#   export TF_VAR_documentdb_admin_password="YourSecurePassword123"
 #
 # Alternatively, uncomment below (less secure - credentials in file):
 # documentdb_admin_username = "docdbadmin"
-# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123!"
+# documentdb_admin_password = "CHANGE-ME-DocumentDB-Password123"
 
 # DocumentDB Elastic Cluster capacity configuration (OPTIONAL)
 # Uncomment to override defaults
@@ -618,6 +663,14 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Default: 7
 # audit_log_ttl_days = 7
 
+# Require a durable audit sink (fail closed)
+# When true (default), the registry refuses to start if audit logging is enabled
+# but no durable store (DocumentDB/MongoDB) is available, instead of silently
+# degrading to non-durable JSON log lines that can be lost on restart and are not
+# queryable for forensics. Set to false only where a non-durable trail is acceptable.
+# Default: true
+# audit_log_require_durable = true
+
 # ============================================================================
 # APPLICATION LOG CONFIGURATION
 # ============================================================================
@@ -869,6 +922,17 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # If not set, uses the default Org Authorization Server
 # okta_auth_server_id = "your-auth-server-id"
 
+# Okta M2M audience allowlist (optional). Comma/space-separated list of "aud"
+# values accepted on M2M (client-credentials) access tokens (custom auth servers
+# mint the API identifier, e.g. api://ai-registry, as the audience). Leave unset
+# to accept only the configured client ids (fail closed).
+# okta_m2m_allowed_audiences = "api://ai-registry"
+
+# Okta M2M client -> groups map for RBAC sync (optional). JSON object mapping
+# each M2M client_id to the groups it should receive. A client id not listed
+# here is synced with NO groups (fail closed).
+# okta_m2m_client_groups = "{\"0oaEXAMPLECLIENTID\":[\"public-mcp-users\"]}"
+
 # ============================================================================
 # AUTH0 CONFIGURATION (Alternative to Keycloak)
 # ============================================================================
@@ -909,6 +973,11 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Auth0 M2M Client Secret (REQUIRED for IAM Management)
 # auth0_m2m_client_secret = "your-m2m-client-secret"
 
+# Auth0 M2M client -> groups map for RBAC sync (optional). JSON object mapping
+# each M2M client_id to the groups it should receive. A client id not listed
+# here is synced with NO groups (fail closed).
+# auth0_m2m_client_groups = "{\"abc123clientid\":[\"public-mcp-users\"]}"
+
 # Auth0 Management API Token (alternative to M2M credentials)
 # You can use a static Management API token instead of M2M client credentials
 # Generate in Auth0 Dashboard → Applications → APIs → Auth0 Management API → API Explorer
@@ -942,6 +1011,22 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # Note: with-gateway + skills-only is invalid and auto-corrects to registry-only + skills-only
 # Default: "full" (uncomment to change)
 # registry_mode = "full"
+
+# A2A reverse-proxy gateway (opt-in; default false). When true, each enabled A2A
+# agent gets nginx location blocks proxying its card + JSON-RPC through the
+# gateway for centralized auth and metrics. Requires deployment_mode =
+# "with-gateway".
+# a2a_reverse_proxy_enabled = false
+
+# SSRF guard allowlist for internal MCP-server / A2A-agent upstreams. The health
+# checker and proxy validate every upstream URL through an SSRF guard that blocks
+# private/loopback/metadata addresses by default, so internal upstreams (private
+# IPs / service-discovery hostnames) are marked unhealthy unless listed here. The
+# cloud metadata address (169.254.169.254) is never permitted by either.
+#   ssrf_allowed_hosts: comma-separated exact hostnames or IPs (least privilege).
+#   ssrf_allowed_cidrs: comma-separated CIDR ranges for whole internal subnets.
+# ssrf_allowed_hosts = "flight-booking-agent.mcp-gateway-v2.local"
+# ssrf_allowed_cidrs = ""
 
 # Internal/workshop deployment classification (telemetry labels only; issue #1216).
 # Tags a deployment as one of our own internal/workshop installs so it can be
@@ -1144,6 +1229,9 @@ aws_registry_federation_enabled = true
 # pingfederate_m2m_client_secret    = ""
 # pingfederate_application_id_uri   = ""
 # pingfederate_groups_claim         = "groups"
+# Comma/space-separated allowlist of accepted M2M token audiences. Empty accepts
+# only the configured client ids / application id URI (fail closed).
+# pingfederate_m2m_allowed_audiences = ""
 
 # ---------------------------------------------------------------------------
 # Per-user egress credential vault (third-party OBO support). Off by default.
@@ -1155,6 +1243,11 @@ aws_registry_federation_enabled = true
 # egress_oauth_callback_base_url     = "https://mcpgateway.example.com"
 # egress_token_refresh_skew_seconds  = 300
 # egress_state_ttl_seconds           = 600
+# obo_exchange target_audience allowlist (whitespace-separated). When set, an obo
+# server may only use a listed audience; when empty a shape rule applies (api://
+# App ID URI / bare client-id only, no https host URLs or GUIDs), so shared
+# first-party APIs (Graph/ARM/Key Vault) are rejected at registration.
+# egress_obo_allowed_audiences       = "api://outlook-mcp-server api://calendar-mcp-server"
 # egress_registry_internal_url       = "http://registry:8080"
 # egress_secrets_manager_kms_key_id  = ""   # optional CMK; empty uses the AWS-managed key
 # egress_secrets_manager_path_prefix = "mcp/egress"

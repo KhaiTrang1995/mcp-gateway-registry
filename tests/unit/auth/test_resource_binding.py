@@ -18,14 +18,10 @@ class TestIsIntrospectionPath:
     (type, id) but is safe for every token."""
 
     def test_auth_me_is_introspection(self) -> None:
-        assert (
-            resource_binding.is_resource_token_introspection_path("/api/auth/me") is True
-        )
+        assert resource_binding.is_resource_token_introspection_path("/api/auth/me") is True
 
     def test_trailing_slash_still_introspection(self) -> None:
-        assert (
-            resource_binding.is_resource_token_introspection_path("/api/auth/me/") is True
-        )
+        assert resource_binding.is_resource_token_introspection_path("/api/auth/me/") is True
 
     def test_root_path_prefix_handled(self) -> None:
         assert (
@@ -36,16 +32,10 @@ class TestIsIntrospectionPath:
         )
 
     def test_non_allow_listed_path_not_introspection(self) -> None:
-        assert (
-            resource_binding.is_resource_token_introspection_path("/api/agents/foo")
-            is False
-        )
+        assert resource_binding.is_resource_token_introspection_path("/api/agents/foo") is False
         # Even paths under the allow-listed prefix but not the exact path
         # must not be treated as introspection.
-        assert (
-            resource_binding.is_resource_token_introspection_path("/api/auth/logout")
-            is False
-        )
+        assert resource_binding.is_resource_token_introspection_path("/api/auth/logout") is False
 
 
 class TestAllowList:
@@ -77,9 +67,7 @@ class TestSharedConstantsExported:
         assert "/api/skills/" in prefixes
 
     def test_transport_segments_cover_mcp_variants(self) -> None:
-        assert resource_binding.MCP_TRANSPORT_SEGMENTS == frozenset(
-            {"mcp", "sse", "messages"}
-        )
+        assert resource_binding.MCP_TRANSPORT_SEGMENTS == frozenset({"mcp", "sse", "messages"})
 
     def test_classify_honors_module_transport_segments(self, monkeypatch) -> None:
         """classify_request_url must reference the module-level
@@ -197,9 +185,7 @@ class TestClassifyRequestUrl:
             ),
         ],
     )
-    def test_classifies_known_paths(
-        self, path: str, expected: tuple[ResourceType, str]
-    ) -> None:
+    def test_classifies_known_paths(self, path: str, expected: tuple[ResourceType, str]) -> None:
         assert resource_binding.classify_request_url(path) == expected
 
     def test_federated_server_rest_metadata_mismatches_mcp_binding(self) -> None:
@@ -245,9 +231,10 @@ class TestClassifyRequestUrl:
         assert resource_binding.classify_request_url(path) is None
 
     def test_strips_query_string(self) -> None:
-        assert resource_binding.classify_request_url(
-            "/api/agents/code-reviewer?foo=bar"
-        ) == (ResourceType.AGENT, "code-reviewer")
+        assert resource_binding.classify_request_url("/api/agents/code-reviewer?foo=bar") == (
+            ResourceType.AGENT,
+            "code-reviewer",
+        )
 
     def test_adds_leading_slash_if_missing(self) -> None:
         assert resource_binding.classify_request_url("api/agents/foo") == (
@@ -304,9 +291,7 @@ class TestCheckResourceTokenAllowed:
         # None of these should be treated as the /api/auth/me introspection
         # path. Fail-closed is correct here — resource-bound tokens get
         # routed to the general classify-and-match logic.
-        assert (
-            resource_binding.is_resource_token_introspection_path(path) is False
-        )
+        assert resource_binding.is_resource_token_introspection_path(path) is False
 
     @pytest.mark.parametrize(
         "path",
@@ -323,9 +308,7 @@ class TestCheckResourceTokenAllowed:
         # normalization is applied symmetrically to the deny-list so
         # ``//api/tokens/generate`` cannot use the same trick to bypass
         # blocking.
-        assert (
-            resource_binding.is_resource_token_introspection_path(path) is True
-        )
+        assert resource_binding.is_resource_token_introspection_path(path) is True
 
     def test_double_slash_on_deny_list_path_still_blocked(self) -> None:
         """If the upstream proxy does not merge slashes
@@ -336,19 +319,11 @@ class TestCheckResourceTokenAllowed:
         sanitization.
         """
         # Well-formed single-slash path is blocked.
-        assert (
-            resource_binding.check_resource_token_allowed("/api/tokens/generate") is False
-        )
+        assert resource_binding.check_resource_token_allowed("/api/tokens/generate") is False
         # Double-slash variants must also be blocked after normalization.
-        assert (
-            resource_binding.check_resource_token_allowed("//api/tokens/generate") is False
-        )
-        assert (
-            resource_binding.check_resource_token_allowed("/api//tokens//generate") is False
-        )
-        assert (
-            resource_binding.check_resource_token_allowed("///api///tokens") is False
-        )
+        assert resource_binding.check_resource_token_allowed("//api/tokens/generate") is False
+        assert resource_binding.check_resource_token_allowed("/api//tokens//generate") is False
+        assert resource_binding.check_resource_token_allowed("///api///tokens") is False
 
     def test_root_path_containing_blocked_prefix(self) -> None:
         """Pathological case: registry mounted under a sub-path that
@@ -378,7 +353,9 @@ class TestCheckResourceTokenAllowed:
         """Whitespace-only root_path (misconfiguration) must not corrupt
         the prefix match. Should behave as if no root_path was given."""
         assert resource_binding.check_resource_token_allowed("/api/admin", root_path="  ") is False
-        assert resource_binding.check_resource_token_allowed("/api/agents/foo", root_path="  ") is True
+        assert (
+            resource_binding.check_resource_token_allowed("/api/agents/foo", root_path="  ") is True
+        )
 
     def test_root_path_prefix_stripped(self) -> None:
         """Registry hosted under a sub-path: /registry/api/admin/x should be
@@ -491,9 +468,7 @@ class TestValidateUserCanBindResource:
             "groups": [],
         }
         assert (
-            await resource_binding.validate_user_can_bind_resource(
-                "server", "anything", server_ctx
-            )
+            await resource_binding.validate_user_can_bind_resource("server", "anything", server_ctx)
             is True
         )
         assert (
@@ -557,9 +532,7 @@ class TestValidateUserCanBindResource:
             "groups": [],
         }
         assert (
-            await resource_binding.validate_user_can_bind_resource(
-                "agent", "code-reviewer", ctx
-            )
+            await resource_binding.validate_user_can_bind_resource("agent", "code-reviewer", ctx)
             is False
         )
 
@@ -629,15 +602,10 @@ class TestValidateUserCanBindResource:
         # Same input, once as enum, once as string — both must behave
         # identically.
         assert (
-            await resource_binding.validate_user_can_bind_resource(
-                ResourceType.SERVER, "foo", ctx
-            )
+            await resource_binding.validate_user_can_bind_resource(ResourceType.SERVER, "foo", ctx)
             is True
         )
-        assert (
-            await resource_binding.validate_user_can_bind_resource("server", "foo", ctx)
-            is True
-        )
+        assert await resource_binding.validate_user_can_bind_resource("server", "foo", ctx) is True
 
     @pytest.mark.asyncio
     async def test_agent_lookup_timeout_denies_bind(self) -> None:
@@ -657,8 +625,9 @@ class TestValidateUserCanBindResource:
             "username": "me",
             "groups": [],
         }
-        with patch.object(agent_mod.agent_service, "get_agent_info", new=_hang), patch.object(
-            resource_binding, "_BIND_CHECK_LOOKUP_TIMEOUT_SECONDS", 0.05
+        with (
+            patch.object(agent_mod.agent_service, "get_agent_info", new=_hang),
+            patch.object(resource_binding, "_BIND_CHECK_LOOKUP_TIMEOUT_SECONDS", 0.05),
         ):
             result = await resource_binding.validate_user_can_bind_resource(
                 "agent", "code-reviewer", ctx
@@ -675,11 +644,12 @@ class TestValidateUserCanBindResource:
         fake_service = MagicMock()
         fake_service.get_skill = _hang
         ctx = {"is_admin": False, "username": "me", "groups": []}
-        with patch(
-            "registry.services.skill_service.get_skill_service",
-            return_value=fake_service,
-        ), patch.object(
-            resource_binding, "_BIND_CHECK_LOOKUP_TIMEOUT_SECONDS", 0.05
+        with (
+            patch(
+                "registry.services.skill_service.get_skill_service",
+                return_value=fake_service,
+            ),
+            patch.object(resource_binding, "_BIND_CHECK_LOOKUP_TIMEOUT_SECONDS", 0.05),
         ):
             result = await resource_binding.validate_user_can_bind_resource(
                 "skill", "python-linter", ctx

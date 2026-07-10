@@ -10,6 +10,10 @@
     {
       "server": "api",
       "methods": ["tokens", "GET", "POST"]
+    },
+    {
+      "agent": "*",
+      "actions": ["list_agents", "get_agent", "publish_agent", "modify_agent", "delete_agent", "invoke_agent"]
     }
   ],
   "ui_permissions": {

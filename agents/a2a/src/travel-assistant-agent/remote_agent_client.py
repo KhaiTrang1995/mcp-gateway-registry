@@ -1,18 +1,25 @@
 """Client for communicating with remote A2A agents."""
 
 import logging
+from collections.abc import Callable
 from uuid import uuid4
 
 import httpx
 from a2a.client import A2ACardResolver, ClientConfig, ClientFactory
 from a2a.types import Message, Part, Role, TextPart
 from models import DiscoveredAgent
+from url_guard import UnsafeUrlError, assert_fetchable
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s,p%(process)s,{%(filename)s:%(lineno)d},%(levelname)s,%(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Outbound-request timeout to a registry-discovered (untrusted) remote agent.
+# Kept short so a slow or malicious endpoint cannot tie up a worker; the
+# previous 300s let a hostile agent hold the connection open indefinitely.
+_REMOTE_AGENT_TIMEOUT_SECONDS: float = 30.0
 
 
 class RemoteAgentClient:
@@ -30,13 +37,40 @@ class RemoteAgentClient:
         agent_name: str,
         agent_id: str,
         skills: list[str] | None = None,
-        auth_token: str | None = None,
+        delegation_token: str | None = None,
+        gateway_token: str | None = None,
     ):
+        """Initialize a client for a registry-discovered remote agent.
+
+        Args:
+            agent_url: The remote agent's endpoint URL. When the agent was
+                discovered through the MCP gateway, this is the gateway-rewritten
+                URL (``/agent/<path>/``), so the call is proxied and the gateway
+                enforces the ``invoke_agent`` scope.
+            agent_name: Human-readable agent name (for logging).
+            agent_id: Registry path/id used as the cache key.
+            skills: Skill names the agent advertises.
+            delegation_token: OPTIONAL, audience-restricted, short-lived token
+                minted specifically for this target agent. It MUST NOT be the
+                caller's registry-scoped token. Sent in the standard
+                ``Authorization`` header, which the A2A gateway forwards
+                end-to-end to the target agent (per the A2A egress trust model).
+                When ``None``, a random placeholder is sent so the target's
+                presence-only check has a credential to see (test/demo).
+            gateway_token: OPTIONAL gateway/ingress token, sent in
+                ``X-Authorization`` for the gateway's ``/validate`` hop to
+                authenticate the caller and enforce the ``invoke_agent`` scope.
+                The gateway strips it before proxying, so it never reaches the
+                target agent.
+        """
         self.agent_url = agent_url
         self.agent_name = agent_name
         self.agent_id = agent_id
         self.skills = skills or []
-        self.auth_token = auth_token
+        # Per-target delegation credential (Authorization) -- never the registry
+        # token. The registry/gateway token travels separately in X-Authorization.
+        self.delegation_token = delegation_token
+        self.gateway_token = gateway_token
         self.agent_card = None
         self.client = None
         self.httpx_client = None
@@ -51,12 +85,44 @@ class RemoteAgentClient:
 
         logger.info(f"Initializing A2A client for {self.agent_name} at {self.agent_url}")
 
-        headers = {}
-        if self.auth_token:
-            headers["Authorization"] = f"Bearer {self.auth_token}"
+        # SSRF guard: the endpoint URL is registry-supplied and not fully
+        # trusted. Validate (scheme + DNS-resolved public IP) before any fetch
+        # so a malicious registered URL cannot pivot to loopback / RFC-1918 /
+        # cloud-metadata targets. Fail closed on any validation error.
+        try:
+            assert_fetchable(self.agent_url)
+        except UnsafeUrlError as exc:
+            logger.error(f"Refusing to contact remote agent {self.agent_name}: {exc}")
+            raise
 
-        # Create persistent httpx client (not using context manager)
-        self.httpx_client = httpx.AsyncClient(timeout=300, headers=headers)
+        headers = {}
+        # A2A egress trust model (two-header split):
+        #   X-Authorization -> caller's gateway/ingress token; the gateway
+        #     validates it at /validate, enforces invoke_agent, then STRIPS it.
+        #   Authorization   -> the target agent's own credential (obtained
+        #     out-of-band); the gateway forwards it end-to-end untouched.
+        if self.gateway_token:
+            headers["X-Authorization"] = f"Bearer {self.gateway_token}"
+        if self.delegation_token:
+            authorization_token = self.delegation_token
+        else:
+            # No real per-target credential in this sample: send a random,
+            # opaque placeholder so the target agent's presence-only check has a
+            # bearer to see. It is deliberately NOT the gateway token (which
+            # lives in X-Authorization) -- the gateway rejects a request that
+            # duplicates the gateway credential into Authorization.
+            authorization_token = f"a2a-demo-{uuid4().hex}"
+        headers["Authorization"] = f"Bearer {authorization_token}"
+
+        # Create persistent httpx client (not using context manager). Redirects
+        # are disabled so a validated public host cannot 302 the request to an
+        # internal address after the pre-fetch SSRF check (rebinding via
+        # redirect); the short timeout bounds a hostile/slow endpoint.
+        self.httpx_client = httpx.AsyncClient(
+            timeout=_REMOTE_AGENT_TIMEOUT_SECONDS,
+            headers=headers,
+            follow_redirects=False,
+        )
 
         # Get agent card
         resolver = A2ACardResolver(httpx_client=self.httpx_client, base_url=self.agent_url)
@@ -124,8 +190,29 @@ class RemoteAgentCache:
         logger.info(f"Added agent to cache: {agent_id}")
 
     def cache_discovered_agents(
-        self, agents: list[DiscoveredAgent], auth_token: str | None = None
+        self,
+        agents: list[DiscoveredAgent],
+        delegation_token_provider: Callable[[DiscoveredAgent], str | None] | None = None,
+        gateway_token: str | None = None,
     ) -> dict[str, RemoteAgentClient]:
+        """Cache discovered remote agents for later invocation.
+
+        Args:
+            agents: Agents returned by registry discovery.
+            delegation_token_provider: OPTIONAL callback that mints an
+                audience-restricted, short-lived delegation token bound to a
+                specific target agent. The caller's registry token MUST NOT be
+                passed here -- doing so would leak it to untrusted remote agents.
+                When ``None`` (the default), no credential is attached to
+                outbound A2A calls.
+            gateway_token: OPTIONAL gateway/ingress token sent in X-Authorization
+                so the gateway can authenticate the caller and enforce the
+                invoke_agent scope. The gateway strips it before proxying, so it
+                never reaches the target agent.
+
+        Returns:
+            The newly cached agent clients keyed by agent id.
+        """
         newly_cached = {}
 
         for agent in agents:
@@ -136,13 +223,20 @@ class RemoteAgentCache:
                 logger.info(f"Agent {agent_id} already cached, skipping")
                 continue
 
+            # Mint a per-target delegation token if a provider was supplied;
+            # otherwise send no credential. Never reuse the registry token.
+            delegation_token: str | None = None
+            if delegation_token_provider is not None:
+                delegation_token = delegation_token_provider(agent)
+
             # Create and cache the remote agent client
             agent_client = RemoteAgentClient(
                 agent_url=agent.url,
                 agent_name=agent.name,
                 agent_id=agent_id,
                 skills=agent.skill_names,
-                auth_token=auth_token,
+                delegation_token=delegation_token,
+                gateway_token=gateway_token,
             )
 
             self._cache[agent_id] = agent_client

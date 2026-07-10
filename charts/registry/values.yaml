@@ -3,7 +3,7 @@ global:
   image:
     # Container registry (host + optional namespace). Shared default across subcharts.
     registry: public.ecr.aws/p3v1o3c6
-    tag: 1.25.0
+    tag: 1.26.0
     pullPolicy: IfNotPresent
   cloud:
     # AWS region for cloud detection in telemetry. Set this when deploying
@@ -42,9 +42,8 @@ image:
 # bring your own.
 serviceAccount:
   create: true
-  name: ""  # defaults to app.name ("registry") when empty
+  name: "" # defaults to app.name ("registry") when empty
   annotations: {}
-
 app:
   name: registry
   replicas: 2
@@ -66,6 +65,29 @@ app:
   # ingress origin is always trusted. Leave empty for same-origin-only access;
   # there is deliberately no wildcard fallback.
   corsAllowedOrigins: ""
+  # Number of trusted reverse-proxy hops in front of the app. The audit client IP
+  # is taken from the Nth-from-the-right X-Forwarded-For entry, never the
+  # client-controlled left-most one. Default 1 (the bundled nginx). Raise it when
+  # additional trusted proxies (e.g. ALB + CloudFront) sit in front.
+  trustedProxyHops: 1
+  # ADDITIONAL hostnames (optionally host:port) trusted in the inbound Host header
+  # when building OAuth external URLs. Your primary domain is ALREADY covered — the
+  # allowlist always includes the host from the registry URL — so leave this empty
+  # for a normal single-domain deployment. Only list EXTRA hostnames the app is
+  # also reached at but that differ from the registry URL host (e.g. a CloudFront
+  # domain alongside a custom domain). A Host not on the allowlist falls back to
+  # the configured host (prevents host-header injection / open redirect).
+  trustedExternalHosts: ""
+  # Comma-separated CIDRs (or bare IPs) of the trusted proxy hop(s) directly in front
+  # of the bundled nginx, used for nginx's set_real_ip_from so the audited client IP
+  # is the real end user rather than the load balancer's internal IP. Leave EMPTY (the
+  # default) for edge deployments where nginx is reached directly — nginx's peer is
+  # already the client and a spoofed X-Forwarded-For is ignored. Set it when a load
+  # balancer sits in front: behind an ALB (EC2/ECS/EKS) use your VPC CIDR (e.g.
+  # 10.0.0.0/16); for CloudFront in front of an ALB list the VPC CIDR AND CloudFront's
+  # origin-facing ranges (recursion is enabled so the chain resolves to the real
+  # viewer). Malformed entries are dropped with a warning (fail closed).
+  trustedRealIpCidrs: ""
   # Federation configuration
   federationStaticTokenAuthEnabled: false #If not provided, defaults to false
   federationStaticToken: # If not provided, a random token is auto-generated
@@ -172,6 +194,12 @@ app:
   deploymentMode: with-gateway
   # Registry mode: full, skills-only, mcp-servers-only, agents-only
   registryMode: full
+  # A2A reverse-proxy gateway (opt-in; default off). When true, each enabled A2A
+  # agent gets nginx location blocks proxying its card + JSON-RPC through the
+  # gateway for centralized auth and metrics. Requires deploymentMode:
+  # with-gateway. Internal agent backends live at private ClusterIPs, so also set
+  # ssrfAllowedHosts / ssrfAllowedCidrs above or they are marked unhealthy.
+  a2aReverseProxyEnabled: false
   # Internal/workshop deployment classification (telemetry labels only; issue #1216).
   # Tags a deployment as one of our own internal/workshop installs so it can be
   # distinguished from community installs in telemetry. Does NOT change access control.
@@ -217,6 +245,12 @@ app:
   updateCheck:
     enabled: true
     intervalHours: 24
+  # Audit durability guard (fail closed). When true (default), the registry
+  # refuses to start if audit logging is enabled but no durable sink
+  # (DocumentDB/MongoDB) is available, instead of silently degrading to
+  # non-durable JSON log lines that are lost on restart and not queryable for
+  # forensics. Set to false only where a non-durable audit trail is acceptable.
+  auditLogRequireDurable: true
   # Tool-level access control (issue #1026)
   mcpToolsListFilterEnabled: true # Registry-side awareness of the MCP tools/list filter (also read by auth-server)
   toolFilterAuditLogLevel: "INFO" # Audit log level for tool-prune events (DEBUG, INFO, WARNING)
@@ -234,13 +268,13 @@ app:
   # document (`/.well-known/oauth-protected-resource`). Space-separated scope
   # names.
   #
-  # Default ("profile email offline_access") matches the docs' recommended
-  # Keycloak-DCR setup: MCP clients (Claude Code, Claude.ai, Cursor) perform
-  # RFC 7591 DCR against the bundled Keycloak realm, and Keycloak rejects
-  # any scope name that isn't already in the realm. These three are present
-  # by default in every Keycloak realm, so DCR succeeds and the user's
-  # groups (delivered via the `basic` scope's groups mapper) drive
-  # authorization at the gateway.
+  # Default ("openid profile email offline_access") is the set of standard OIDC
+  # scopes MCP clients (Claude Code, Claude.ai, Cursor) request at the gateway
+  # authorize endpoint. `openid` is REQUIRED: Entra rejects an authorize request
+  # without it (AADSTS70011), and it is present in every Keycloak realm too, so
+  # the default works for both providers. The Keycloak-DCR path (RFC 7591 against
+  # the bundled realm) also accepts these because Keycloak only rejects scope
+  # names not already in the realm, and all four are standard.
   #
   # Set to empty ("") to let the registry derive the list from its own
   # scopes config (DocumentDB-backed in production, YAML-backed in dev) —
@@ -248,7 +282,20 @@ app:
   # whose scopes match the registry's internal scope names.
   #
   # See docs/ai-coding-assistant-registry-integration.md for the rationale.
-  mcpAdvertisedScopes: "profile email offline_access"
+  mcpAdvertisedScopes: "openid profile email offline_access"
+  # SSRF guard bypass for internal MCP-server upstreams. The health checker and
+  # proxy validate each server's proxy_pass_url through the SSRF guard, which
+  # blocks private/cluster IPs by default. Internal MCP servers live at private
+  # ClusterIPs, so an in-cluster server is marked UNHEALTHY (its nginx location is
+  # commented out, so requests 405) unless its host or IP range is listed here.
+  # Set ONE of these for in-cluster MCP servers:
+  #   ssrfAllowedCidrs: the cluster service CIDR (covers all in-cluster servers at
+  #     once, e.g. EKS default "172.20.0.0/16"); OR
+  #   ssrfAllowedHosts: comma-separated exact hostnames (least privilege; no
+  #     wildcards, e.g. "obo-echo.<ns>.svc.cluster.local").
+  # The cloud metadata address (169.254.169.254) is never permitted by either.
+  ssrfAllowedHosts: ""
+  ssrfAllowedCidrs: ""
   # IDE OAuth login (PR #1224). Pre-registered PUBLIC OAuth client_id that IDEs
   # (Cursor, Claude Code, Codex) use to start the gateway login flow. When set,
   # the Connect config advertises it and drops the static gateway token. Empty
@@ -342,6 +389,8 @@ okta:
   apiTokenExistingSecret: "" # If set, read OKTA_API_TOKEN from this K8s secret
   apiTokenExistingSecretKey: "OKTA_API_TOKEN"
   authServerId: "" # Optional: uses default Org Authorization Server if not set
+  m2mAllowedAudiences: "" # Optional: comma/space-separated M2M audience allowlist; empty = only client ids accepted (fail closed)
+  m2mClientGroups: "" # Optional: JSON client_id->[groups] map for M2M RBAC sync; empty = no groups (fail closed)
 # Auth0 integration (used when authProvider.type = "auth0" in standalone deployment)
 auth0:
   domain: "" # e.g., your-tenant.us.auth0.com
@@ -355,6 +404,7 @@ auth0:
   m2mClientSecret: "" # Required for IAM Management
   m2mClientSecretExistingSecret: "" # If set, read AUTH0_M2M_CLIENT_SECRET from this K8s secret
   m2mClientSecretExistingSecretKey: "AUTH0_M2M_CLIENT_SECRET"
+  m2mClientGroups: "" # Optional: JSON client_id->[groups] map for M2M RBAC sync; empty = no groups (fail closed)
   managementApiToken: "" # Optional: alternative to M2M credentials (expires after 24h)
   managementApiTokenExistingSecret: "" # If set, read AUTH0_MANAGEMENT_API_TOKEN from this K8s secret
   managementApiTokenExistingSecretKey: "AUTH0_MANAGEMENT_API_TOKEN"
@@ -363,9 +413,8 @@ cognito:
   userPoolId: "" # Cognito User Pool ID
   clientId: ""
   clientSecret: ""
-  domain: ""  # Optional: custom Cognito domain
-  region: "us-east-1"  # AWS region for the User Pool
-
+  domain: "" # Optional: custom Cognito domain
+  region: "us-east-1" # AWS region for the User Pool
 # Per-user egress credential vault (third-party OBO support).
 # When enabled, the registry renders a discrete `registry-egress-config`
 # ConfigMap (non-secret vars) consumed via envFrom; the nginx marker secret is
@@ -382,6 +431,12 @@ egressAuth:
   tokenRefreshSkewSeconds: "300"
   refreshWorkerIntervalSeconds: "300"
   stateTtlSeconds: "600"
+  # obo_exchange target_audience allowlist (whitespace-separated). Optional.
+  # When set, an obo server may only use a listed audience (authoritative positive
+  # control against a confused-deputy that points obo at a shared first-party API).
+  # When empty, a shape rule applies: the target must be an internal app audience
+  # (api:// App ID URI or bare client-id/GUID), never an https host URL.
+  oboAllowedAudiences: ""
   # nginx marker secret. REQUIRED for standalone deployment (chart render fails
   # if empty) -- it guards all mcp-proxy token minting and the app requires it
   # at startup. Set a strong random value, identical to auth-server's. In the
@@ -389,18 +444,17 @@ egressAuth:
   # standalone subchart secret.
   markerSecret: ""
   secretsManager:
-    kmsKeyId: ""  # Optional CMK; empty uses the AWS-managed key.
+    kmsKeyId: "" # Optional CMK; empty uses the AWS-managed key.
     pathPrefix: "mcp/egress"
   openbao:
-    addr: ""  # e.g. http://openbao.default.svc:8200
-    namespace: ""  # Enterprise namespaces only.
+    addr: "" # e.g. http://openbao.default.svc:8200
+    namespace: "" # Enterprise namespaces only.
     kvMount: "secret"
-    authMethod: "token"  # token | kubernetes
+    authMethod: "token" # token | kubernetes
     # OpenBao kubernetes-auth role, bound to the registry ServiceAccount by the
     # stack's openbao-init Job. Named "registry" (not egress-specific) so more
     # policies can attach to the same role/SA over time.
     role: "registry"
-
 # PingFederate integration (used when authProvider.type = "pingfederate")
 pingfederate:
   enabled: false
@@ -416,6 +470,7 @@ pingfederate:
   m2mClientSecretExistingSecretKey: "PINGFEDERATE_M2M_CLIENT_SECRET"
   applicationIdUri: ""
   groupsClaim: "groups"
+  m2mAllowedAudiences: "" # Optional: comma/space-separated M2M audience allowlist; empty = only client ids accepted (fail closed)
 # PingFederate Admin API (registry only).
 # Used by the registry to call the PingFederate admin API to create OAuth
 # clients and Simple PCV users at runtime. The PASS is sensitive; the URL

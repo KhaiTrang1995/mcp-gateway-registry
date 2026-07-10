@@ -17,6 +17,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import subprocess  # nosec B404
 import sys
 from datetime import UTC, datetime
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOKEN_FILE = PROJECT_ROOT / ".oauth-tokens" / "ingress.json"
 DEFAULT_BASE_URL = "http://localhost"
 DEFAULT_ANALYZERS = "yara"
+# Environment variables used to hand secrets to the scanner subprocess without
+# placing them on its command line (argv is readable by any local user via
+# `ps` / /proc/<pid>/cmdline while the scan runs).
+LLM_API_KEY_ENV = "MCP_SCANNER_LLM_API_KEY"
+BEARER_TOKEN_ENV = "MCP_SCAN_BEARER_TOKEN"  # nosec B105 - env var name, not a secret value
 
 
 def _run_security_scan(
@@ -91,27 +97,24 @@ def _run_security_scan(
         analyzers,
     ]
 
+    # Pass secrets through the child environment, never on argv. The scanner
+    # reads the LLM API key from MCP_SCANNER_LLM_API_KEY and the target-server
+    # bearer token from MCP_SCAN_BEARER_TOKEN. Command-line arguments are visible
+    # to any local user via `ps` / /proc/<pid>/cmdline for the scan's duration.
+    scan_env = os.environ.copy()
     if api_key:
-        cmd.extend(["--api-key", api_key])
-
-    # Add headers with authorization token if provided
+        scan_env[LLM_API_KEY_ENV] = api_key
     if access_token:
-        headers_json = json.dumps({"X-Authorization": f"Bearer {access_token}"})
-        cmd.extend(["--headers", headers_json])
+        scan_env[BEARER_TOKEN_ENV] = access_token
 
-    # Log command with masked token for security
-    cmd_for_log = cmd.copy()
-    if access_token and "--headers" in cmd_for_log:
-        header_idx = cmd_for_log.index("--headers") + 1
-        headers_masked = json.dumps(
-            {"X-Authorization": f"Bearer {access_token[:20]}...{access_token[-10:]}"}
-        )
-        cmd_for_log[header_idx] = headers_masked
-    logger.info(f"Running: {' '.join(cmd_for_log)}")
+    # The full command is safe to log: it carries no secrets. The LLM API key
+    # and target-server bearer token are passed through the child environment
+    # (scan_env) above, never on argv, so nothing here needs masking.
+    logger.info(f"Running: {' '.join(cmd)}")
 
     try:
-        result = subprocess.run(  # nosec B603 - internal script invoked via uv run with validated args
-            cmd, capture_output=True, text=True, check=False, cwd=str(PROJECT_ROOT)
+        result = subprocess.run(  # nosec B603 - internal script invoked via uv run with validated args; secrets passed via env, not argv
+            cmd, capture_output=True, text=True, check=False, cwd=str(PROJECT_ROOT), env=scan_env
         )
 
         # Log output

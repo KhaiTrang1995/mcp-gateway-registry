@@ -125,7 +125,7 @@ uv run python api/registry_management.py \
 
 ### Example Group Definitions
 
-See the [cli/examples/](../cli/examples/) directory for sample group definitions:
+See the [cli/examples/](../cli/examples) directory for sample group definitions:
 - [public-mcp-users.json](../cli/examples/public-mcp-users.json) - Public access group with access to context7, cloudflare-docs servers and flight-booking agent
 - `currenttime-users.json` - Access to currenttime server only
 

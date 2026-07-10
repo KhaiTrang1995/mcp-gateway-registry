@@ -87,6 +87,7 @@ def _prepare_path(
         path = path.rstrip("/")
     return path
 
+
 # Maximum time we will wait for the repository lookups that the pre-mint
 # authorization check performs (agent visibility, skill visibility). These
 # queries hit MongoDB; without a bound a slow/frozen DB would hang the
@@ -456,13 +457,14 @@ async def validate_user_can_bind_resource(
             )
         except TimeoutError:
             logger.warning(
-                "Timed out looking up agent %s during resource-binding check; "
-                "denying bind request",
+                "Timed out looking up agent %s during resource-binding check; denying bind request",
                 normalized_id,
             )
             return False
         except Exception:
-            logger.exception("Failed to look up agent %s during resource-binding check", normalized_id)
+            logger.exception(
+                "Failed to look up agent %s during resource-binding check", normalized_id
+            )
             return False
         if not agent_card:
             return False
@@ -487,13 +489,14 @@ async def validate_user_can_bind_resource(
             )
         except TimeoutError:
             logger.warning(
-                "Timed out looking up skill %s during resource-binding check; "
-                "denying bind request",
+                "Timed out looking up skill %s during resource-binding check; denying bind request",
                 normalized_id,
             )
             return False
         except Exception:
-            logger.exception("Failed to look up skill %s during resource-binding check", normalized_id)
+            logger.exception(
+                "Failed to look up skill %s during resource-binding check", normalized_id
+            )
             return False
         if not skill:
             return False

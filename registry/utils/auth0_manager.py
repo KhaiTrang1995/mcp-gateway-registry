@@ -61,7 +61,9 @@ async def _get_management_api_token() -> str:
     async with httpx.AsyncClient(timeout=10.0) as client:
         response = await client.post(token_url, json=token_data)
         if response.status_code != 200:
-            error_msg = f"Failed to get Auth0 Management API token: {response.text}"
+            # Do not include response.text: a token-endpoint error body can echo
+            # the client_id or partial credential context.
+            error_msg = f"Failed to get Auth0 Management API token: HTTP {response.status_code}"
             logger.error(error_msg)
             raise ValueError(error_msg)
 
@@ -529,7 +531,7 @@ async def update_auth0_user_groups(
 
         # Remove current roles
         if current_role_ids:
-            await client.delete(
+            await client.delete(  # type: ignore[call-arg]  # httpx stub omits json= for DELETE-with-body (works at runtime)
                 f"{base_url}/users/{user_id}/roles",
                 headers=headers,
                 json={"roles": current_role_ids},

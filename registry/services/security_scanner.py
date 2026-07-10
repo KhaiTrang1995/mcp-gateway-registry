@@ -14,6 +14,7 @@ import re
 import subprocess  # nosec B404
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from ..core.config import settings
 from ..core.endpoint_utils import get_endpoint_url
@@ -53,8 +54,10 @@ def _extract_bearer_token_from_headers(headers: str) -> str | None:
             logger.warning("Headers provided but no Bearer token found in X-Authorization header")
             return None
     except json.JSONDecodeError as e:
+        # Never echo the raw headers string: it may contain a bearer token /
+        # API key. Log/raise only the parser's positional error, not the value.
         logger.error(f"Failed to parse headers JSON: {e}")
-        raise ValueError(f"Invalid headers JSON: {headers}") from e
+        raise ValueError(f"Invalid headers JSON: {e}") from e
 
 
 def _parse_scanner_json_output(stdout: str) -> list:
@@ -112,7 +115,7 @@ def _organize_findings_by_analyzer(tool_results: list) -> dict:
     Returns:
         Dictionary organized by analyzer name with findings
     """
-    organized_results = {}
+    organized_results: dict[str, Any] = {}
 
     for tool_result in tool_results:
         findings_dict = tool_result.get("findings", {})

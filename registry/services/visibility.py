@@ -15,7 +15,116 @@ caller's auth context (``is_admin``, ``accessible_*`` scope lists,
 import logging
 from typing import Any
 
+from ..core.config import DeploymentMode, settings
+
 logger = logging.getLogger(__name__)
+
+# Internal backend-connection fields that must never reach a non-admin caller in
+# with-gateway mode: the raw upstream URL and any explicit endpoint override the
+# registry proxies on the user's behalf. Non-admins reach servers through the
+# gateway, so exposing these maps the internal network. In registry-only mode
+# there is no gateway, so users legitimately need the URL to connect directly
+# and these are NOT stripped.
+_BACKEND_URL_FIELDS: tuple[str, ...] = (
+    "proxy_pass_url",
+    "mcp_endpoint",
+    "sse_endpoint",
+)
+
+
+def should_redact_backend_urls(
+    user_context: dict | None,
+) -> bool:
+    """Return True when internal backend URLs must be stripped for this caller.
+
+    Single source of truth for the redaction decision enforced by the server
+    read endpoints (``GET /servers``, ``GET /servers/{path}``,
+    ``GET /servers/{path}/versions``, ``server.json``) and semantic search.
+
+    Fails closed: an admin sees the raw URLs, and in registry-only mode every
+    caller needs the URL to connect directly (no gateway to proxy through). In
+    every other case — including a missing/empty ``user_context`` — the backend
+    URLs are redacted.
+
+    Args:
+        user_context: Authenticated user context, or None if auth is absent.
+
+    Returns:
+        True if backend URL fields should be removed before returning the
+        response; False only for admins or when running in registry-only mode.
+    """
+    if user_context and user_context.get("is_admin"):
+        return False
+    if settings.deployment_mode == DeploymentMode.REGISTRY_ONLY:
+        return False
+    return True
+
+
+def redact_server_backend_fields(
+    server_dict: dict,
+) -> dict:
+    """Strip internal backend URL fields from a flat server/version dict in place.
+
+    Removes ``proxy_pass_url``, ``mcp_endpoint`` and ``sse_endpoint`` from the
+    top-level dict and, if present, from each entry of an embedded ``versions``
+    list. Mutates and returns the same dict so callers can chain. This mirrors
+    the ``proxy_pass_url`` stripping in ``GET /servers/{path}`` but also covers
+    the endpoint-override fields and per-version URLs that other read surfaces
+    expose.
+
+    Callers MUST gate this behind :func:`should_redact_backend_urls`; this
+    function performs no authorization decision of its own.
+
+    Args:
+        server_dict: A server or version dict to redact in place.
+
+    Returns:
+        The same dict, with backend URL fields removed.
+    """
+    for field in _BACKEND_URL_FIELDS:
+        server_dict.pop(field, None)
+
+    versions = server_dict.get("versions")
+    if isinstance(versions, list):
+        for version in versions:
+            if isinstance(version, dict):
+                for field in _BACKEND_URL_FIELDS:
+                    version.pop(field, None)
+
+    return server_dict
+
+
+# Agent card backend-URL fields to strip for non-admins in with-gateway mode.
+# In A2A reverse-proxy mode the registrant's real backend is stored in
+# proxy_pass_url (the advertised ``url`` is the gateway address), so proxy_pass_url
+# is the internal field to hide -- mirroring the MCP-server redaction. Both the
+# snake_case and camelCase (by_alias dump) spellings are covered.
+_AGENT_BACKEND_URL_FIELDS: tuple[str, ...] = (
+    "proxy_pass_url",
+    "proxyPassUrl",
+)
+
+
+def redact_agent_backend_fields(
+    agent_dict: dict,
+) -> dict:
+    """Strip internal backend URL fields from an agent card dict in place.
+
+    Removes ``proxy_pass_url`` (both snake_case and camelCase spellings) so a
+    non-admin caller sees only the gateway-facing ``url``. Callers MUST gate this
+    behind :func:`should_redact_backend_urls`; this function performs no
+    authorization decision of its own. Mirrors
+    :func:`redact_server_backend_fields`.
+
+    Args:
+        agent_dict: An agent card dict to redact in place.
+
+    Returns:
+        The same dict, with backend URL fields removed.
+    """
+    for field in _AGENT_BACKEND_URL_FIELDS:
+        agent_dict.pop(field, None)
+    return agent_dict
 
 
 async def user_can_access_server(

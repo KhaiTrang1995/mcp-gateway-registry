@@ -1,6 +1,5 @@
-# Release Notes Disclaimer
+# Moved
 
-The release notes in this directory describe features and capabilities at the time of release.
-Terms like "production-ready" or "enterprise-grade" describe design intent and should not be
-construed as warranties or guarantees. Users should perform their own testing and validation
-before deploying to their environments.
+This release note has moved to [docs/release-notes/DISCLAIMER.md](../docs/release-notes/DISCLAIMER.md).
+
+It is published on the [documentation site](https://agentic-community.github.io/mcp-gateway-registry/release-notes/DISCLAIMER/).
