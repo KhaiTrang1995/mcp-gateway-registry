@@ -26,6 +26,17 @@ logger = logging.getLogger(__name__)
 # currently has so an operator's chmod isn't silently reverted.
 DEFAULT_NGINX_CONFIG_MODE: int = 0o644
 
+# Route prefix under which enabled A2A agents are reverse-proxied through the
+# gateway. An agent registered at path "/flight-booking-agent" is
+# reachable at "{ROOT_PATH}/agent/flight-booking-agent/".
+AGENT_ROUTE_PREFIX: str = "/agent"
+
+# Agent path and backend url come from registry data and are interpolated into
+# nginx directive positions, so they must be validated to prevent config
+# injection (e.g. "}", ";", newlines breaking out of the location block).
+_NGINX_AGENT_PATH_SAFE = re.compile(r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+_NGINX_AGENT_URL_SAFE = re.compile(r"^https?://[A-Za-z0-9.\-]+(?::\d+)?(?:/[A-Za-z0-9._~\-/]*)?$")
+
 
 # Headroom added on top of the auth-server mcp-proxy hop's own upstream timeout
 # (MCP_PROXY_TIMEOUT) when deriving nginx's proxy_read_timeout for the
@@ -1092,6 +1103,16 @@ class NginxConfigService:
                 logger.error(f"Failed to generate virtual server config: {e}", exc_info=True)
                 config_content = config_content.replace("{{VIRTUAL_SERVER_BLOCKS}}", "")
 
+            # Generate A2A agent reverse-proxy blocks. Opt-in via
+            # A2A_REVERSE_PROXY_ENABLED. In registry-only mode they are also
+            # skipped: the registry-only 503 block already returns 503 for any
+            # /agent/* path that is not an API route.
+            if settings.nginx_updates_enabled and settings.a2a_reverse_proxy_enabled:
+                agent_blocks = await self._generate_agent_location_blocks()
+            else:
+                agent_blocks = ""
+            config_content = config_content.replace("{{AGENT_LOCATION_BLOCKS}}", agent_blocks)
+
             root_path = os.environ.get("ROOT_PATH", "").rstrip("/")
             config_content = config_content.replace("{{ROOT_PATH}}", root_path)
 
@@ -1737,6 +1758,193 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
 
         except Exception as e:
             logger.error(f"Failed to write virtual server mappings: {e}", exc_info=True)
+
+    async def _generate_agent_location_blocks(self) -> str:
+        """Generate nginx reverse-proxy location blocks for enabled A2A agents.
+
+        Mirrors the MCP-server and virtual-server generators: each enabled
+        agent gets location blocks that proxy A2A traffic through the gateway
+        (centralized auth, metrics, network isolation) instead of clients
+        connecting directly to the agent backend.
+
+        Returns:
+            Nginx configuration string, or an empty string when there are no
+            enabled agents.
+        """
+        try:
+            from registry.services.agent_service import agent_service
+
+            enabled_paths = await agent_service.get_enabled_agents()
+            if not enabled_paths:
+                logger.debug("No enabled A2A agents found")
+                return ""
+
+            location_blocks = []
+            for path in enabled_paths:
+                agent = await agent_service.get_agent_info(path)
+                if agent is None:
+                    logger.warning(f"Enabled agent '{path}' has no card; skipping nginx block")
+                    continue
+
+                backend_url = (agent.url or "").rstrip("/")
+                if not backend_url:
+                    logger.warning(f"Agent '{path}' has no url; skipping nginx block")
+                    continue
+
+                # Only proxy true A2A agents. A non-A2A agent that happens to
+                # carry a URL must not get a JSON-RPC proxy route.
+                if (agent.supported_protocol or "").lower() != "a2a":
+                    logger.debug(
+                        f"Agent '{path}' protocol is {agent.supported_protocol!r} "
+                        "(not 'a2a'); skipping nginx block"
+                    )
+                    continue
+
+                # Never advertise a proxy path to a backend that is not
+                # known-healthy, so the gateway does not route to a dead agent.
+                if not HealthStatus.is_healthy(agent.health_status):
+                    logger.debug(
+                        f"Agent '{path}' health is {agent.health_status!r} "
+                        "(not healthy); skipping nginx block"
+                    )
+                    continue
+
+                agent_path = (agent.path or path).strip("/")
+                try:
+                    block = self._create_agent_location_block(
+                        agent_path,
+                        backend_url,
+                        agent.name,
+                    )
+                except ValueError as exc:
+                    logger.warning(f"Skipping agent '{path}' with unsafe nginx input: {exc}")
+                    continue
+                location_blocks.append(block)
+                logger.debug(f"Generated A2A agent location block for {agent_path}")
+
+            logger.info(f"Generated {len(location_blocks)} A2A agent location blocks")
+            return "\n".join(location_blocks)
+
+        except Exception as e:
+            logger.error(f"Failed to generate agent location blocks: {e}", exc_info=True)
+            return ""
+
+    def _create_agent_location_block(
+        self,
+        agent_path: str,
+        backend_url: str,
+        agent_name: str,
+    ) -> str:
+        """Create nginx location blocks for a single A2A agent.
+
+        Emits two prefix locations under ``{ROOT_PATH}/agent/{agent_path}/``:
+          1. The agent card (``.well-known/agent-card.json``) for discovery.
+          2. The JSON-RPC endpoint for ``message/send`` / ``message/stream``.
+
+        Both are protected by the ``/validate`` auth subrequest (the same hop
+        used for MCP servers) and proxy straight to the agent backend. A2A is
+        JSON-RPC over HTTP, so no protocol translation is required.
+
+        Args:
+            agent_path: Agent path without surrounding slashes
+                (e.g. ``flight-booking-agent``).
+            backend_url: Agent backend base URL without a trailing slash.
+            agent_name: Human-readable agent name (used in a comment only).
+
+        Returns:
+            Nginx configuration string with the two location blocks.
+
+        Raises:
+            ValueError: If ``agent_path`` or ``backend_url`` contains characters
+                that are unsafe to interpolate into an nginx config.
+        """
+        if not _NGINX_AGENT_PATH_SAFE.match(agent_path):
+            raise ValueError(f"unsafe agent path: {agent_path!r}")
+        if not _NGINX_AGENT_URL_SAFE.match(backend_url):
+            raise ValueError(f"unsafe agent url: {backend_url!r}")
+
+        parsed_url = urlparse(backend_url)
+        upstream_host = parsed_url.netloc
+        # External services (https or FQDN) use the upstream hostname; bare
+        # internal hostnames preserve the original Host header.
+        if parsed_url.scheme == "https" or "." in upstream_host:
+            host_header = upstream_host
+        else:
+            host_header = "$host"
+
+        dns_resolver = os.environ.get("NGINX_DNS_RESOLVER", "8.8.8.8 8.8.4.4")
+        dns_resolver_timeout = os.environ.get("NGINX_DNS_RESOLVER_TIMEOUT", "5")
+        safe_name = self._sanitize_for_nginx_comment(agent_name)
+        route = f"{AGENT_ROUTE_PREFIX}/{agent_path}"
+
+        return f"""
+    # A2A agent card (discovery): {safe_name}
+    # Exact match so suffixes (e.g. /.well-known/agent-card.json/../secret)
+    # cannot be smuggled through this proxy.
+    location = {{{{ROOT_PATH}}}}{route}/.well-known/agent-card.json {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        proxy_pass {backend_url}/.well-known/agent-card.json;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        proxy_set_header Host {host_header};
+        proxy_set_header Authorization $http_authorization;
+        # Rewrite the card's endpoint URLs from the backend to this gateway so
+        # clients send JSON-RPC back through the proxy. Body size changes, so
+        # Content-Length must be cleared before the rewrite runs.
+        header_filter_by_lua_block {{ ngx.header.content_length = nil }}
+        body_filter_by_lua_file /etc/nginx/lua/agent_card_rewrite.lua;
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}
+
+    # A2A agent JSON-RPC endpoint: {safe_name}
+    location {{{{ROOT_PATH}}}}{route}/ {{
+        resolver {dns_resolver} valid=10s;
+        resolver_timeout {dns_resolver_timeout}s;
+        auth_request /validate;
+        auth_request_set $auth_user $upstream_http_x_user;
+        auth_request_set $auth_username $upstream_http_x_username;
+        auth_request_set $auth_scopes $upstream_http_x_scopes;
+        auth_request_set $auth_method $upstream_http_x_auth_method;
+
+        # Capture the JSON-RPC body (rewrite phase) so emit_metrics can record
+        # the A2A method; per-agent invoke is enforced by the auth server via
+        # the /validate subrequest above.
+        rewrite_by_lua_file /etc/nginx/lua/capture_body.lua;
+        log_by_lua_file /etc/nginx/lua/emit_metrics.lua;
+
+        proxy_pass {backend_url}/;
+        proxy_http_version 1.1;
+        proxy_ssl_server_name on;
+        # message/stream (SSE) can stay open for minutes; override nginx's 60s
+        # default so streaming responses are not killed mid-flight.
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
+        proxy_set_header Host {host_header};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Original-URL $scheme://$host$request_uri;
+        proxy_set_header Authorization $http_authorization;
+
+        # Forward validated auth context to the agent backend
+        proxy_set_header X-User $auth_user;
+        proxy_set_header X-Username $auth_username;
+        proxy_set_header X-Scopes $auth_scopes;
+        proxy_set_header X-Auth-Method $auth_method;
+        proxy_pass_request_headers on;
+
+        # message/stream uses SSE; disable buffering for incremental delivery
+        proxy_buffering off;
+        proxy_set_header Accept $http_accept;
+
+        error_page 401 = @auth_error;
+        error_page 403 = @forbidden_error;
+    }}"""
 
     def _generate_transport_location_blocks(self, path: str, server_info: dict[str, Any]) -> list:
         """Generate nginx location blocks for different transport types."""

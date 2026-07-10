@@ -2120,6 +2120,97 @@ def _is_registry_api_request(
     return False
 
 
+def _get_a2a_agent_path(
+    original_url: str | None,
+) -> str | None:
+    """Return the agent path for an A2A reverse-proxy request, or None.
+
+    Recognizes URLs of the form ``{root}/agent/{agent_path}/...``
+    and returns the agent path with a leading slash (e.g. "/flight-booking-agent"),
+    matching the agent's registered path and the ``invoke_agent`` scope
+    resources. Agent paths may be multi-segment (e.g. "/lob1/travel"); the trailing
+    agent-card discovery suffix is stripped so the card and JSON-RPC requests
+    resolve to the same agent path. Returns None for any non-agent request so the
+    caller falls back to MCP handling.
+
+    Args:
+        original_url: The X-Original-URL header value from nginx.
+
+    Returns:
+        The agent path (leading slash, one or more segments) or None.
+    """
+    if not original_url:
+        return None
+
+    parsed = urlparse(original_url)
+    path = parsed.path.strip("/")
+
+    registry_prefix = REGISTRY_ROOT_PATH.strip("/")
+    if registry_prefix and path.startswith(registry_prefix):
+        path = path[len(registry_prefix) :].lstrip("/")
+
+    parts = path.split("/") if path else []
+    if len(parts) < 2 or parts[0] != "agent":
+        return None
+
+    agent_segments = parts[1:]
+    # Drop the agent-card discovery suffix so /agent/x/.well-known/agent-card.json
+    # and /agent/x/ both resolve to the same agent path.
+    if agent_segments[-2:] == [".well-known", "agent-card.json"]:
+        agent_segments = agent_segments[:-2]
+
+    if not agent_segments or not all(agent_segments):
+        return None
+
+    return "/" + "/".join(agent_segments)
+
+
+async def validate_a2a_agent_access(
+    agent_path: str,
+    user_scopes: list[str],
+) -> bool:
+    """Check per-agent A2A invocation access against structured agent scopes.
+
+    Enforced at the ``/validate`` auth subrequest: it answers "may this caller
+    invoke this agent?". Mirrors :func:`validate_server_tool_access`: each of the
+    caller's scopes is resolved via the scope repository, then we look for an
+    ``invoke_agent`` action under the scope's ``agents`` block whose resources
+    cover this agent. Resources support ``all``/``*`` wildcards or an exact agent
+    path (e.g. ``/travel``).
+
+    Args:
+        agent_path: Agent path with leading slash (e.g. "/travel").
+        user_scopes: Scope names resolved for the caller (from group mappings).
+
+    Returns:
+        True if any scope grants ``invoke_agent`` on this agent, else False.
+    """
+    if not user_scopes:
+        return False
+
+    scope_repo = get_scope_repository()
+    for scope in user_scopes:
+        try:
+            scope_config = await scope_repo.get_server_scopes(scope)
+        except Exception as exc:
+            logger.warning(f"A2A access: failed to resolve scope '{scope}': {exc}")
+            continue
+        if not scope_config:
+            continue
+
+        for entry in scope_config:
+            agents_block = entry.get("agents")
+            if not isinstance(agents_block, dict):
+                continue
+            for action in agents_block.get("actions", []):
+                if action.get("action") != "invoke_agent":
+                    continue
+                resources = action.get("resources", [])
+                if "all" in resources or "*" in resources or agent_path in resources:
+                    return True
+    return False
+
+
 def _check_registry_static_token(
     bearer_token: str,
 ) -> dict | None:
@@ -2878,6 +2969,28 @@ async def validate_request(request: Request):
             )
         else:
             user_scopes = validation_result.get("scopes", [])
+
+        # A2A agent proxy requests: enforce per-agent invoke FGAC here at the
+        # auth subrequest, resolving the caller's scopes to an invoke_agent
+        # action that covers this agent (see validate_a2a_agent_access).
+        a2a_agent_path = _get_a2a_agent_path(original_url)
+        if a2a_agent_path is not None:
+            if not await validate_a2a_agent_access(a2a_agent_path, user_scopes):
+                logger.warning(
+                    f"Access denied for user "
+                    f"{hash_username(validation_result.get('username', ''))} "
+                    f"to A2A agent {a2a_agent_path} - missing invoke scope"
+                )
+                raise HTTPException(
+                    status_code=403,
+                    detail=f"Access denied to agent {a2a_agent_path} - no invoke scope",
+                    headers={"Connection": "close"},
+                )
+            logger.info(f"A2A per-agent scope validation passed for {a2a_agent_path}")
+            # This is an agent proxy request, not an MCP server; skip the MCP
+            # server/tool scope validation below.
+            server_name = None
+
         if server_name:
             # For ANY server access, enforce scope validation (fail closed principle)
             # This includes MCP initialization methods that may not have a specific tool

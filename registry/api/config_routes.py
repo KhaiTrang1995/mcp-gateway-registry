@@ -424,6 +424,13 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("openbao_role", "OpenBao Role", False),
         ],
     },
+    "a2a_reverse_proxy": {
+        "title": "A2A Reverse-Proxy Mode",
+        "order": 26,
+        "fields": [
+            ("a2a_reverse_proxy_enabled", "Enabled", False),
+        ],
+    },
 }
 
 

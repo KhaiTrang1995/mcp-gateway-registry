@@ -185,6 +185,9 @@ cp "$LUA_SOURCE_DIR/virtual_router.lua" "$LUA_SCRIPTS_DIR/virtual_router.lua"
 cp "$LUA_SOURCE_DIR/emit_metrics.lua" "$LUA_SCRIPTS_DIR/emit_metrics.lua"
 cp "$LUA_SOURCE_DIR/flush_metrics.lua" "$LUA_SCRIPTS_DIR/flush_metrics.lua"
 
+# A2A reverse-proxy filter
+cp "$LUA_SOURCE_DIR/agent_card_rewrite.lua" "$LUA_SCRIPTS_DIR/agent_card_rewrite.lua"
+
 echo "Lua scripts copied from $LUA_SOURCE_DIR to $LUA_SCRIPTS_DIR."
 
 # --- Nginx Configuration ---
