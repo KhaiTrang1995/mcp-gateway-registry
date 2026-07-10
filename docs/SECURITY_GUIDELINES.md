@@ -236,6 +236,15 @@ sanitizer that isn't called) is equivalent to no check.
   it to the DB query filter AND re-check the returned doc (defense in depth).
   Fail closed if the flag can't be read. Grep every group-source sibling (user
   groups, M2M-client groups) — the sync path may actively write `enabled: false`.
+  **Treat only an explicit "active" value as active; anything else is disabled.**
+  A schemaless store (MongoDB/DocumentDB) does not enforce field types, so an
+  `enabled` field can hold `False`, `null`, `0`, `""`, or the string `"false"`.
+  A truthiness/identity re-check like `enabled is not False` passes every one of
+  those non-`False` values (`0 is not False` is `True`) — the wrong direction.
+  The re-check must be `enabled is True` (with a missing field treated as active
+  only for documented backward-compat), and the query filter (`{"$ne": False}`)
+  is a pre-filter, not the authority. Prefer widening the deny set: anything that
+  is not provably active is disabled.
 - **Trust forwarded request metadata only from the proxy hop, never the client.**
   For audit client-IP, take `X-Real-IP` or the rightmost/trusted `X-Forwarded-For`
   entry (configurable proxy-hop count), and fall back to the direct peer when the
@@ -277,7 +286,17 @@ sanitizer that isn't called) is equivalent to no check.
   admin-config reads. Use one shared redaction-decision helper + field-stripper;
   gate authz-model reads behind the same admin check as their writes; for an
   unauthenticated public surface fail closed to the derived URL and never emit a
-  stored internal override.
+  stored internal override. **This applies to per-caller LIST PRUNING, not just
+  field redaction:** a nested collection whose visibility is scoped per user
+  (e.g. a server's `tool_list`, filtered by the caller's tool allowlist) must be
+  pruned by the SAME shared filter on every endpoint that returns it — the
+  listing, the single-item GET, the detail/`server.json`/catalog/search
+  projections. The single-item GET is the one most often missed after the list
+  endpoint is fixed (this was the `get_server` / `get_server_details` tool-name
+  leak that survived the catalog fix). Keep any derived count (`num_tools`)
+  consistent with the pruned list so the count can't become an enumeration
+  oracle. Fail closed (empty) on a missing/empty allowlist; admin/wildcard pass
+  through.
 - **Redact the DERIVED field, not just the raw source field.** Nulling
   `proxy_pass_url`/`mcp_endpoint` on a response is not enough if a *computed*
   field (a "connect URL", `endpoint_url`, `transport.url`) is built from that
@@ -382,7 +401,16 @@ sanitizer that isn't called) is equivalent to no check.
   request — that's a self-DoS). Internal-service actions must be attributable to a
   specific actor (per-instance/per-purpose `sub`), not a shared service identity.
   Tamper-evidence (append-only / HMAC chain) is best served by an immutable
-  external store — infra, deferrable.
+  external store — infra, deferrable. **Run the durable-sink guard in EVERY
+  process that initializes an audit logger, not just the main app's startup.** A
+  multi-process deployment (registry + auth-server) can have a second process
+  that builds its own audit sink lazily (e.g. the auth-server token-mint logger)
+  — if that path swallows the sink-init exception and degrades to a
+  drop-everything logger, the most forensically critical records (token issuance)
+  vanish silently while the main process looks healthy. Call the same
+  fail-closed guard where each logger is constructed, re-raise past any generic
+  `except`, and prime it at that process's startup so it fails to boot rather
+  than lazily on first use.
 - **Client IP for audit/attribution: derive from a non-spoofable source, and
   scope the ASGI proxy-header trust to the real peer.** The left-most
   `X-Forwarded-For` entry is fully client-controlled — never use it. Resolve via
