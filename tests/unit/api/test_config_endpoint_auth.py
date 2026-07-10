@@ -69,7 +69,6 @@ class TestConfigEndpointAuth:
         finally:
             app.dependency_overrides.clear()
 
-
     def test_full_config_requires_admin(self) -> None:
         """GET /api/config/full is admin-only: a non-admin authenticated user is
         rejected (403), so the richer parameter dump is not exposed to any user."""
