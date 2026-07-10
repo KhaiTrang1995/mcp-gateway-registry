@@ -26,6 +26,9 @@ services:
       # Presence-only auth (TEST/DEMO): accept any non-empty bearer without
       # JWKS verification, to exercise the gateway's Authorization passthrough.
       - AGENT_AUTH_PRESENCE_ONLY=${AGENT_AUTH_PRESENCE_ONLY:-true}
+      # Presence-only is effectively unauthenticated, so binding to 0.0.0.0 above
+      # requires this explicit acknowledgement (TEST/DEMO local sandbox only).
+      - AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=${AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY:-true}
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
       - MCP_REGISTRY_URL=${MCP_REGISTRY_URL:-http://registry}
@@ -68,6 +71,9 @@ services:
       # Presence-only auth (TEST/DEMO): accept any non-empty bearer without
       # JWKS verification, to exercise the gateway's Authorization passthrough.
       - AGENT_AUTH_PRESENCE_ONLY=${AGENT_AUTH_PRESENCE_ONLY:-true}
+      # Presence-only is effectively unauthenticated, so binding to 0.0.0.0 above
+      # requires this explicit acknowledgement (TEST/DEMO local sandbox only).
+      - AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=${AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY:-true}
       - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080}
       - KEYCLOAK_REALM=${KEYCLOAK_REALM:-mcp-gateway}
       - MCP_REGISTRY_URL=${MCP_REGISTRY_URL:-http://registry}

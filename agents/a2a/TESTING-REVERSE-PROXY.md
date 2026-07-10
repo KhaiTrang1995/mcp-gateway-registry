@@ -31,7 +31,10 @@ Reverse-proxy routing is confirmed when all of these hold for a registered, enab
 The sample agents support a **presence-only** auth mode (`AGENT_AUTH_PRESENCE_ONLY=true`):
 they accept any non-empty `Authorization: Bearer <value>` without verifying it, so you can
 exercise the gateway's routing and `invoke_agent` gating before wiring a real per-agent
-credential. This is a TEST/DEMO switch only — never enable it in a real deployment. See the
+credential. Because presence-only is effectively unauthenticated, an agent refuses to start
+in this mode while bound to all interfaces (which it must be, so the gateway can reach it)
+unless you also set `AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=true`. Both are TEST/DEMO switches
+only — never enable them in a real deployment. See the
 `.env.example` files in this folder for the flag.
 
 ---
@@ -66,7 +69,8 @@ They listen on container port 9000, published on host ports 9001 (travel) and 90
 
 ```bash
 cd agents/a2a
-cp .env.example .env        # set MCP_REGISTRY_URL, a registry JWT, AGENT_AUTH_PRESENCE_ONLY=true
+cp .env.example .env        # set MCP_REGISTRY_URL, a registry JWT, AGENT_AUTH_PRESENCE_ONLY=true,
+                            # AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=true (agents bind 0.0.0.0)
 ./deploy_local.sh
 ```
 

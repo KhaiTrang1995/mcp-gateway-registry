@@ -267,16 +267,30 @@ def install_agent_auth(
     """
     auth_disabled = _env_flag("AGENT_AUTH_DISABLED", default=False)
     presence_only = _env_flag("AGENT_AUTH_PRESENCE_ONLY", default=False)
-    if auth_disabled and bind_host is not None and bind_host in _EXPOSED_BIND_ADDRESSES:
+    exposed_bind = bind_host is not None and bind_host in _EXPOSED_BIND_ADDRESSES
+    if auth_disabled and exposed_bind:
         raise AuthConfigurationError(
             "Refusing to start: AGENT_AUTH_DISABLED is set while binding to "
             f"'{bind_host}'. An unauthenticated agent must not listen on all "
             "interfaces. Bind to 127.0.0.1 or enable authentication."
         )
-    # presence_only still requires a bearer to be present, so unlike
-    # auth_disabled it is permitted on an exposed bind address (it is the
-    # intended A2A gateway passthrough test mode). It is gated by its own flag
-    # and logged loudly; never enable it in production.
+    # presence_only accepts ANY non-empty bearer with no signature/issuer/expiry
+    # verification, so on an exposed interface it is effectively unauthenticated
+    # (an attacker just sends "Authorization: Bearer x"). Treat it like
+    # auth_disabled for the bind guard: refuse an exposed bind unless the operator
+    # explicitly opts in with AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=true (intended
+    # only for a throwaway gateway-passthrough test). Never use in production.
+    allow_exposed_presence_only = _env_flag(
+        "AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", default=False
+    )
+    if presence_only and exposed_bind and not allow_exposed_presence_only:
+        raise AuthConfigurationError(
+            "Refusing to start: AGENT_AUTH_PRESENCE_ONLY is set while binding to "
+            f"'{bind_host}'. Presence-only accepts any non-empty bearer and is "
+            "effectively unauthenticated on an exposed interface. Bind to 127.0.0.1, "
+            "configure real JWT validation, or (test only) set "
+            "AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY=true."
+        )
     app.add_middleware(
         JWTAuthMiddleware,
         keycloak_url=keycloak_url,

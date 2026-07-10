@@ -68,9 +68,7 @@ def _resolve_mcp_proxy_read_timeout_seconds() -> int:
         if value is not None:
             upstream = max(float(value), minimum_upstream)
     except (TypeError, ValueError) as e:
-        logger.debug(
-            f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}"
-        )
+        logger.debug(f"Invalid mcp_proxy_timeout, using default for nginx read timeout: {e}")
         upstream = default_upstream
     return int(math.ceil(upstream)) + MCP_PROXY_NGINX_READ_TIMEOUT_BUFFER_SECONDS
 
@@ -1665,9 +1663,9 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 # url is the gateway-facing address, so the registrant's backend
                 # lives in proxy_pass_url; fall back to url for agents registered
                 # before the flag was on (proxy_pass_url unset).
-                backend_url = (
-                    getattr(agent, "proxy_pass_url", None) or agent.url or ""
-                ).rstrip("/")
+                backend_url = (getattr(agent, "proxy_pass_url", None) or agent.url or "").rstrip(
+                    "/"
+                )
                 if not backend_url:
                     logger.warning(f"Agent '{path}' has no backend url; skipping nginx block")
                     continue
@@ -1800,6 +1798,10 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $auth_scopes $upstream_http_x_scopes;
         auth_request_set $auth_method $upstream_http_x_auth_method;
 
+        # Attribute metrics to this specific agent. Without this, emit_metrics
+        # derives the name from the first URI segment ("agent"), bucketing every
+        # agent together. agent_path is validated by _NGINX_AGENT_PATH_SAFE.
+        set $metrics_server_name "agent/{agent_path}";
         # Capture the JSON-RPC body (rewrite phase) so emit_metrics can record
         # the A2A method; per-agent invoke is enforced by the auth server via
         # the /validate subrequest above.

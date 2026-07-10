@@ -221,14 +221,38 @@ def test_presence_only_still_rejects_missing_bearer(rsa_keypair, monkeypatch):
     assert client.post("/api/book", headers={"Authorization": "Bearer "}).status_code == 401
 
 
-def test_presence_only_on_all_interfaces_is_permitted(monkeypatch):
-    """Presence-only requires a bearer, so it may bind to 0.0.0.0 (unlike disabled)."""
+def test_presence_only_on_all_interfaces_refused_without_optin(monkeypatch):
+    """Presence-only is effectively unauthenticated, so binding to 0.0.0.0 is
+    refused unless the operator explicitly opts in."""
     monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.delenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", raising=False)
     app = FastAPI()
-    # Must not raise: presence-only is the intended A2A gateway passthrough mode.
+    with pytest.raises(AuthConfigurationError):
+        install_agent_auth(
+            app,
+            keycloak_url=KEYCLOAK_URL,
+            realm=REALM,
+            bind_host="0.0.0.0",  # nosec B104 - test asserts this is rejected
+        )
+
+
+def test_presence_only_on_all_interfaces_permitted_with_optin(monkeypatch):
+    """Explicit opt-in allows presence-only on 0.0.0.0 (throwaway gateway test)."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.setenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", "true")
+    app = FastAPI()
+    # Must not raise: operator has explicitly acknowledged the exposed test mode.
     install_agent_auth(
         app,
         keycloak_url=KEYCLOAK_URL,
         realm=REALM,
-        bind_host="0.0.0.0",  # nosec B104 - test asserts presence-only is allowed here
+        bind_host="0.0.0.0",  # nosec B104 - test asserts opt-in permits this
     )
+
+
+def test_presence_only_on_loopback_is_permitted(monkeypatch):
+    """Presence-only on loopback needs no opt-in (not network-exposed)."""
+    monkeypatch.setenv("AGENT_AUTH_PRESENCE_ONLY", "true")
+    monkeypatch.delenv("AGENT_AUTH_ALLOW_EXPOSED_PRESENCE_ONLY", raising=False)
+    app = FastAPI()
+    install_agent_auth(app, keycloak_url=KEYCLOAK_URL, realm=REALM, bind_host="127.0.0.1")

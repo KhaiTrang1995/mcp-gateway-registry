@@ -418,6 +418,8 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
         "order": 26,
         "fields": [
             ("a2a_reverse_proxy_enabled", "Enabled", False),
+            ("ssrf_allowed_hosts", "SSRF Allowed Hosts", False),
+            ("ssrf_allowed_cidrs", "SSRF Allowed CIDRs", False),
         ],
     },
 }
