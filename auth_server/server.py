@@ -1217,6 +1217,79 @@ def parse_server_and_tool_from_url(original_url: str) -> tuple[str | None, str |
         return None, None
 
 
+def _classify_rate_limit_target(
+    original_url: str | None,
+    server_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Classify the request target into a (entity_type, name) pair for Limit B.
+
+    v1 recognizes two coarse target kinds from the request path:
+    - A2A agent requests (``{root}/agent/{path}/...``) -> ("a2a_agent", agent_path).
+    - MCP server requests -> ("mcp_server", server_name).
+
+    Fine-grained tool/skill targets are a later phase (they need the JSON-RPC
+    payload) and are not classified here. Returns (None, None) when the request
+    is neither, so the caller simply skips the target gate.
+    """
+    agent_path = _get_a2a_agent_path(original_url)
+    if agent_path:
+        return "a2a_agent", agent_path
+    if server_name:
+        return "mcp_server", server_name
+    return None, None
+
+
+async def _enforce_rate_limit(
+    validation_result: dict,
+    original_url: str | None,
+    server_name: str | None,
+) -> None:
+    """Enforce caller + target rate limits; raise HTTPException(429) if over a limit.
+
+    Keys strictly on the validated-token identity (``client_id`` or ``username`` from
+    ``validation_result``) -- NEVER a client-supplied header. No-op unless
+    ``RATE_LIMITING_ENABLED`` is set. Any unexpected limiter error is swallowed
+    (the limiter itself already fails open per-gate); rate limiting must never
+    turn into a 500 on the auth path.
+    """
+    from auth_server.rate_limiting_config import RATE_LIMITING_ENABLED, get_rate_limiter
+
+    if not RATE_LIMITING_ENABLED:
+        return
+
+    # Identity from the validated token only. client_id (M2M/agent) preferred, else username.
+    identity = validation_result.get("client_id") or validation_result.get("username")
+    if not identity:
+        return
+
+    groups = validation_result.get("groups", []) or []
+    target_entity_type, target_name = _classify_rate_limit_target(original_url, server_name)
+
+    try:
+        decision = await get_rate_limiter().check(
+            identity=identity,
+            groups=groups,
+            target_entity_type=target_entity_type,
+            target_name=target_name,
+        )
+    except Exception as exc:
+        # The limiter fails open internally; this is a last-resort guard so an
+        # unexpected error here can never 500 the /validate path.
+        logger.warning(f"rate-limit enforcement skipped due to error: {exc}")
+        return
+
+    if not decision.allowed:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "rate_limit_exceeded",
+                "axis": decision.axis,
+                "retry_after": decision.retry_after,
+            },
+            headers=decision.headers(),
+        )
+
+
 def _normalize_server_name(name: str) -> str:
     """
     Normalize server name by removing leading and trailing slashes for comparison.
@@ -3347,6 +3420,11 @@ async def validate_request(request: Request):
                 detail="Token has an unrecognized token_kind claim",
                 headers={"Connection": "close"},
             )
+
+        # Rate limiting (issue #295): enforced AFTER authorization, keyed on the
+        # validated-token identity. No-op unless RATE_LIMITING_ENABLED. Raises 429
+        # on limit exceeded, which the outer 4xx handler re-raises as-is.
+        await _enforce_rate_limit(validation_result, original_url, server_name)
 
         # Prepare JSON response data
         response_data = {

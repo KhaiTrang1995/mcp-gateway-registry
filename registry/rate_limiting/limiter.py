@@ -15,6 +15,7 @@ allowed path (only paid when limits are configured; bounded by the backend
 timeout) for correct cross-window behavior.
 """
 
+import asyncio
 import logging
 import time
 
@@ -36,6 +37,11 @@ logger = logging.getLogger(__name__)
 
 # Caller-axis entity type used in v1 (group-tier limits).
 CALLER_GROUP_ENTITY_TYPE: str = "group"
+
+# Default hard timeout per backend counter op. On timeout the op is treated as a
+# backend error and follows the fail-open/closed policy, so a slow counter store
+# fails FAST and never hangs the hot /validate path.
+DEFAULT_BACKEND_TIMEOUT_SECONDS: float = 0.25
 
 
 def _by_window(
@@ -84,10 +90,12 @@ class RateLimiter:
         backend: RateLimiterBackend,
         definitions: DefinitionsRepository,
         fail_open: bool = True,
+        backend_timeout_seconds: float = DEFAULT_BACKEND_TIMEOUT_SECONDS,
     ) -> None:
         self._backend = backend
         self._definitions = definitions
         self._fail_open = fail_open
+        self._backend_timeout_seconds = backend_timeout_seconds
 
     async def _build_caller_gates(
         self,
@@ -163,10 +171,15 @@ class RateLimiter:
             "window_seconds": definition.window_seconds,
         }
         try:
-            result = await self._backend.incr_if_allowed(
-                gate.counter_key(),
-                definition.window_seconds,
-                definition.max_requests,
+            # Hard timeout so a slow counter store fails fast into the fail-open/closed
+            # policy below, never hanging the /validate subrequest (a TimeoutError is an Exception).
+            result = await asyncio.wait_for(
+                self._backend.incr_if_allowed(
+                    gate.counter_key(),
+                    definition.window_seconds,
+                    definition.max_requests,
+                ),
+                timeout=self._backend_timeout_seconds,
             )
         except Exception as exc:
             logger.warning(f"rate-limit backend error ({gate.counter_key()}): {exc}")

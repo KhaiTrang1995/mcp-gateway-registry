@@ -1707,6 +1707,7 @@ class RegistryClient:
             or endpoint.startswith("/api/custom-types")
             or endpoint.startswith("/api/custom")
             or endpoint.startswith("/api/admin")
+            or endpoint.startswith("/api/rate-limits")
             or endpoint.startswith("/api/v1/registry")
             or endpoint.startswith("/api/v1/health")
             or endpoint == "/api/servers/groups/import"
@@ -2106,6 +2107,96 @@ class RegistryClient:
             f"registry_mode={result.get('registry_mode')}"
         )
         return result
+
+    def list_rate_limits(self) -> dict[str, Any]:
+        """List all rate-limit definitions (admin only).
+
+        Returns:
+            Dict with a "definitions" list.
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        logger.info("Listing rate-limit definitions")
+        response = self._make_request(method="GET", endpoint="/api/rate-limits")
+        return response.json()
+
+    def set_rate_limit(
+        self,
+        axis: str,
+        entity_type: str,
+        name: str,
+        max_requests: int,
+        window_seconds: int = 60,
+        fail_closed: bool = False,
+        enabled: bool = True,
+    ) -> dict[str, Any]:
+        """Create or update a rate-limit definition (admin only).
+
+        The ``_id`` is derived server-side; this client builds the matching URL id.
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 400 invalid definition).
+        """
+        definition_id = f"{axis}:{entity_type}:{name}:{window_seconds}"
+        body = {
+            "axis": axis,
+            "entity_type": entity_type,
+            "name": name,
+            "max_requests": max_requests,
+            "window_seconds": window_seconds,
+            "fail_closed": fail_closed,
+            "enabled": enabled,
+        }
+        logger.info(f"Setting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="PUT",
+            endpoint=f"/api/rate-limits/{definition_id}",
+            data=body,
+        )
+        return response.json()
+
+    def delete_rate_limit(
+        self,
+        definition_id: str,
+    ) -> dict[str, Any]:
+        """Delete a rate-limit definition by its id (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails (e.g. 404 not found).
+        """
+        logger.info(f"Deleting rate-limit definition {definition_id}")
+        response = self._make_request(
+            method="DELETE",
+            endpoint=f"/api/rate-limits/{definition_id}",
+        )
+        return response.json()
+
+    def rate_limit_status(
+        self,
+        identity: str | None = None,
+        entity_type: str | None = None,
+        name: str | None = None,
+    ) -> dict[str, Any]:
+        """Introspect rate-limit definitions for a caller and/or target (admin only).
+
+        Raises:
+            requests.HTTPError: If the request fails.
+        """
+        params: dict[str, Any] = {}
+        if identity:
+            params["identity"] = identity
+        if entity_type:
+            params["entity_type"] = entity_type
+        if name:
+            params["name"] = name
+        logger.info("Fetching rate-limit status")
+        response = self._make_request(
+            method="GET",
+            endpoint="/api/rate-limits-status",
+            params=params,
+        )
+        return response.json()
 
     def get_well_known_registry_card(self) -> RegistryCardResponse:
         """

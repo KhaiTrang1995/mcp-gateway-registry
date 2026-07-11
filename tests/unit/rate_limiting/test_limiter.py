@@ -48,6 +48,22 @@ class _BoomBackend(RateLimiterBackend):
         raise RuntimeError("db down")
 
 
+class _SlowBackend(RateLimiterBackend):
+    """A backend that hangs longer than the limiter's timeout, to exercise fail-fast."""
+
+    def __init__(self, delay_seconds: float) -> None:
+        self._delay_seconds = delay_seconds
+
+    async def incr_if_allowed(self, key, window_seconds, max_requests):
+        import asyncio
+
+        await asyncio.sleep(self._delay_seconds)
+        return IncrResult(allowed=True, current=1)
+
+    async def get(self, key, window_seconds):
+        return 0
+
+
 class _FakeDefs:
     """Minimal DefinitionsRepository stand-in returning fixed lists."""
 
@@ -214,6 +230,36 @@ class TestRateLimiter:
         """With fail_open=False globally, a backend error denies even without fail_closed."""
         limiter = RateLimiter(
             _BoomBackend(), _FakeDefs([_caller("dev", 5, 60)], []), fail_open=False
+        )
+        decision = await limiter.check(identity="x", groups=["dev"])
+        assert decision.allowed is False
+
+    async def test_slow_backend_times_out_and_fails_open(self):
+        """A backend slower than the timeout is treated as an error and fails open fast."""
+        limiter = RateLimiter(
+            _SlowBackend(delay_seconds=1.0),
+            _FakeDefs([_caller("dev", 5, 60)], []),
+            fail_open=True,
+            backend_timeout_seconds=0.05,
+        )
+        decision = await limiter.check(identity="x", groups=["dev"])
+        assert decision.allowed is True
+
+    async def test_slow_backend_times_out_and_fails_closed_when_configured(self):
+        """A slow backend on a fail_closed limit denies (does not hang, does not allow)."""
+        fc = RateLimitDefinition(
+            axis="caller",
+            entity_type="group",
+            name="dev",
+            max_requests=5,
+            window_seconds=60,
+            fail_closed=True,
+        )
+        limiter = RateLimiter(
+            _SlowBackend(delay_seconds=1.0),
+            _FakeDefs([fc], []),
+            fail_open=True,
+            backend_timeout_seconds=0.05,
         )
         decision = await limiter.check(identity="x", groups=["dev"])
         assert decision.allowed is False
