@@ -2,6 +2,8 @@
 
 A hands-on sequence to verify application-level rate limiting on a running gateway. It creates two dedicated Keycloak test principals (a human user `rl-test-user` and an M2M client `rl-test-m2m`), then walks from backwards-compatibility (nothing configured) through group (caller) limits, response headers, OTel metrics + logs, the floor safeguards, a per-agent (M2M `client_id`) limit, and finally target limits (per MCP server / per tool).
 
+For failure-mode and correctness-invariant tests (concurrency/atomicity, window reset + `Retry-After`, deny-does-not-consume, caller-type classification, membership-vs-authz, admin bypass, data-plane-only scope, enable/disable, and fail-open/fail-closed), see the companion [e2e_testing_advanced.md](e2e_testing_advanced.md). Run it after Step 0 here.
+
 ## Conventions
 
 Run from the repo root. All examples assume the local Docker stack and an admin token file at `./.token`.
