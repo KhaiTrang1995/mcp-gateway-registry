@@ -2,17 +2,22 @@ import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import { PencilIcon, XMarkIcon, CheckIcon } from '@heroicons/react/24/outline';
 import SearchableSelect from '../SearchableSelect';
 import {
-  useRateLimitDefinitions,
-  useRateLimitMemberships,
   setRateLimitMembership,
   deleteRateLimitMembership,
-  CALLER_ENTITY_TYPE,
+  RateLimitMembership,
 } from '../../hooks/useRateLimits';
 
 interface RateLimitGroupsEditorProps {
   // 'user' (subject = username) or 'client' (subject = client_id).
   subjectType: 'user' | 'client';
   subject: string;
+  // Shared data fetched ONCE by the parent list (not per row): the defined
+  // caller-group names as select options, and all memberships. This keeps a large
+  // Users/M2M list from issuing N x 2 GETs.
+  groupOptions: { value: string; label: string }[];
+  memberships: RateLimitMembership[];
+  // Called after a successful save so the parent can refetch the shared membership list.
+  onSaved: () => void;
   onShowToast: (message: string, type: 'success' | 'error' | 'info') => void;
 }
 
@@ -23,28 +28,20 @@ interface RateLimitGroupsEditorProps {
  * (group) rate-limit definitions -- so only real groups can be assigned.
  *
  * This is distinct from a user's IdP/authz groups: rate-limit membership lives in
- * the rate_limit_memberships collection and never affects scopes.
+ * the rate_limit_memberships collection and never affects scopes. Definitions and
+ * memberships are fetched once by the parent and passed in as props.
  */
 const RateLimitGroupsEditor: React.FC<RateLimitGroupsEditorProps> = ({
   subjectType,
   subject,
+  groupOptions,
+  memberships,
+  onSaved,
   onShowToast,
 }) => {
-  const { definitions } = useRateLimitDefinitions();
-  const { memberships, refetch } = useRateLimitMemberships();
-
   const [editing, setEditing] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [isSaving, setIsSaving] = useState(false);
-
-  // The defined caller (group) names, deduped, for the picker.
-  const groupOptions = useMemo(() => {
-    const names = new Set<string>();
-    for (const d of definitions) {
-      if (d.axis === 'caller' && d.entity_type === CALLER_ENTITY_TYPE) names.add(d.name);
-    }
-    return Array.from(names).sort().map((n) => ({ value: n, label: n }));
-  }, [definitions]);
 
   // This subject's current membership groups.
   const currentGroups = useMemo(() => {
@@ -83,7 +80,7 @@ const RateLimitGroupsEditor: React.FC<RateLimitGroupsEditorProps> = ({
       }
       onShowToast('Rate-limit groups updated', 'success');
       setEditing(false);
-      refetch();
+      onSaved();
     } catch (err: any) {
       onShowToast(
         err?.response?.data?.detail || err?.message || 'Failed to update rate-limit groups',

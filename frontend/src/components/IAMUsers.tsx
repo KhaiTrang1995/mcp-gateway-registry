@@ -16,6 +16,11 @@ import DeleteConfirmation from './DeleteConfirmation';
 import SearchableSelect from './SearchableSelect';
 import ListStateBoundary from './iam/ListStateBoundary';
 import RateLimitGroupsEditor from './iam/RateLimitGroupsEditor';
+import {
+  useRateLimitDefinitions,
+  useRateLimitMemberships,
+  CALLER_ENTITY_TYPE,
+} from '../hooks/useRateLimits';
 
 interface IAMUsersProps {
   onShowToast: (message: string, type: 'success' | 'error' | 'info') => void;
@@ -37,6 +42,17 @@ interface FormErrors {
 const IAMUsers: React.FC<IAMUsersProps> = ({ onShowToast }) => {
   const { users, isLoading, error, refetch } = useIAMUsers();
   const { groups } = useIAMGroups();
+  // Rate-limit definitions + memberships fetched ONCE here and passed to each
+  // row's editor (avoids N x 2 GETs on a large user list).
+  const { definitions: rlDefinitions } = useRateLimitDefinitions();
+  const { memberships: rlMemberships, refetch: refetchRlMemberships } = useRateLimitMemberships();
+  const rlGroupOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const d of rlDefinitions) {
+      if (d.axis === 'caller' && d.entity_type === CALLER_ENTITY_TYPE) names.add(d.name);
+    }
+    return Array.from(names).sort().map((n) => ({ value: n, label: n }));
+  }, [rlDefinitions]);
   const [searchQuery, setSearchQuery] = useState('');
   const [view, setView] = useState<View>('list');
 
@@ -403,6 +419,9 @@ const IAMUsers: React.FC<IAMUsersProps> = ({ onShowToast }) => {
                       <RateLimitGroupsEditor
                         subjectType="user"
                         subject={u.username}
+                        groupOptions={rlGroupOptions}
+                        memberships={rlMemberships}
+                        onSaved={refetchRlMemberships}
                         onShowToast={onShowToast}
                       />
                     </td>
