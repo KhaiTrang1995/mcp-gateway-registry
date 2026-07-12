@@ -17,6 +17,9 @@ import {
 } from '../hooks/useRateLimits';
 import DeleteConfirmation from './DeleteConfirmation';
 import ListStateBoundary from './iam/ListStateBoundary';
+import SearchableSelect from './SearchableSelect';
+import { useServerList } from '../hooks/useToolCatalog';
+import { useAgentList } from '../hooks/useAgentList';
 
 interface IAMRateLimitsProps {
   onShowToast: (message: string, type: 'success' | 'error' | 'info') => void;
@@ -35,6 +38,9 @@ const inputBase =
 
 const IAMRateLimits: React.FC<IAMRateLimitsProps> = ({ onShowToast }) => {
   const { definitions, isLoading, error, refetch } = useRateLimitDefinitions();
+  // Registered server + agent paths, for the target-name typeahead.
+  const { servers, isLoading: serversLoading } = useServerList();
+  const { agents, isLoading: agentsLoading } = useAgentList();
   const [searchQuery, setSearchQuery] = useState('');
   const [view, setView] = useState<View>('list');
 
@@ -59,6 +65,16 @@ const IAMRateLimits: React.FC<IAMRateLimitsProps> = ({ onShowToast }) => {
       (d) => d.name.toLowerCase().includes(q) || d.entity_type.toLowerCase().includes(q),
     );
   }, [definitions, searchQuery]);
+
+  // Typeahead options for the target name: registered server paths for
+  // mcp_server, agent paths for a2a_agent. name shown as the label's description.
+  const targetOptions = useMemo(() => {
+    if (formEntityType === 'a2a_agent') {
+      return agents.map((a) => ({ value: a.path, label: a.path, description: a.name }));
+    }
+    return servers.map((s) => ({ value: s.path, label: s.path, description: s.name }));
+  }, [formEntityType, servers, agents]);
+  const targetOptionsLoading = formEntityType === 'a2a_agent' ? agentsLoading : serversLoading;
 
   const resetForm = useCallback(() => {
     setEditingId(null);
@@ -201,14 +217,34 @@ const IAMRateLimits: React.FC<IAMRateLimitsProps> = ({ onShowToast }) => {
             <label className="block text-sm text-gray-600 dark:text-gray-400 mb-1">
               {isCaller ? 'Group name' : 'Target name (server path / agent path)'}
             </label>
-            <input
-              type="text"
-              value={formName}
-              onChange={(e) => setFormName(e.target.value)}
-              disabled={!!editingId}
-              placeholder={isCaller ? 'e.g. rate-limited-testers' : 'e.g. mcpgw'}
-              className={inputBase}
-            />
+            {isCaller ? (
+              <input
+                type="text"
+                value={formName}
+                onChange={(e) => setFormName(e.target.value)}
+                disabled={!!editingId}
+                placeholder="e.g. rate-limited-testers"
+                className={inputBase}
+              />
+            ) : editingId ? (
+              // On edit the name is immutable (part of the id); show it read-only.
+              <input type="text" value={formName} disabled className={inputBase} />
+            ) : (
+              // Typeahead of registered server/agent paths; allowCustom lets an
+              // admin still enter a path not in the list.
+              <SearchableSelect
+                options={targetOptions}
+                value={formName}
+                onChange={setFormName}
+                isLoading={targetOptionsLoading}
+                allowCustom
+                placeholder={
+                  formEntityType === 'a2a_agent'
+                    ? 'Search agent paths… (e.g. /booking-agent)'
+                    : 'Search server paths… (e.g. mcpgw)'
+                }
+              />
+            )}
           </div>
 
           <div>
