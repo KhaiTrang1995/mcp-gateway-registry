@@ -412,7 +412,41 @@ uv run python api/registry_management.py --token-file "$TOK" --registry-url "$RE
 #    (tool/skill rate limiting is a later phase)"
 ```
 
-To rate-limit a specific tool today, register that tool as its own MCP server (so it gets its own server path) and put an `mcp_server` target limit on it, or use a caller-axis group limit on the callers you want to bound.
+**3. Workarounds to bound a specific tool today.** Until fine-grained `mcp_tool` targets land, there are two ways to constrain tool usage. Both are runnable now.
+
+**3a. Isolate the tool on its own MCP server path (target limit per server).** A target `mcp_server` limit is keyed on the server path, and each path is an independent counter. So if a tool is exposed as its own registered MCP server, an `mcp_server` limit on that path bounds exactly that tool without touching other servers/tools. The path-isolation property is what makes this work: a limit set on `--name airegistry-tools` only ever decrements the `tgt:mcp_server:airegistry-tools` counter.
+
+```bash
+# Limit ONLY the airegistry-tools server path to 5/min.
+uv run python api/registry_management.py --token-file "$TOK" --registry-url "$REG" \
+  rate-limit-set --axis target --entity-type mcp_server \
+  --name airegistry-tools --max-requests 5 --window-seconds 60
+# Wait ~30s for the definitions cache, then trip it (this path has its own counter):
+uv run python tests/scripts/call_mcp_tool.py \
+  --server-url "$SRV" --tool healthcheck --tool-args '{}' \
+  --token-file .token-rl-test-user --registry-url "$REG" --count 10
+# -> 5x 200 then 429; throttle log: axis=tgt entity_type=mcp_server name=airegistry-tools
+```
+
+That a *different* server path is unaffected follows from the counter key including the
+server name (`tgt:mcp_server:<name>:<window>`) — no limit named for another path is ever
+consulted. To confirm against a second server, point `--server-url` at another registered
+server's endpoint (use its exact path from `grep -E "location .*/mcp" /etc/nginx/conf.d/nginx_rev_proxy.conf`
+inside the registry container, e.g. `http://localhost/ai-registry/mcpgw/mcp`) and a
+same-size burst returns all `200` because no target limit names that path.
+
+So, to cap a single tool: register it as its own MCP server (it then has a dedicated path) and put an `mcp_server` target limit on that path. Every call to that tool hits its own counter, isolated from other tools/servers.
+
+**3b. Bound the callers instead (caller-axis group limit).** If the goal is "these callers may not hammer this tool", a caller group limit (Step 2 / Step 7) already does it — it caps each caller's total data-plane rate. This does not single out one tool, but it prevents any one user/agent from over-calling. Reuse the `rl-test` group + membership from Step 2 (user 25/60s) or `rl-agents` from Step 7 (agent 10/60s); the burst there is the test.
+
+```bash
+# Example: the rl-test-user caller is already capped at 25/min by the rl-test group
+# (Step 2). That cap governs its calls to airegistry-tools' healthcheck tool too.
+uv run python tests/scripts/call_mcp_tool.py \
+  --server-url "$SRV" --tool healthcheck --tool-args '{}' \
+  --token-file .token-rl-test-user --registry-url "$REG" --count 30
+# -> 25x 200 then 429 (caller-axis; see throttle log caller_type=user)
+```
 
 ---
 
