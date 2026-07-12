@@ -1980,7 +1980,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
         auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
         auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
-        auth_request_set $rl_retry $upstream_http_x_ratelimit_retry_after;
+        auth_request_set $rl_retry $upstream_http_retry_after;
 
         # Attribute metrics to this specific agent. Without this, emit_metrics
         # derives the name from the first URI segment ("agent"), bucketing every
@@ -2271,7 +2271,7 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
         auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
         auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
-        auth_request_set $rl_retry $upstream_http_x_ratelimit_retry_after;
+        auth_request_set $rl_retry $upstream_http_retry_after;
 {proxy_directive}
         proxy_http_version 1.1;
         proxy_ssl_server_name on;

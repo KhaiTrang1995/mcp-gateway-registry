@@ -116,7 +116,9 @@ class TestGenerateAgentLocationBlocks:
         assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;" in result
         assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;" in result
         assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;" in result
-        assert "auth_request_set $rl_retry $upstream_http_x_ratelimit_retry_after;" in result
+        # Retry-After is captured from the actual Retry-After response header the
+        # auth-server sends (not an X-RateLimit-* alias), so nginx can re-emit it.
+        assert "auth_request_set $rl_retry $upstream_http_retry_after;" in result
 
     @pytest.mark.asyncio
     async def test_jsonrpc_block_disables_buffering_for_sse(self, patched_agent_service):

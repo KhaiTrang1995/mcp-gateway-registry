@@ -931,7 +931,7 @@ def test_create_location_block_streamable_http(nginx_service):
     assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled" in block
     assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit" in block
     assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset" in block
-    assert "auth_request_set $rl_retry $upstream_http_x_ratelimit_retry_after" in block
+    assert "auth_request_set $rl_retry $upstream_http_retry_after" in block
     assert "proxy_buffering off" in block
     assert "auth_request /validate" in block
     # Upstream timeouts derived from MCP_PROXY_TIMEOUT so long-running MCP tool
