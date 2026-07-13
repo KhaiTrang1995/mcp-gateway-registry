@@ -196,13 +196,18 @@ class TestIdeConnectScope:
         assert "ide_connect_scope" in auth_fields
 
     def test_valid_scopes_are_accepted_lowercased(self):
-        for raw, expected in [("user", "user"), ("USER", "user"), (" project ", "project"), ("local", "local")]:
+        for raw, expected in [
+            ("user", "user"),
+            ("USER", "user"),
+            (" project ", "project"),
+            ("local", "local"),
+        ]:
             assert Settings(ide_connect_scope=raw).ide_connect_scope == expected
 
     def test_invalid_or_empty_scope_drops_to_empty(self):
         # Anything outside local|project|user (or empty/None) -> "" so the flag is
         # omitted; this is what prevents arbitrary injection into the snippet.
-        for raw in ["", "global", "user; rm -rf /", "--foo"]:
+        for raw in ["", None, "global", "user; rm -rf /", "--foo"]:
             assert Settings(ide_connect_scope=raw).ide_connect_scope == ""
 
     async def _call_with_scope(self, scope_value: str):
