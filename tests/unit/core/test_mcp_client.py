@@ -921,3 +921,65 @@ class TestMcpClientSsrfGuard:
             assert result is None
             mock_headers.assert_not_called()
             mock_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_sse_explicit_endpoint_to_blocked_host_refused(self):
+        """An explicit sse_endpoint that resolves to a private host is refused.
+
+        The base_url is a public host, but the override sse_endpoint points at
+        a private target; the actual connection target must be validated so no
+        credential is attached to the private host.
+        """
+        from registry.core.mcp_client import _get_tools_sse
+
+        server_info = {
+            "sse_endpoint": "https://internal.evil.example/sse",
+            "headers": [],
+        }
+
+        with (
+            patch("registry.core.mcp_client._build_headers_for_server") as mock_headers,
+            patch("registry.core.mcp_client.sse_client") as mock_client,
+            patch("registry.utils.url_guard.socket.getaddrinfo") as mock_resolve,
+        ):
+            mock_resolve.return_value = [(None, None, None, None, ("10.0.0.9", 443))]
+
+            result = await _get_tools_sse("https://public.example", server_info)
+
+            assert result is None
+            mock_headers.assert_not_called()
+            mock_client.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connection_result_blocks_private_sse_endpoint(self):
+        """get_mcp_connection_result refuses a private-IP explicit sse_endpoint.
+
+        Only the sse_endpoint override is malicious here; the base_url resolves
+        public. The sse_endpoint must be validated because it can become the
+        actual connection target for the SSE transport.
+        """
+        from registry.core.mcp_client import get_mcp_connection_result
+
+        server_info = {
+            "sse_endpoint": "https://internal.evil.example/sse",
+            "headers": [],
+        }
+
+        def _resolve(host, port, **kw):
+            # base_url host is public; the sse_endpoint host is private.
+            if "internal.evil.example" in host:
+                return [(None, None, None, None, ("10.1.2.3", 443))]
+            return [(None, None, None, None, ("93.184.216.34", 443))]
+
+        with (
+            patch("registry.core.mcp_client._build_headers_for_server") as mock_headers,
+            patch("registry.core.mcp_client.streamablehttp_client") as mock_stream,
+            patch("registry.core.mcp_client.sse_client") as mock_sse,
+            patch("registry.utils.url_guard.socket.getaddrinfo", side_effect=_resolve),
+        ):
+            result = await get_mcp_connection_result("https://public.example", server_info)
+
+            assert result is None
+            mock_headers.assert_not_called()
+            mock_stream.assert_not_called()
+            mock_sse.assert_not_called()

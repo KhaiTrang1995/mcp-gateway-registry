@@ -103,6 +103,16 @@ sanitizer that isn't called) is equivalent to no check.
   loopback, link-local, reserved, multicast, unspecified, and cloud-metadata
   (`169.254.169.254` — never allowlistable); unwrap IPv4-mapped IPv6; require
   http/https. Fail closed. Do not create per-call-site `_is_safe_url` variants.
+- **Don't rely on the language runtime's `is_private` to cover reserved ranges —
+  block them explicitly and pin the range in a test.** Ranges like CGNAT / shared
+  address space (`100.64.0.0/10`, RFC 6598) are only classified private on newer
+  runtimes; depending on interpreter semantics means a downgrade or a stdlib
+  change silently re-opens an SSRF pivot. Add the range to the guard's explicit
+  block list (treated like the other private ranges — operator-CIDR-allowlistable,
+  never for metadata) and add a unit test asserting both a sample IP is blocked
+  AND the exact network is pinned, so a semantics change fails loudly instead of
+  quietly. Apply to every guard implementation, including any legacy one still in
+  use.
 - **Validate at registration (structural) AND pin the resolved IP at fetch
   time.** A pre-fetch check followed by a separate client call re-resolves DNS =
   TOCTOU / DNS-rebinding. Pin the validated public IP into the transport
@@ -145,6 +155,20 @@ sanitizer that isn't called) is equivalent to no check.
   via an explicit CA bundle env var (fail closed if the configured bundle is
   missing); any insecure escape hatch must be explicit opt-in, logged, default
   off.
+- **Every alternate/override URL field is a bypass — validate the whole family,
+  not just the primary field.** A server record often carries a main backend URL
+  (`proxy_pass_url`) plus optional override endpoints (`mcp_endpoint`,
+  `sse_endpoint`) that are fetched and interpolated into config exactly like the
+  main URL. If only the primary field goes through the canonical guard, the
+  override field is an unguarded SSRF / config-injection sink. At EVERY write path
+  (register, edit, internal-register, version-add), run each present override
+  field through the SAME `validate_proxy_pass_url()` as the primary; empty/unset
+  is fine, present-but-invalid is rejected. Then RE-validate the resolved URL at
+  fetch time (`resolve=True`) on each fetch path (health check, tool discovery,
+  and especially before handing the URL to an external subprocess the pinned
+  guarded client cannot protect — e.g. a scanner CLI) so a value that was rebound
+  after registration, or that reached the connect through the override field, is
+  still blocked before any credential is attached or process spawned.
 
 ## Injection (nginx config generation, NoSQL/regex)
 

@@ -59,6 +59,18 @@ _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 # The cloud metadata endpoint can never be reached, regardless of allowlists.
 _CLOUD_METADATA_IPS: frozenset[str] = frozenset({"169.254.169.254", "fd00:ec2::254"})
 
+# Carrier-grade NAT / shared address space (RFC 6598). Blocked explicitly rather
+# than relying on ipaddress.is_private: is_private only classifies this range as
+# private on newer Python runtimes, so depending on the runtime is fragile -- a
+# downgrade or a semantics change would silently re-open it as an SSRF pivot to
+# an internal/CGNAT host. Blocking it here pins the behavior regardless of the
+# interpreter version. It is treated exactly like the other reserved private
+# ranges: an operator CIDR allowlist can re-permit it (same as 10/8 etc.), but
+# it is denied by default.
+_CGNAT_NETS: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = (
+    ipaddress.ip_network("100.64.0.0/10"),
+)
+
 # The gateway's own bundled registry-tools MCP server (airegistry-tools ->
 # mcpgw-server), reached over private container/service DNS (Docker Compose
 # service name, ECS Service Connect alias, Kubernetes service name). This is a
@@ -244,6 +256,9 @@ def _is_blocked_ip(
         or ip.is_reserved
         or ip.is_multicast
         or ip.is_unspecified
+        # Explicit CGNAT (RFC 6598) block so this does not depend on the Python
+        # runtime's is_private semantics for the 100.64.0.0/10 range.
+        or any(ip in net for net in _CGNAT_NETS)
     )
     if not is_dangerous:
         return False
