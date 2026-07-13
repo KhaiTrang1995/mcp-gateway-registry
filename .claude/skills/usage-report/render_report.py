@@ -840,7 +840,7 @@ def _build_template_vars(
     linear_rate = fc_linear.get("slope_per_day", 0)
     recent_rate = fc_recent.get("daily_add_rate", 0)
     today_count = forecast.get("today", {}).get("installs", total_instances)
-    target = forecast.get("target", 1000)
+    target = forecast.get("target", 2000)
     remaining = target - today_count
     if recent_rate > linear_rate:
         forecast_narrative = (
@@ -998,6 +998,7 @@ def _build_template_vars(
         "forecast_linear_eta": linear_eta,
         "forecast_recent_rate": f"{recent_rate:.1f}",
         "forecast_recent_eta": recent_eta,
+        "forecast_target": f"{target:,}",
         "forecast_narrative": forecast_narrative,
         # LTV
         "yesterday_label": ltv_yesterday.get("date", "?"),
