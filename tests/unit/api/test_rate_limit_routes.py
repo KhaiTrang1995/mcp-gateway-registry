@@ -220,9 +220,7 @@ class TestListAndDelete:
     def test_delete_present(self, client, mock_auth_admin, mock_repository):
         """Deleting an existing definition returns deleted=true."""
         mock_repository.delete.return_value = True
-        resp = client.request(
-            "DELETE", "/api/rate-limits/caller:group:developers:60"
-        )
+        resp = client.request("DELETE", "/api/rate-limits/caller:group:developers:60")
         assert resp.status_code == 200
         assert resp.json()["deleted"] is True
 
@@ -303,14 +301,18 @@ class TestMemberships:
         assert resp.status_code == 200
         assert resp.json()["groups"] == ["devs"]
 
-    def test_put_url_id_mismatch_rejected(self, client, mock_auth_admin, mock_memberships_repository):
+    def test_put_url_id_mismatch_rejected(
+        self, client, mock_auth_admin, mock_memberships_repository
+    ):
         """A body building a different _id than the URL is a 400."""
         body = {"subject_type": "user", "subject": "alice", "groups": ["devs"]}
         resp = client.put("/api/rate-limit-memberships/user:bob", json=body)
         assert resp.status_code == 400
         assert "does not match" in resp.json()["detail"]
 
-    def test_put_invalid_subject_type_rejected(self, client, mock_auth_admin, mock_memberships_repository):
+    def test_put_invalid_subject_type_rejected(
+        self, client, mock_auth_admin, mock_memberships_repository
+    ):
         """An invalid subject_type fails model validation with a 400."""
         body = {"subject_type": "group", "subject": "x", "groups": ["g"]}
         resp = client.put("/api/rate-limit-memberships/group:x", json=body)
@@ -340,7 +342,9 @@ class TestMemberships:
         resp = client.request("DELETE", "/api/rate-limit-memberships/user:ghost")
         assert resp.status_code == 404
 
-    def test_membership_requires_admin(self, client, mock_auth_regular, mock_memberships_repository):
+    def test_membership_requires_admin(
+        self, client, mock_auth_regular, mock_memberships_repository
+    ):
         """A non-admin gets 403 on membership list."""
         resp = client.get("/api/rate-limit-memberships")
         assert resp.status_code == 403

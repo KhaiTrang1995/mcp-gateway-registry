@@ -80,14 +80,10 @@ class _FakeDefs:
         self._target_defs = target_defs
 
     async def list_caller_limits(self, entity_type, names):
-        return [
-            d for d in self._caller_defs if d.entity_type == entity_type and d.name in names
-        ]
+        return [d for d in self._caller_defs if d.entity_type == entity_type and d.name in names]
 
     async def list_target_limits(self, entity_type, name):
-        return [
-            d for d in self._target_defs if d.entity_type == entity_type and d.name == name
-        ]
+        return [d for d in self._target_defs if d.entity_type == entity_type and d.name == name]
 
 
 class _FakeMemberships:
@@ -248,11 +244,17 @@ class TestRateLimiter:
     async def test_group_with_only_user_limit_does_not_gate_agents(self):
         """A group that sets only user_max_requests does not limit agent callers."""
         group = RateLimitDefinition(
-            axis="caller", entity_type="group", name="u-only", user_max_requests=3, window_seconds=60
+            axis="caller",
+            entity_type="group",
+            name="u-only",
+            user_max_requests=3,
+            window_seconds=60,
         )
         backend = _FakeBackend()
         limiter = _make_limiter(
-            backend, caller_defs=[group], memberships=_FakeMemberships(by_client={"cli": ["u-only"]})
+            backend,
+            caller_defs=[group],
+            memberships=_FakeMemberships(by_client={"cli": ["u-only"]}),
         )
         # Agent has no agent-limit in this group -> unlimited.
         assert await _count_allowed(limiter, 6, username=None, client_id="cli") == 6
@@ -277,7 +279,11 @@ class TestRateLimiter:
         backend = _FakeBackend()
         target_defs = [
             RateLimitDefinition(
-                axis="target", entity_type="mcp_server", name="mcpgw", max_requests=2, window_seconds=60
+                axis="target",
+                entity_type="mcp_server",
+                name="mcpgw",
+                max_requests=2,
+                window_seconds=60,
             )
         ]
         limiter = _make_limiter(backend, target_defs=target_defs)

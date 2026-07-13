@@ -182,8 +182,11 @@ class CognitoProvider(AuthProvider):
                     raise ValueError(
                         f"Access token client_id '{token_client_id}' is not in the "
                         f"accepted client list {self.accepted_client_ids}"
-                        + (" (M2M wildcard applies to no-username tokens only)"
-                           if self.m2m_accept_any else "")
+                        + (
+                            " (M2M wildcard applies to no-username tokens only)"
+                            if self.m2m_accept_any
+                            else ""
+                        )
                     )
             else:
                 # ID token: audience-bound to the client_id.

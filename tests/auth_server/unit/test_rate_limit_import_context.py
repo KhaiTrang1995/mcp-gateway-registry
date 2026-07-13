@@ -76,9 +76,7 @@ class TestTopLevelImportContext:
 
         # Module-level ImportFrom nodes (direct children of the module body).
         top_level_imports = [
-            node.module
-            for node in tree.body
-            if isinstance(node, ast.ImportFrom) and node.module
+            node.module for node in tree.body if isinstance(node, ast.ImportFrom) and node.module
         ]
         assert "auth_server.rate_limiting_config" not in top_level_imports, (
             "auth_server.rate_limiting_config must not be imported at module top level "

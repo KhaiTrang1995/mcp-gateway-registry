@@ -77,9 +77,7 @@ class _FixedGroupDefs:
         self._caller_defs = caller_defs
 
     async def list_caller_limits(self, entity_type, names):
-        return [
-            d for d in self._caller_defs if d.entity_type == entity_type and d.name in names
-        ]
+        return [d for d in self._caller_defs if d.entity_type == entity_type and d.name in names]
 
     async def list_target_limits(self, entity_type, name):
         return []

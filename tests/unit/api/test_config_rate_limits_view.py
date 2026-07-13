@@ -16,12 +16,15 @@ async def _build_group(definitions):
     """Invoke the group builder with a patched repository returning ``definitions``."""
     from registry.api import config_routes
 
-    with patch(
-        "registry.rate_limiting.definitions_repository.DefinitionsRepository.list_all",
-        new=AsyncMock(return_value=definitions),
-    ), patch(
-        "registry.rate_limiting.definitions_repository.DefinitionsRepository._get_collection",
-        new=AsyncMock(),
+    with (
+        patch(
+            "registry.rate_limiting.definitions_repository.DefinitionsRepository.list_all",
+            new=AsyncMock(return_value=definitions),
+        ),
+        patch(
+            "registry.rate_limiting.definitions_repository.DefinitionsRepository._get_collection",
+            new=AsyncMock(),
+        ),
     ):
         return await config_routes._build_rate_limit_definitions_group()
 
@@ -93,12 +96,15 @@ class TestRateLimitDefinitionsGroup:
         """A repository error returns None so the config view still renders."""
         from registry.api import config_routes
 
-        with patch(
-            "registry.rate_limiting.definitions_repository.DefinitionsRepository.list_all",
-            new=AsyncMock(side_effect=RuntimeError("db down")),
-        ), patch(
-            "registry.rate_limiting.definitions_repository.DefinitionsRepository._get_collection",
-            new=AsyncMock(),
+        with (
+            patch(
+                "registry.rate_limiting.definitions_repository.DefinitionsRepository.list_all",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+            patch(
+                "registry.rate_limiting.definitions_repository.DefinitionsRepository._get_collection",
+                new=AsyncMock(),
+            ),
         ):
             group = await config_routes._build_rate_limit_definitions_group()
         assert group is None

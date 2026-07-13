@@ -222,9 +222,7 @@ def _run_calls(
     """Make ``count`` tool calls, log each result, and return the number of 429s seen."""
     throttled = 0
     for i in range(1, count + 1):
-        status, headers, body = _call_tool_once(
-            server_url, token, tool_name, tool_args, session_id
-        )
+        status, headers, body = _call_tool_once(server_url, token, tool_name, tool_args, session_id)
         rate_info = _format_rate_limit_headers(headers)
         if status == 429:
             throttled += 1

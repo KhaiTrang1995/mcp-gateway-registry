@@ -164,9 +164,7 @@ class TestClassifyTarget:
         """A plain MCP server path classifies as mcp_server."""
         from auth_server.server import _classify_rate_limit_target
 
-        entity_type, name = _classify_rate_limit_target(
-            "https://gw.example.com/mcpgw/mcp", "mcpgw"
-        )
+        entity_type, name = _classify_rate_limit_target("https://gw.example.com/mcpgw/mcp", "mcpgw")
         assert entity_type == "mcp_server"
         assert name == "mcpgw"
 

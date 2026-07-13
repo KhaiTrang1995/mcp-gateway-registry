@@ -6222,9 +6222,7 @@ Examples:
     rate_limit_status_parser = subparsers.add_parser(
         "rate-limit-status", help="Introspect rate-limit definitions (admin)"
     )
-    rate_limit_status_parser.add_argument(
-        "--identity", help="Caller group name to introspect"
-    )
+    rate_limit_status_parser.add_argument("--identity", help="Caller group name to introspect")
     rate_limit_status_parser.add_argument(
         "--entity-type", dest="entity_type", help="Target entity type (e.g. mcp_server)"
     )

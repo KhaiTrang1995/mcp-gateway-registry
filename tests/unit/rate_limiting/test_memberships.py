@@ -73,7 +73,11 @@ class TestGroupResolution:
         repo = self._repo_with_docs(
             {
                 "user:alice": {"_id": "user:alice", "groups": ["devs", "shared"], "enabled": True},
-                "client:cli-1": {"_id": "client:cli-1", "groups": ["shared", "agents"], "enabled": True},
+                "client:cli-1": {
+                    "_id": "client:cli-1",
+                    "groups": ["shared", "agents"],
+                    "enabled": True,
+                },
             }
         )
         groups = await repo.get_groups_for("alice", "cli-1")
