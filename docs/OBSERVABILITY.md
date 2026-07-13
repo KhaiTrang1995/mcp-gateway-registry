@@ -302,6 +302,9 @@ exposition form** (after the OTel exporter appends the unit suffix).
 | `m2m_management_requests_total` | registry | `operation`, `outcome` | Direct M2M client API calls |
 | `mcpgw_registry_metrics_emission_path_total` | registry, auth-server, mcpgw | `path` (`otel`/`legacy`) | Migration self-observability |
 | `mcpgw_registry_deployment_mode_info` (Gauge) | registry | `deployment_mode`, `registry_mode` | Current deployment mode (always 1, observed each cycle) |
+| `mcpgw_rate_limit_checks_total` | auth-server (`/validate`) | `axis` (`clr`/`tgt`), `entity_type`, `window_seconds`, `outcome` (`allow`/`deny`) | Every rate-limit gate evaluation (denominator for a throttle rate) |
+| `mcpgw_rate_limit_throttled_total` | auth-server (`/validate`) | `axis`, `entity_type`, `window_seconds` | Times a gate denied a request (issue #295) |
+| `mcpgw_rate_limit_errors_total` | auth-server (`/validate`) | `axis` | Rate-limit backend errors (counter-store unreachable/timeout → fail-open/closed) |
 
 ### Histograms
 
@@ -314,6 +317,7 @@ exposition form** (after the OTel exporter appends the unit suffix).
 | `mcpgw_registry_tool_discovery_duration_milliseconds` | registry middleware | same as `tool_discovery_total` | Semantic search latency |
 | `peer_sync_duration_seconds` | registry | `peer_id`, `success` | Peer sync operation duration |
 | `mcpgw_registry_tool_duration_milliseconds` | mcpgw | `tool`, `success` | Per-tool invocation latency |
+| `mcpgw_rate_limit_backend_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server (`/validate`) | `backend` (`documentdb`), `op` | Counter-store round-trip latency per rate-limit op (the hop bounded by `RATE_LIMIT_BACKEND_TIMEOUT_MS`, default 250 ms) |
 
 ### HTTP auto-instrumentation (when OTel auto-instrument is active)
 
@@ -393,6 +397,37 @@ Replace `<TARGET>` with the path you care about (e.g. `/api/servers`,
 | M2M orphan cleanups | `sum by (idp_had_record)(rate(m2m_orphan_cleanups_total[5m]))` |
 | Cloud detection method distribution | `sum by (cloud, method)(mcpgw_registry_cloud_detection_total)` |
 | Telemetry pings success rate | `sum(rate(telemetry_sends_total{status="success"}[5m])) / sum(rate(telemetry_sends_total[5m]))` |
+
+### Rate limiting (issue #295)
+
+Application-level rate limiting runs in the auth-server `/validate` hop. The metrics carry only low-cardinality labels (`axis`, `entity_type`, `window_seconds`) — deliberately **not** the caller's username/client_id, which would be unbounded cardinality. To attribute a throttle to a specific user or client, use the app logs instead (see below).
+
+| Goal | Query |
+|---|---|
+| Throttles per second by axis / entity type | `sum by (axis, entity_type)(rate(mcpgw_rate_limit_throttled_total[5m]))` |
+| Throttle rate (fraction of checks denied) | `sum(rate(mcpgw_rate_limit_throttled_total[5m])) / sum(rate(mcpgw_rate_limit_checks_total[5m]))` |
+| Backend-error rate (fail-open/closed events) | `sum by (axis)(rate(mcpgw_rate_limit_errors_total[5m]))` |
+| Counter-store p95 latency | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket[5m])))` |
+| Counter-store calls exceeding the 250 ms budget | `sum(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket{le="250"}[5m])) / sum(rate(mcpgw_rate_limit_backend_duration_milliseconds_count[5m]))` (fraction **within** budget; alert when it drops) |
+
+**Attributing a throttle to a user / client_id (app logs, not metrics).** On every denial the limiter logs a structured `WARNING` line carrying the validated-token identity, e.g.:
+
+```
+rate-limit throttled: axis=clr entity_type=group name=alice limit=5/60s caller_type=user caller_username=alice caller_client_id=
+```
+
+`caller_type` is `user` or `agent` (agent = a client_id was present); exactly one of `caller_username` / `caller_client_id` is populated. Search the auth-server application logs (MongoDB `application_logs` collection, or your log backend) for `rate-limit throttled` and filter on `caller_username=` / `caller_client_id=`.
+
+#### Recommended alerts
+
+These are the two signals worth alarming on. Both indicate the limiter is degrading, not that a caller is merely hitting a limit (throttles themselves are expected and are not an alert condition).
+
+| Alert | Condition (PromQL) | Why it matters |
+|---|---|---|
+| **Rate-limit backend errors** | `sum(rate(mcpgw_rate_limit_errors_total[5m])) > 0` for 5m | The DocumentDB counter store is unreachable or timing out. With the default `RATE_LIMIT_FAIL_OPEN=true` this means limits are **not being enforced** (requests fail open); with a fail-closed definition it means those callers are being **denied**. Either way the limiter is not doing its job. |
+| **Counter-store latency near budget** | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_rate_limit_backend_duration_milliseconds_bucket[5m]))) > 200` for 10m | Each `/validate` waits on this hop up to `RATE_LIMIT_BACKEND_TIMEOUT_MS` (default **250 ms**). A p95 creeping toward 250 ms means throttle checks are about to start timing out (→ `mcpgw_rate_limit_errors_total` fail-open) and are adding latency to every gated request. Investigate DocumentDB health / connection pool before it crosses the timeout. |
+
+Tune the `200` threshold relative to your configured `RATE_LIMIT_BACKEND_TIMEOUT_MS`: alert at roughly 80% of the timeout so you have headroom before ops start failing open.
 
 ## Verifying the migration is working
 

@@ -86,7 +86,7 @@ from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
 from registry.audit.service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
-from registry.common.secret_key import validate_secret_key
+from registry.common.secret_key import validate_secret_key, validate_signing_secret
 from registry.core.config import settings
 from registry.repositories.factory import get_scope_repository
 
@@ -510,8 +510,21 @@ _registry_static_token_requested: bool = (
     os.environ.get("REGISTRY_STATIC_TOKEN_AUTH_ENABLED", "false").lower() == "true"
 )
 
-# Static API key for Registry API (must match Bearer token value when enabled)
-REGISTRY_API_TOKEN: str = os.environ.get("REGISTRY_API_TOKEN", "")
+# Static API key for Registry API (must match Bearer token value when enabled).
+#
+# When set, this token is promoted to a legacy admin entry with unrestricted
+# scopes (see _build_static_token_map), so it grants the highest privilege in
+# the system. It must therefore clear the same strength bar as the application
+# signing secret: presence is optional (an unset token simply means no legacy
+# entry is created), but a value that IS present must be strong. Validating
+# through the canonical signing-secret helper fails closed at startup on an
+# empty/whitespace-only, too-short, or known-weak/placeholder value rather than
+# silently accepting a weak admin credential.
+REGISTRY_API_TOKEN: str = validate_signing_secret(
+    os.environ.get("REGISTRY_API_TOKEN"),
+    "REGISTRY_API_TOKEN",
+    required=False,
+)
 
 # Issue #779: multiple static API keys with per-key groups.
 _REGISTRY_API_KEYS_RAW: str = os.environ.get("REGISTRY_API_KEYS", "").strip()
@@ -594,6 +607,26 @@ class _RegistryApiKeyEntry(BaseModel):
                 f"Key name '{v}' is reserved (legacy/internal). Pick a different name."
             )
         return v
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key(
+        cls,
+        v: str,
+    ) -> str:
+        # A keyed entry grants the scopes mapped from its groups (which may
+        # include admin), so the key bypasses IdP JWT validation and must clear
+        # the same weak-value bar as every other privilege-granting credential.
+        # The min_length=32 Field constraint alone accepts a >=32-char known
+        # placeholder (e.g. the .env.example value); route the key through the
+        # canonical validator to reject well-known literals too. Pydantic
+        # validators must raise ValueError, so re-wrap the validator's
+        # RuntimeError -- the error then flows through _parse_registry_api_keys'
+        # fail-closed path (invalid REGISTRY_API_KEYS disables the feature).
+        try:
+            return validate_signing_secret(v, "REGISTRY_API_KEYS key", required=True)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from e
 
 
 def _repair_stripped_json(
@@ -783,17 +816,30 @@ if _federation_static_token_requested and not FEDERATION_STATIC_TOKEN:
 else:
     FEDERATION_STATIC_TOKEN_AUTH_ENABLED = _federation_static_token_requested
 
-# Warn if token is too short (weak entropy)
 MIN_FEDERATION_TOKEN_LENGTH: int = 32
-if (
-    FEDERATION_STATIC_TOKEN_AUTH_ENABLED
-    and len(FEDERATION_STATIC_TOKEN) < MIN_FEDERATION_TOKEN_LENGTH
-):
-    logging.warning(
-        f"FEDERATION_STATIC_TOKEN is only {len(FEDERATION_STATIC_TOKEN)} characters. "
-        f"Recommended minimum is {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-        'Generate a stronger token with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-    )
+
+# The federation static token bypasses IdP JWT validation, so it must be held to
+# the same strength bar as every other signing/marker secret: a short OR
+# well-known placeholder value must never be armed for authentication. The
+# operator explicitly enabled the feature, so the token is required=True here.
+# This is an optional feature, so on a weak/invalid token we degrade gracefully
+# (disable the feature) rather than crash the whole process -- mirroring the
+# missing-token branch above. Failing closed means the weak token is NOT armed.
+if FEDERATION_STATIC_TOKEN_AUTH_ENABLED:
+    try:
+        FEDERATION_STATIC_TOKEN = validate_signing_secret(
+            FEDERATION_STATIC_TOKEN,
+            "FEDERATION_STATIC_TOKEN",
+            required=True,
+        )
+    except RuntimeError as e:
+        logging.error(
+            "FEDERATION_STATIC_TOKEN_AUTH_ENABLED=true but FEDERATION_STATIC_TOKEN is weak: %s "
+            "Federation static token auth is DISABLED. Set a strong FEDERATION_STATIC_TOKEN or "
+            "disable the feature. Falling back to standard IdP JWT validation.",
+            e,
+        )
+        FEDERATION_STATIC_TOKEN_AUTH_ENABLED = False
 
 # Federation endpoint path patterns (scoped access for federation static token)
 # REGISTRY_ROOT_PATH is prepended so pattern matching works when hosted on a base path
@@ -1215,6 +1261,169 @@ def parse_server_and_tool_from_url(original_url: str) -> tuple[str | None, str |
     except Exception as e:
         logger.error(f"Failed to parse server/tool from URL {original_url}: {e}")
         return None, None
+
+
+def _classify_rate_limit_target(
+    original_url: str | None,
+    server_name: str | None,
+) -> tuple[str | None, str | None]:
+    """Classify the request target into a (entity_type, name) pair for Limit B.
+
+    v1 recognizes two coarse target kinds from the request path:
+    - A2A agent requests (``{root}/agent/{path}/...``) -> ("a2a_agent", agent_path).
+    - MCP server requests -> ("mcp_server", server_name).
+
+    Fine-grained tool/skill targets are a later phase (they need the JSON-RPC
+    payload) and are not classified here. Returns (None, None) when the request
+    is neither, so the caller simply skips the target gate.
+    """
+    agent_path = _get_a2a_agent_path(original_url)
+    if agent_path:
+        return "a2a_agent", agent_path
+    if server_name:
+        return "mcp_server", server_name
+    return None, None
+
+
+def _resolve_rate_limit_caller(
+    validation_result: dict,
+) -> tuple[str | None, str | None]:
+    """Resolve the (username, client_id) the rate limiter keys on.
+
+    The rate limiter classifies a caller as an AGENT when ``client_id`` is set,
+    else a USER, and keys the per-caller counter on that identity. But
+    ``validation_result['client_id']`` is NOT a reliable agent signal, and the
+    right discriminator is **provider-specific**:
+
+    - Keycloak / Entra / Auth0: a user (browser / password-grant) token carries
+      the OAuth client only as ``azp`` (copied into ``validation_result``), while
+      a machine (``client_credentials``) token additionally carries a top-level
+      ``client_id`` **claim** and a ``service-account-*`` subject. So the agent
+      signal is a top-level ``client_id`` claim (or a ``service-account-*``
+      ``preferred_username``).
+    - Cognito: BOTH user access tokens and M2M tokens carry a ``client_id``
+      claim, so ``client_id`` cannot discriminate. A Cognito user access token
+      carries a ``username`` claim; a Cognito M2M (``client_credentials``) token
+      does not. So the agent signal on Cognito is the ABSENCE of ``username``.
+
+    Using ``client_id`` alone would misclassify every human as an agent (picking
+    the group's agent limit, and bucketing all web users under one shared client
+    counter) -- on Keycloak for password-grant tokens, and on Cognito for every
+    user access token.
+
+    Returns (username, client_id) to pass to ``RateLimiter.check``: for a user,
+    ``(username, None)``; for an agent, ``(username_or_None, client_id)`` so the
+    limiter's agent branch is taken and keys on the client.
+    """
+    username = validation_result.get("username")
+    client_id = validation_result.get("client_id")
+    method = validation_result.get("method")
+    claims = validation_result.get("data") or {}
+    if not isinstance(claims, dict):
+        claims = {}
+
+    token_client_id = claims.get("client_id")
+
+    if method == "cognito":
+        # Cognito: M2M (client_credentials) access token has no end-user
+        # ``username`` claim; a user access token always does.
+        is_machine = bool(token_client_id) and "username" not in claims
+    else:
+        # Keycloak / Entra / Auth0 (and any OIDC provider that copies azp into
+        # client_id): only a client_credentials token carries a top-level
+        # client_id claim or a service-account-* subject.
+        preferred = claims.get("preferred_username") or ""
+        is_machine = bool(token_client_id) or preferred.startswith("service-account-")
+
+    if is_machine:
+        return username, (token_client_id or client_id)
+
+    # Human user: key on username; drop the azp/client_id so the limiter's user
+    # branch is taken.
+    return username, None
+
+
+async def _enforce_rate_limit(
+    validation_result: dict,
+    original_url: str | None,
+    server_name: str | None,
+) -> None:
+    """Enforce caller + target rate limits; raise HTTPException(429) if over a limit.
+
+    Keys strictly on the validated-token identity (``client_id`` or ``username`` from
+    ``validation_result``) -- NEVER a client-supplied header. No-op unless
+    ``RATE_LIMITING_ENABLED`` is set. Any unexpected limiter error is swallowed
+    (the limiter itself already fails open per-gate); rate limiting must never
+    turn into a 500 on the auth path.
+    """
+    # Dual import context (matches the observability/egress_obo pattern above):
+    # the deployed container runs server.py with /app as the module root (top-level
+    # import), while the repo-root/test context sees the auth_server package.
+    try:
+        from rate_limiting_config import RATE_LIMITING_ENABLED, get_rate_limiter
+    except ImportError:
+        from auth_server.rate_limiting_config import RATE_LIMITING_ENABLED, get_rate_limiter
+
+    if not RATE_LIMITING_ENABLED:
+        return
+
+    # Username / client_id from the validated token only, never a client header.
+    # The limiter resolves the caller's RATE-LIMIT groups from the memberships
+    # collection keyed on these; the token's authz "groups" claim is deliberately
+    # NOT passed here (no IdP emits rate-limit groups, and mixing them into authz
+    # groups could change scopes).
+    # Resolve the caller identity the limiter keys on. client_id is set ONLY for a
+    # genuine machine (client_credentials) token, so a human is classified as a
+    # user -- see _resolve_rate_limit_caller for why validation_result['client_id']
+    # (azp-derived) cannot be used directly.
+    username, client_id = _resolve_rate_limit_caller(validation_result)
+    if not username and not client_id:
+        return
+
+    target_entity_type, target_name = _classify_rate_limit_target(original_url, server_name)
+
+    # Scope: rate limiting applies to DATA-PLANE calls only (an MCP server or A2A
+    # agent target). Control-plane /api/* requests have no classified target, so
+    # they are exempt -- caller limits never throttle the dashboard/login/config UI.
+    if not target_entity_type:
+        return
+
+    # Admin bypass: an operator must not be able to lock themselves out. Admins
+    # skip caller gates (target gates still protect a weak backend).
+    is_admin = bool(validation_result.get("is_admin", False))
+
+    try:
+        decision = await get_rate_limiter().check(
+            username=username,
+            client_id=client_id,
+            is_admin=is_admin,
+            target_entity_type=target_entity_type,
+            target_name=target_name,
+        )
+    except Exception as exc:
+        # The limiter fails open internally; this is a last-resort guard so an
+        # unexpected error here can never 500 the /validate path.
+        logger.warning(f"rate-limit enforcement skipped due to error: {exc}")
+        return
+
+    if not decision.allowed:
+        # NOTE: /validate is nginx's internal auth_request subrequest, never a
+        # client-facing endpoint. nginx's auth_request module only forwards 401
+        # and 403 from the subrequest; any other status (including 429) is turned
+        # into a 500 at the parent location ("auth request unexpected status").
+        # So a throttle is signalled as a 403 carrying X-RateLimit-* headers (incl.
+        # the X-RateLimit-Throttled marker); the @forbidden_error named location in
+        # nginx captures those headers and rewrites the response into a real 429 +
+        # Retry-After for the client. Returning 429 here would surface as 500.
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "rate_limit_exceeded",
+                "axis": decision.axis,
+                "retry_after": decision.retry_after,
+            },
+            headers=decision.headers(),
+        )
 
 
 def _normalize_server_name(name: str) -> str:
@@ -2611,9 +2820,15 @@ async def validate_request(request: Request):
             if hmac.compare_digest(bearer_token, FEDERATION_STATIC_TOKEN):
                 logger.info(f"Federation static token: Authenticated for {original_url}")
 
+                # The federation static token is a long-lived, non-expiring
+                # credential intended for federation DATA SYNC. It is therefore
+                # least-privilege READ-ONLY: it grants only "federation/read".
+                # Peer/federation-config management (create/update/delete) is a
+                # privileged operation and must be driven by a real admin
+                # credential, not this static token, so "federation/peers" is
+                # deliberately NOT granted here.
                 federation_scopes = [
                     "federation/read",
-                    "federation/peers",
                 ]
                 response_data: dict[str, Any] = {
                     "valid": True,
@@ -3348,6 +3563,11 @@ async def validate_request(request: Request):
                 headers={"Connection": "close"},
             )
 
+        # Rate limiting (issue #295): enforced AFTER authorization, keyed on the
+        # validated-token identity. No-op unless RATE_LIMITING_ENABLED. Raises 429
+        # on limit exceeded, which the outer 4xx handler re-raises as-is.
+        await _enforce_rate_limit(validation_result, original_url, server_name)
+
         # Prepare JSON response data
         response_data = {
             "valid": True,
@@ -3611,17 +3831,29 @@ async def manage_federation_token(request: Request):
     body = await request.json()
     new_token = body.get("new_token")
 
-    # Validate minimum token length if a new token is provided
-    if new_token and len(new_token) < MIN_FEDERATION_TOKEN_LENGTH:
-        return JSONResponse(
-            content={
-                "detail": (
-                    f"Token must be at least {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-                    'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-                )
-            },
-            status_code=400,
-        )
+    # A rotated token arms the same privileged static credential as startup, so
+    # it must clear the same strength bar. Run it through the canonical validator
+    # (rejects too-short AND known-weak/placeholder values, weak-check before
+    # length) rather than a bare length check -- otherwise an admin could rotate
+    # to a long-but-well-known placeholder and silently undo the startup
+    # hardening.
+    if new_token:
+        try:
+            new_token = validate_signing_secret(
+                new_token,
+                "FEDERATION_STATIC_TOKEN",
+                required=True,
+            )
+        except RuntimeError as e:
+            return JSONResponse(
+                content={
+                    "detail": (
+                        f"{e} "
+                        'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
+                    )
+                },
+                status_code=400,
+            )
 
     if new_token:
         FEDERATION_STATIC_TOKEN = new_token

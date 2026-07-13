@@ -36,6 +36,27 @@ sanitizer that isn't called) is equivalent to no check.
   right error. Normalize (strip) and reuse the same value everywhere so all
   services derive an identical key (avoids cross-replica signature mismatches).
   Wire the validator into EVERY signing entrypoint — grep for all of them.
+- **Every credential that grants privilege must go through the ONE canonical
+  signing-secret validator at its startup entrypoint — the legacy/backward-compat
+  path is where this check gets skipped.** When a newer keyed scheme enforces a
+  minimum length/weak-value bar but an older single-value credential is read raw
+  (`os.environ.get("TOKEN", "")`) and then promoted to a privileged (often admin,
+  unrestricted-scope) entry, that legacy credential is asymmetrically weaker than
+  both the keyed entries and the app signing secret. Run it through the SAME
+  `validate_signing_secret` helper (missing AND weak: unset/empty/whitespace,
+  `< 32` stripped chars, known-weak literals, weak-check before length) at the
+  point it is read/built, and fail closed. Presence may be optional (unset simply
+  means the legacy entry is not created — that is the safe outcome), but a value
+  that IS present must be strong; never silently accept a weak privilege-granting
+  credential just because it predates the current key scheme. This applies to ALL
+  sibling credential paths, not only the reported one — a federation/static bypass
+  token, each per-key entry in a keyed scheme, and any other value that bypasses
+  IdP validation must each run through the SAME validator. A `min_length`-only
+  Pydantic constraint or a `logging.warning(...)` on a short value is NOT fail
+  closed: a weak privilege-granting token that is merely warned about is still
+  armed. Reject it — raise where a raise is safe, or (for an optional feature that
+  degrades gracefully) disable the feature so the weak token is never armed —
+  never merely warn.
 - **Match placeholder markers as substrings ANYWHERE, not just as a prefix.** An
   operator rarely leaves the `.env.example` value verbatim — they prepend a
   prefix or edit the middle (`internal-CHANGE-ME-...`, `prod-generate-with-openssl-...`).
@@ -176,6 +197,14 @@ sanitizer that isn't called) is equivalent to no check.
 - **Attach a shared/global credential only on explicit opt-in.** Make the
   privileged code path default to not attaching it and gate its use behind an
   admin check.
+- **A static, long-lived, non-expiring token must be least-privilege.** Never
+  bundle a management/write scope onto a token whose purpose is read/data-sync.
+  A token meant for federation (or any) data sync should grant only the read
+  scope (`.../read`); create/update/delete of peers or config is a management
+  operation that must stay behind a real admin credential, not the shared static
+  token. The blast radius of a leaked never-expiring token is exactly the union
+  of the scopes it carries, so keep that union minimal and audit any grant that
+  couples a read scope with a management scope on the same static token.
 - **Never forward the caller's inbound credential to a proxied/untrusted
   destination.** When the gateway proxies to a registrant-controlled upstream (or
   an agent calls a discovered remote agent), strip `Authorization`/`Cookie` from
@@ -229,6 +258,19 @@ sanitizer that isn't called) is equivalent to no check.
   SEPARATE explicit acknowledgement (e.g. `confirm_sensitive_export`) in addition
   to `include_sensitive`, reject (fail closed) when the acknowledgement is absent,
   and redact the sensitive values otherwise. Audit every sensitive export.
+- **Don't disclose deployment topology / feature surface to anonymous callers —
+  it's reconnaissance.** A config/topology read (deployment mode, registry mode,
+  active auth provider, enabled feature flags, proxy-update state) tells an
+  attacker how the system is wired before they authenticate. Gate it behind an
+  authenticated session and fail closed (401) for anonymous callers. Serve the
+  genuinely pre-login needs (app title, available OAuth providers, auth-server
+  URL) from dedicated MINIMAL anonymous endpoints, not a broad config dump — so
+  gating the config endpoint doesn't break the login page. Then sweep the OTHER
+  anonymous endpoints for the same fields: a load-balancer `/health` probe, a
+  `/status`, or an OpenAPI/schema dump commonly re-leaks the exact topology you
+  just gated — trim them to a liveness signal (probes rely on the HTTP status,
+  not the body). RFC-mandated anonymous surfaces (OAuth `.well-known` discovery)
+  are the deliberate exception.
 - **Honor the disabled/inactive flag everywhere access is derived, on EVERY
   request.** A user/group/client marked disabled must contribute no
   groups/scopes and be denied — enforce it at the group→scope enrichment / session
@@ -236,6 +278,15 @@ sanitizer that isn't called) is equivalent to no check.
   it to the DB query filter AND re-check the returned doc (defense in depth).
   Fail closed if the flag can't be read. Grep every group-source sibling (user
   groups, M2M-client groups) — the sync path may actively write `enabled: false`.
+  **Treat only an explicit "active" value as active; anything else is disabled.**
+  A schemaless store (MongoDB/DocumentDB) does not enforce field types, so an
+  `enabled` field can hold `False`, `null`, `0`, `""`, or the string `"false"`.
+  A truthiness/identity re-check like `enabled is not False` passes every one of
+  those non-`False` values (`0 is not False` is `True`) — the wrong direction.
+  The re-check must be `enabled is True` (with a missing field treated as active
+  only for documented backward-compat), and the query filter (`{"$ne": False}`)
+  is a pre-filter, not the authority. Prefer widening the deny set: anything that
+  is not provably active is disabled.
 - **Trust forwarded request metadata only from the proxy hop, never the client.**
   For audit client-IP, take `X-Real-IP` or the rightmost/trusted `X-Forwarded-For`
   entry (configurable proxy-hop count), and fall back to the direct peer when the
@@ -277,7 +328,17 @@ sanitizer that isn't called) is equivalent to no check.
   admin-config reads. Use one shared redaction-decision helper + field-stripper;
   gate authz-model reads behind the same admin check as their writes; for an
   unauthenticated public surface fail closed to the derived URL and never emit a
-  stored internal override.
+  stored internal override. **This applies to per-caller LIST PRUNING, not just
+  field redaction:** a nested collection whose visibility is scoped per user
+  (e.g. a server's `tool_list`, filtered by the caller's tool allowlist) must be
+  pruned by the SAME shared filter on every endpoint that returns it — the
+  listing, the single-item GET, the detail/`server.json`/catalog/search
+  projections. The single-item GET is the one most often missed after the list
+  endpoint is fixed (this was the `get_server` / `get_server_details` tool-name
+  leak that survived the catalog fix). Keep any derived count (`num_tools`)
+  consistent with the pruned list so the count can't become an enumeration
+  oracle. Fail closed (empty) on a missing/empty allowlist; admin/wildcard pass
+  through.
 - **Redact the DERIVED field, not just the raw source field.** Nulling
   `proxy_pass_url`/`mcp_endpoint` on a response is not enough if a *computed*
   field (a "connect URL", `endpoint_url`, `transport.url`) is built from that
@@ -382,7 +443,16 @@ sanitizer that isn't called) is equivalent to no check.
   request — that's a self-DoS). Internal-service actions must be attributable to a
   specific actor (per-instance/per-purpose `sub`), not a shared service identity.
   Tamper-evidence (append-only / HMAC chain) is best served by an immutable
-  external store — infra, deferrable.
+  external store — infra, deferrable. **Run the durable-sink guard in EVERY
+  process that initializes an audit logger, not just the main app's startup.** A
+  multi-process deployment (registry + auth-server) can have a second process
+  that builds its own audit sink lazily (e.g. the auth-server token-mint logger)
+  — if that path swallows the sink-init exception and degrades to a
+  drop-everything logger, the most forensically critical records (token issuance)
+  vanish silently while the main process looks healthy. Call the same
+  fail-closed guard where each logger is constructed, re-raise past any generic
+  `except`, and prime it at that process's startup so it fails to boot rather
+  than lazily on first use.
 - **Client IP for audit/attribution: derive from a non-spoofable source, and
   scope the ASGI proxy-header trust to the real peer.** The left-most
   `X-Forwarded-For` entry is fully client-controlled — never use it. Resolve via

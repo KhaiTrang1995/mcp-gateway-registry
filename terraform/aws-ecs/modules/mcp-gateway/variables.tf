@@ -508,6 +508,49 @@ variable "documentdb_namespace" {
   default     = "default"
 }
 
+# Rate Limiting (issue #295)
+variable "rate_limiting_enabled" {
+  description = "Master switch for application-level rate limiting"
+  type        = bool
+  default     = false
+}
+
+variable "rate_limit_backend" {
+  description = "Rate-limit counter backend (only 'documentdb' is implemented in v1)"
+  type        = string
+  default     = "documentdb"
+}
+
+variable "rate_limit_fail_open" {
+  description = "Global fail-open on rate-limit backend error (per-limit fail_closed overrides)"
+  type        = bool
+  default     = true
+}
+
+variable "rate_limit_definitions_cache_ttl_seconds" {
+  description = "In-process cache TTL (seconds) for rate-limit definition reads"
+  type        = number
+  default     = 30
+}
+
+variable "rate_limit_backend_timeout_ms" {
+  description = "Hard per-op timeout (ms) for each rate-limit counter operation"
+  type        = number
+  default     = 250
+}
+
+variable "rate_limit_user_floor_per_min" {
+  description = "Minimum per-minute user limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 20
+}
+
+variable "rate_limit_agent_floor_per_min" {
+  description = "Minimum per-minute agent limit a group may set on short windows (lockout safeguard)"
+  type        = number
+  default     = 10
+}
+
 variable "documentdb_use_tls" {
   description = "Use TLS for DocumentDB connections"
   type        = bool
@@ -664,6 +707,12 @@ variable "cognito_client_secret" {
 
 variable "cognito_domain" {
   description = "Optional Cognito hosted UI domain prefix or custom domain. Leave empty to derive it from the User Pool ID."
+  type        = string
+  default     = ""
+}
+
+variable "cognito_m2m_client_ids" {
+  description = "Optional comma/space-separated allowlist of Cognito app-client ids that mint machine (client_credentials) access tokens the gateway should accept. Use \"*\" to accept any M2M (no-username) client in the pool without listing each. Default-empty = fail closed (no M2M client accepted)."
   type        = string
   default     = ""
 }
@@ -1411,6 +1460,18 @@ variable "ide_oauth_callback_port" {
   EOT
   type        = number
   default     = 0
+}
+
+variable "ide_connect_scope" {
+  description = <<-EOT
+    Optional install scope for the Claude Code Connect snippet: local, project,
+    or user. When set, the generated `claude mcp add` command emits
+    `--scope <value>`. Empty (default) omits the flag. Invalid values are
+    ignored by the registry (flag omitted). Display-only; no gateway behaviour
+    change. Registry-read.
+  EOT
+  type        = string
+  default     = ""
 }
 
 # =============================================================================

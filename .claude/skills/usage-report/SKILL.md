@@ -328,7 +328,7 @@ Same data-sourcing behavior as the other historical charts (scans all CSVs acros
 
 ### Step 5d: Generate Install Forecast Chart
 
-Project when the registry will reach 1,000 installs using two models: a 14-day OLS linear regression and a 7-day recent-pace extrapolation. Produces a PNG chart (cumulative installs with forecast line and confidence bands) and a JSON summary with ETAs.
+Project when the registry will reach 2,000 installs using two models: a 14-day OLS linear regression and a 7-day recent-pace extrapolation. Produces a PNG chart (cumulative installs with forecast line and confidence bands) and a JSON summary with ETAs. The target defaults to 2,000 and is overridable via `--target`.
 
 ```bash
 /usr/bin/python3 .claude/skills/usage-report/generate_install_forecast.py \
@@ -338,7 +338,7 @@ Project when the registry will reach 1,000 installs using two models: a 14-day O
 ```
 
 Outputs:
-- PNG chart showing cumulative installs, linear fit, and projected crossing of the 1,000-install target
+- PNG chart showing cumulative installs, linear fit, and projected crossing of the 2,000-install target
 - JSON summary with `today.installs`, `linear.eta` (with 95% CI bounds), `recent_pace.eta`, and model parameters
 
 Embed the chart in the report's **Install Forecast** section. Include a table showing both model ETAs and daily rates. This section should come after Version Adoption and before Customer Infra Spend.
@@ -568,7 +568,7 @@ The report MUST embed all 14 charts (the template's `![...]` references). If any
 6. `lifetime-buckets-YYYY-MM-DD.png` (retention % over time)
 7. `active-instances-YYYY-MM-DD.png` (DAI + MA7 + streak)
 8. `compute-installs-timeseries-YYYY-MM-DD.png` (compute platform cumulative + daily)
-9. `install-forecast-YYYY-MM-DD.png` (OLS + recent-pace to 1,000)
+9. `install-forecast-YYYY-MM-DD.png` (OLS + recent-pace to 2,000)
 10. `daily-reporters-YYYY-MM-DD.png` (daily AWS reporters: all + persisted >=2 events + persisted >=2 days)
 11. `ltv-spend-YYYY-MM-DD.png` (daily compute + bedrock + cumulative)
 12. `adoption-funnel-YYYY-MM-DD.png` (funnel from total to confirmed-alive)

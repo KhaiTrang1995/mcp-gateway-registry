@@ -382,8 +382,8 @@ def main() -> None:
     parser.add_argument(
         "--target",
         type=int,
-        default=1000,
-        help="Target install count to forecast (default: 1000)",
+        default=2000,
+        help="Target install count to forecast (default: 2000)",
     )
     parser.add_argument(
         "--output",

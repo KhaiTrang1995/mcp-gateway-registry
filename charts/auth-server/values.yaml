@@ -89,6 +89,16 @@ app:
   # non-durable JSON log lines. Set to false only where a non-durable audit
   # trail is acceptable.
   auditLogRequireDurable: true
+  # Rate Limiting (issue #295). Application-level, identity/group/target-aware
+  # limits enforced here in the /validate hop (complementary to the coarse
+  # per-IP nginx edge limiting). Off by default. These must match the registry
+  # chart's app.rateLimiting values so both services agree.
+  rateLimiting:
+    enabled: false
+    backend: documentdb
+    failOpen: true
+    definitionsCacheTtlSeconds: 30
+    backendTimeoutMs: 250
 # Authentication Provider Configuration
 # Choose ONE provider: keycloak, entra, okta, auth0, cognito, or pingfederate
 authProvider:
@@ -150,6 +160,10 @@ cognito:
   clientSecret: ""
   domain: "" # Optional: custom Cognito domain
   region: "us-east-1" # AWS region for the User Pool
+  # Optional comma/space-separated allowlist of Cognito app-client ids that mint
+  # machine (client_credentials) access tokens the gateway should accept. Empty =
+  # fail closed (no M2M client accepted).
+  m2mClientIds: ""
 # Per-user egress credential vault (third-party OBO support).
 # The auth-server only needs the feature flag + the internal vend URL (it calls
 # the registry's /_egress_internal vend endpoint) + the nginx marker secret; it

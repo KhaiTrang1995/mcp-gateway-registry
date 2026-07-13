@@ -926,6 +926,12 @@ def test_create_location_block_streamable_http(nginx_service):
     # capture + forward the /validate-minted internal token.
     assert "auth_request_set $auth_internal_token $upstream_http_x_internal_token" in block
     assert "proxy_set_header X-Internal-Token $auth_internal_token" in block
+    # Rate-limit passthrough (issue #295): capture the throttle marker + headers so
+    # @forbidden_error can rewrite a throttle-403 into a real 429 + Retry-After.
+    assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled" in block
+    assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit" in block
+    assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset" in block
+    assert "auth_request_set $rl_retry $upstream_http_retry_after" in block
     assert "proxy_buffering off" in block
     assert "auth_request /validate" in block
     # Upstream timeouts derived from MCP_PROXY_TIMEOUT so long-running MCP tool

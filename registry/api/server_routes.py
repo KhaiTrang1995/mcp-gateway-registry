@@ -226,6 +226,46 @@ def _coerce_metadata_to_dict(parsed_metadata: Any, path: str) -> dict[str, Any]:
     return {}
 
 
+def _apply_tool_visibility(
+    server_info: dict,
+    server_path: str,
+    user_context: dict,
+    *,
+    endpoint: str,
+) -> None:
+    """Prune a single-server response's ``tool_list`` to the caller's allowlist.
+
+    Mutates ``server_info`` in place so a caller with server access but a
+    restricted tool set cannot read tool names outside that set on the
+    single-server detail endpoints. Keeps ``num_tools`` consistent with the
+    pruned list. Uses the same canonical helper as the server-listing and
+    tool-catalog paths; admin / wildcard callers pass through unchanged and a
+    missing/empty allowlist fails closed (empty list).
+
+    Args:
+        server_info: The server document being returned (mutated in place).
+        server_path: The registered server path, used for the allowlist lookup.
+        user_context: The authenticated caller's context.
+        endpoint: Label for the tool-filter audit event.
+    """
+    raw_tools = server_info.get("tool_list")
+    if not isinstance(raw_tools, list):
+        return
+    filtered = filter_tools_for_user(
+        server_info.get("server_name", server_path),
+        raw_tools,
+        user_context or {},
+        endpoint=endpoint,
+        server_path=server_path,
+    )
+    # Safe to mutate: server_service.get_server_info() returns a fresh
+    # per-request document (not a shared/cached dict), so this cannot poison a
+    # cache or a concurrent request.
+    server_info["tool_list"] = filtered
+    # Keep the badge/count consistent with what is actually rendered.
+    server_info["num_tools"] = len(filtered)
+
+
 async def _build_versions_list(
     server_info: dict,
     current_version: str,
@@ -2659,6 +2699,12 @@ async def get_server_details(
     # Redaction decision is per-request; compute once so both the local
     # early-return and the multi-version return path apply it.
     redact_backend = should_redact_backend_urls(user_context)
+
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers) and the tool catalog. A caller with server
+    # access but a restricted tool set must not see tool names outside that
+    # set. filter_tools_for_user fails closed and passes through admin/wildcard.
+    _apply_tool_visibility(server_info, service_path, user_context, endpoint="server_details")
 
     # Local (stdio) servers don't support multi-version routing — early-return
     # avoids guarding the synthesis block below. _build_versions_list() also
@@ -5857,6 +5903,11 @@ async def get_server_connect_config(
     # emit --callback-port and the IDE stops using a random port the IdP rejects.
     callback_port = settings.ide_oauth_callback_port or None
 
+    # Optional scope for the Claude Code Connect snippet (local|project|user).
+    # Empty (default) => the frontend omits --scope, keeping Claude Code's own
+    # default. Only affects the displayed Claude Code command.
+    connect_scope = settings.ide_connect_scope or None
+
     return {
         "path": service_path,
         "server_name": server_info.get("server_name"),
@@ -5865,6 +5916,7 @@ async def get_server_connect_config(
         "custom_headers": custom_headers,
         "oauth_client_id": oauth_client_id,
         "oauth_callback_port": callback_port,
+        "connect_scope": connect_scope,
         "append_mcp_path": server_info.get("append_mcp_path"),
         # Per-user egress credential vault mode. When "oauth_user", the gateway
         # injects the user's vaulted upstream token on egress, so the Connect
@@ -6295,6 +6347,12 @@ async def get_server(
     # In registry-only mode, users need the URL to connect directly.
     if should_redact_backend_urls(user_context):
         redact_server_backend_fields(server_info)
+
+    # Prune the tool_list to what this caller may see, matching the list
+    # endpoint (GET /servers), the tool catalog, and get_server_details. A
+    # caller with server access but a restricted tool set must not read tool
+    # names outside that set. Fails closed; admin/wildcard pass through.
+    _apply_tool_visibility(server_info, path, user_context, endpoint="server_detail")
 
     # Normalize visibility for servers stored before the write-side fix
     # always persisted the field (#1181). Matches the default-on-read

@@ -147,6 +147,8 @@ spec:
               value: {{ .Values.app.ideOauthClientId | default "" | quote }}
             - name: IDE_OAUTH_CALLBACK_PORT
               value: {{ .Values.app.ideOauthCallbackPort | default 0 | toString | quote }}
+            - name: IDE_CONNECT_SCOPE
+              value: {{ .Values.app.ideConnectScope | default "" | quote }}
             # Custom entity types (admin-defined, schema-driven catalog types)
             - name: CUSTOM_ENTITY_TYPES_ENABLED
               value: {{ .Values.app.customEntityTypesEnabled | default false | toString | quote }}
@@ -287,6 +289,22 @@ spec:
             # non-durable audit trail is acceptable.
             - name: AUDIT_LOG_REQUIRE_DURABLE
               value: {{ .Values.app.auditLogRequireDurable | default true | toString | quote }}
+            # Rate Limiting (issue #295). Off by default; the registry hosts the
+            # admin CRUD API for definitions.
+            - name: RATE_LIMITING_ENABLED
+              value: {{ .Values.app.rateLimiting.enabled | default false | toString | quote }}
+            - name: RATE_LIMIT_BACKEND
+              value: {{ .Values.app.rateLimiting.backend | default "documentdb" | quote }}
+            - name: RATE_LIMIT_FAIL_OPEN
+              value: {{ .Values.app.rateLimiting.failOpen | default true | toString | quote }}
+            - name: RATE_LIMIT_DEFINITIONS_CACHE_TTL_SECONDS
+              value: {{ .Values.app.rateLimiting.definitionsCacheTtlSeconds | default 30 | toString | quote }}
+            - name: RATE_LIMIT_BACKEND_TIMEOUT_MS
+              value: {{ .Values.app.rateLimiting.backendTimeoutMs | default 250 | toString | quote }}
+            - name: RATE_LIMIT_USER_FLOOR_PER_MIN
+              value: {{ .Values.app.rateLimiting.userFloorPerMin | default 20 | toString | quote }}
+            - name: RATE_LIMIT_AGENT_FLOOR_PER_MIN
+              value: {{ .Values.app.rateLimiting.agentFloorPerMin | default 10 | toString | quote }}
             {{- if .Values.app.registryApiKeysExistingSecret }}
             - name: REGISTRY_API_KEYS
               valueFrom:

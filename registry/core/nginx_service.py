@@ -1975,6 +1975,12 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         auth_request_set $auth_username $upstream_http_x_username;
         auth_request_set $auth_scopes $upstream_http_x_scopes;
         auth_request_set $auth_method $upstream_http_x_auth_method;
+        # Rate-limit passthrough (issue #295): capture the throttle marker + headers
+        # so @forbidden_error can turn a throttle-403 into a real 429 + Retry-After.
+        auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
+        auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
+        auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
+        auth_request_set $rl_retry $upstream_http_retry_after;
 
         # Attribute metrics to this specific agent. Without this, emit_metrics
         # derives the name from the first URI segment ("agent"), bucketing every
@@ -2259,6 +2265,13 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
         # Capture the /validate-minted internal JWT (binds identity/scopes/upstream).
         # mcp_proxy verifies this instead of trusting the forgeable X-* headers below.
         auth_request_set $auth_internal_token $upstream_http_x_internal_token;
+        # Rate-limit passthrough (issue #295): capture the throttle marker + headers
+        # so @forbidden_error can turn a throttle-403 into a real 429 + Retry-After.
+        # auth_request only forwards 401/403, so /validate signals throttles as 403.
+        auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;
+        auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;
+        auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;
+        auth_request_set $rl_retry $upstream_http_retry_after;
 {proxy_directive}
         proxy_http_version 1.1;
         proxy_ssl_server_name on;

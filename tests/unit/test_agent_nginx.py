@@ -101,6 +101,26 @@ class TestGenerateAgentLocationBlocks:
         assert "auth_request /validate;" in result
 
     @pytest.mark.asyncio
+    async def test_jsonrpc_block_captures_rate_limit_headers(self, patched_agent_service):
+        """The JSON-RPC block captures the throttle marker + headers (issue #295).
+
+        nginx auth_request only forwards 401/403, so a throttle leaves /validate as
+        a 403; these captures let @forbidden_error rewrite it into a real 429.
+        """
+        patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])
+        patched_agent_service.get_agent_info = AsyncMock(return_value=_agent())
+        service = NginxConfigService()
+
+        result = await service._generate_agent_location_blocks()
+
+        assert "auth_request_set $rl_throttled $upstream_http_x_ratelimit_throttled;" in result
+        assert "auth_request_set $rl_limit $upstream_http_x_ratelimit_limit;" in result
+        assert "auth_request_set $rl_reset $upstream_http_x_ratelimit_reset;" in result
+        # Retry-After is captured from the actual Retry-After response header the
+        # auth-server sends (not an X-RateLimit-* alias), so nginx can re-emit it.
+        assert "auth_request_set $rl_retry $upstream_http_retry_after;" in result
+
+    @pytest.mark.asyncio
     async def test_jsonrpc_block_disables_buffering_for_sse(self, patched_agent_service):
         """The JSON-RPC block disables proxy buffering for message/stream SSE."""
         patched_agent_service.get_enabled_agents = AsyncMock(return_value=["/flight-booking-agent"])

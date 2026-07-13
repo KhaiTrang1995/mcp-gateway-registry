@@ -1085,6 +1085,12 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # --callback-port. 0 (default) lets the IDE pick a port (correct for Keycloak).
 # ide_oauth_callback_port = 56789
 
+# Optional install scope for the Claude Code Connect snippet: local | project | user.
+# When set, the generated `claude mcp add` command emits `--scope <value>` (e.g.
+# "user" installs the server for every project, not just the current directory).
+# Empty (default) omits the flag. Display-only; no gateway behaviour change.
+# ide_connect_scope = "user"
+
 # Container image URIs for observability services (required when enable_observability = true)
 # metrics_service_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-metrics-service:latest"
 # grafana_image_uri         = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-grafana:latest"
@@ -1203,6 +1209,22 @@ aws_registry_federation_enabled = true
 # GitHub Enterprise Server support
 # github_extra_hosts  = "github.mycompany.com,raw.github.mycompany.com"
 # github_api_base_url = "https://github.mycompany.com/api/v3"
+
+# ============================================================================
+# RATE LIMITING (Issue #295)
+# ============================================================================
+# Application-level, identity/group/target-aware rate limiting enforced at the
+# auth-server /validate hop (complementary to the coarse per-IP nginx edge
+# limiting). Off by default; definitions are managed via the admin API/CLI.
+# rate_limiting_enabled                    = false
+# rate_limit_backend                       = "documentdb"
+# rate_limit_fail_open                     = true
+# rate_limit_definitions_cache_ttl_seconds = 30
+# rate_limit_backend_timeout_ms            = 250
+# Lockout-safeguard floors (registry validates group definitions at config time;
+# on windows <= 60s a group's user/agent limit must be >= its floor).
+# rate_limit_user_floor_per_min            = 20
+# rate_limit_agent_floor_per_min           = 10
 
 # ============================================================================
 # EXTRA ENVIRONMENT VARIABLES (Issue #1000)
