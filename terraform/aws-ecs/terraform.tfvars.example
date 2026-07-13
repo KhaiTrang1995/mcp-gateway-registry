@@ -1085,6 +1085,12 @@ registry_api_token = "m3zT65wREARMVDToKosg_DgNkKqS_434hNxy3sslGPY"
 # --callback-port. 0 (default) lets the IDE pick a port (correct for Keycloak).
 # ide_oauth_callback_port = 56789
 
+# Optional install scope for the Claude Code Connect snippet: local | project | user.
+# When set, the generated `claude mcp add` command emits `--scope <value>` (e.g.
+# "user" installs the server for every project, not just the current directory).
+# Empty (default) omits the flag. Display-only; no gateway behaviour change.
+# ide_connect_scope = "user"
+
 # Container image URIs for observability services (required when enable_observability = true)
 # metrics_service_image_uri = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-metrics-service:latest"
 # grafana_image_uri         = "YOUR_ACCOUNT_ID.dkr.ecr.YOUR_AWS_REGION.amazonaws.com/mcp-gateway-grafana:latest"

@@ -1378,6 +1378,12 @@ module "ecs_service_registry" {
           name  = "IDE_OAUTH_CALLBACK_PORT"
           value = tostring(var.ide_oauth_callback_port)
         },
+        # Optional Claude Code Connect snippet scope (local|project|user). Empty
+        # (default) omits --scope. Display-only; registry-read.
+        {
+          name  = "IDE_CONNECT_SCOPE"
+          value = var.ide_connect_scope
+        },
         {
           name  = "DEPLOYMENT_MODE"
           value = var.deployment_mode

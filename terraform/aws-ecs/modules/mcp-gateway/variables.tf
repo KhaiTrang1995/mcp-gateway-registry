@@ -1442,6 +1442,18 @@ variable "ide_oauth_callback_port" {
   default     = 0
 }
 
+variable "ide_connect_scope" {
+  description = <<-EOT
+    Optional install scope for the Claude Code Connect snippet: local, project,
+    or user. When set, the generated `claude mcp add` command emits
+    `--scope <value>`. Empty (default) omits the flag. Invalid values are
+    ignored by the registry (flag omitted). Display-only; no gateway behaviour
+    change. Registry-read.
+  EOT
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # DEPLOYMENT MODE CONFIGURATION
 # =============================================================================

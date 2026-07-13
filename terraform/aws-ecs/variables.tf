@@ -1862,6 +1862,17 @@ variable "ide_oauth_callback_port" {
   default     = 0
 }
 
+variable "ide_connect_scope" {
+  description = <<-EOT
+    Optional install scope for the Claude Code Connect snippet: local, project,
+    or user. When set, the generated `claude mcp add` command emits
+    `--scope <value>`. Empty (default) omits the flag. Display-only; passed
+    through to the mcp_gateway module.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "registry_extra_env" {
   description = "Extra environment variables for the registry service. List of objects with 'name' and 'value' fields. Reserved names (listed in charts/registry/reserved-env-names.txt) should not be overridden here — use their canonical Terraform variable instead. For secrets, prefer AWS Secrets Manager ARNs wired into the task definition's secrets block (see mongodb_connection_string_secret_arn as a reference pattern)."
   type        = list(object({ name = string, value = string }))

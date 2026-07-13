@@ -378,6 +378,7 @@ module "mcp_gateway" {
   mcp_advertised_scopes   = var.mcp_advertised_scopes
   ide_oauth_client_id     = var.ide_oauth_client_id
   ide_oauth_callback_port = var.ide_oauth_callback_port
+  ide_connect_scope       = var.ide_connect_scope
 
   # Extra environment variables for custom configuration (Issue #1000)
   registry_extra_env    = var.registry_extra_env
