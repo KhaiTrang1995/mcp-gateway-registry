@@ -73,8 +73,10 @@ jobs:
           version: "latest"
 
       - name: Install dependencies
+        # Install from the committed lockfile so the docs build is reproducible
+        # and does not resolve newer releases.
         run: |
-          uv pip install --system -e ".[docs]"
+          uv sync --frozen --extra docs --no-dev
 
       - name: Setup Pages
         id: pages
@@ -82,7 +84,7 @@ jobs:
 
       - name: Build landing page
         run: |
-          python scripts/build_landing_page.py --out site/index.html
+          uv run python scripts/build_landing_page.py --out site/index.html
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
