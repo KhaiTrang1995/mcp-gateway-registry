@@ -5903,6 +5903,11 @@ async def get_server_connect_config(
     # emit --callback-port and the IDE stops using a random port the IdP rejects.
     callback_port = settings.ide_oauth_callback_port or None
 
+    # Optional scope for the Claude Code Connect snippet (local|project|user).
+    # Empty (default) => the frontend omits --scope, keeping Claude Code's own
+    # default. Only affects the displayed Claude Code command.
+    connect_scope = settings.ide_connect_scope or None
+
     return {
         "path": service_path,
         "server_name": server_info.get("server_name"),
@@ -5911,6 +5916,7 @@ async def get_server_connect_config(
         "custom_headers": custom_headers,
         "oauth_client_id": oauth_client_id,
         "oauth_callback_port": callback_port,
+        "connect_scope": connect_scope,
         "append_mcp_path": server_info.get("append_mcp_path"),
         # Per-user egress credential vault mode. When "oauth_user", the gateway
         # injects the user's vaulted upstream token on egress, so the Connect
