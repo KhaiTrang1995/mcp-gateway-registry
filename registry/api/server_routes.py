@@ -99,6 +99,69 @@ def _require_admin(
         )
 
 
+def _scan_destination_is_safe(
+    server_info: dict,
+) -> bool:
+    """Re-validate the scan destination through the shared SSRF guard.
+
+    The security scanner is an external process that opens its own connection
+    to ``proxy_pass_url`` (and ``mcp_endpoint`` when set), so the registry's
+    pinned guarded client cannot protect that outbound hop. A stored credential
+    must therefore only be handed to the scanner once the destination has been
+    re-validated at the moment of use: registration-time validation is not
+    enough because ``proxy_pass_url`` is mutable after registration (an owner or
+    a registration-time bypass could point it at a private/metadata address and
+    then trigger a scan to leak the credential there). Validate every
+    destination the scanner might reach and fail closed: if any is present and
+    fails validation, the credential is not attached and the caller must not
+    proceed with the credential.
+
+    Returns:
+        True only if every configured destination passes the PROXY_PROFILE
+        SSRF guard. False (deny) on any validation failure or ambiguity.
+    """
+    from ..exceptions import UrlValidationError
+    from ..utils.url_guard import PROXY_PROFILE, validate_url
+
+    destinations = [
+        server_info.get("proxy_pass_url"),
+        server_info.get("mcp_endpoint"),
+    ]
+    checked_any = False
+    for destination in destinations:
+        if not destination:
+            continue
+        checked_any = True
+        try:
+            validate_url(destination, profile=PROXY_PROFILE)
+        except UrlValidationError as e:
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination "
+                "failed SSRF re-validation: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+        except Exception as e:  # pragma: no cover - defensive, fail closed
+            logger.warning(
+                "Refusing to attach stored credential for '%s': destination validation error: %s",
+                server_info.get("path", "unknown"),
+                e,
+            )
+            return False
+
+    if not checked_any:
+        # No destination to validate means we cannot establish where the
+        # credential would be sent -> fail closed rather than attach blindly.
+        logger.warning(
+            "Refusing to attach stored credential for '%s': no destination URL to validate",
+            server_info.get("path", "unknown"),
+        )
+        return False
+
+    return True
+
+
 def _build_scan_headers_from_credentials(
     server_info: dict,
 ) -> str | None:
@@ -107,16 +170,28 @@ def _build_scan_headers_from_credentials(
     Decrypts the stored credential and formats it as a JSON headers string
     that the scanner's _extract_bearer_token_from_headers() expects.
 
+    The stored credential is only decrypted and attached after the scan
+    destination is re-validated through the shared SSRF guard (see
+    :func:`_scan_destination_is_safe`), so a destination that was mutated to a
+    private/metadata address after registration cannot receive the credential.
+
     Args:
         server_info: Server info dict with include_credentials=True.
 
     Returns:
-        JSON string with X-Authorization header, or None if no credentials.
+        JSON string with X-Authorization header, or None if no credentials or
+        if the destination fails SSRF re-validation (fail closed).
     """
     auth_scheme = server_info.get("auth_scheme", "none")
     encrypted_credential = server_info.get("auth_credential_encrypted")
 
     if auth_scheme == "none" or not encrypted_credential:
+        return None
+
+    # Re-validate the destination at the moment of use, before decrypting or
+    # attaching the credential. Fail closed: an unsafe destination gets no
+    # credential (and the scan proceeds unauthenticated / is refused upstream).
+    if not _scan_destination_is_safe(server_info):
         return None
 
     from ..utils.credential_encryption import decrypt_credential
@@ -3558,6 +3633,12 @@ async def generate_user_token(
                 "groups": user_context["groups"],
                 "provider": user_context.get("provider", session_data.get("provider")),
                 "auth_method": user_context.get("auth_method", session_data.get("auth_method")),
+                # Forward the opaque server-side session id so the auth server can
+                # reconcile the minted groups/scopes against the authoritative
+                # session record rather than trusting the body. Omitted (None) for
+                # non-session-backed callers, in which case the auth server uses
+                # the supplied context as-is.
+                "session_id": user_context.get("session_id"),
             },
             "requested_scopes": requested_scopes,
             "expires_in_hours": expires_in_hours,
@@ -4627,6 +4708,26 @@ async def remove_service_api(
                 content={
                     "error": "Permission denied",
                     "reason": f"User does not have delete_service permission for '{service_name}'",
+                },
+            )
+
+        # Ownership guard: deleting a server tears down its routing and scopes,
+        # so only the original owner (registered_by) or an admin may do it --
+        # matching PUT /servers/{path} and PATCH .../auth-credential. Permission
+        # AND ownership are both required (defense in depth) so the whole
+        # mutation family is consistent; a delete_service grant alone is not
+        # sufficient. Fails closed when ownership cannot be established
+        # (missing registered_by -> deny for a non-admin).
+        if server_info.get("registered_by") != user_context.get("username"):
+            logger.warning(
+                f"User {user_context.get('username')} attempted to delete server "
+                f"'{service_name}' ({path}) owned by {server_info.get('registered_by')}"
+            )
+            return JSONResponse(
+                status_code=403,
+                content={
+                    "error": "Not authorized",
+                    "reason": "You can only delete servers you registered",
                 },
             )
 
