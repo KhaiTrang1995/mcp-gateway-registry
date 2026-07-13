@@ -86,7 +86,24 @@ def rule_milestone_install_count(
     prev = vars_.get("prev_total_instances", 0)
     if not isinstance(cur, int) or not isinstance(prev, int):
         return None
-    for milestone in (2000, 1900, 1800, 1700, 1600, 1500, 1400, 1300, 1200, 1100, 1000, 900, 800, 700, 600, 500):
+    for milestone in (
+        2000,
+        1900,
+        1800,
+        1700,
+        1600,
+        1500,
+        1400,
+        1300,
+        1200,
+        1100,
+        1000,
+        900,
+        800,
+        700,
+        600,
+        500,
+    ):
         if cur >= milestone > prev:
             return (
                 f"**Crossed {milestone} unique registry installs.** "
