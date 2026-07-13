@@ -136,6 +136,13 @@ export interface FederationConfig {
   encryptionKey: string;
   /** Enable AWS Agent Registry federation */
   awsRegistryFederationEnabled: boolean;
+  /**
+   * IAM role ARNs the registry task may assume for cross-account AWS Agent
+   * Registry federation. Empty (default) disables cross-account access: the
+   * sts:AssumeRole grant is omitted entirely and only same-account federation
+   * works. Fail-closed: an unset list grants no cross-account trust.
+   */
+  awsRegistryFederationAssumeRoleArns: string[];
 }
 
 export interface AuditConfig {
@@ -474,6 +481,7 @@ export const DEFAULT_REGISTRY_CONFIG: RegistryConfig = {
     staticToken: '',
     encryptionKey: '',
     awsRegistryFederationEnabled: false,
+    awsRegistryFederationAssumeRoleArns: [],
   },
 
   audit: {

@@ -271,7 +271,8 @@ module "mcp_gateway" {
   federation_encryption_key            = var.federation_encryption_key
 
   # AWS Agent Registry federation configuration
-  aws_registry_federation_enabled = var.aws_registry_federation_enabled
+  aws_registry_federation_enabled          = var.aws_registry_federation_enabled
+  aws_registry_federation_assume_role_arns = var.aws_registry_federation_assume_role_arns
 
   # ANS (Agent Name Service) configuration
   ans_integration_enabled            = var.ans_integration_enabled

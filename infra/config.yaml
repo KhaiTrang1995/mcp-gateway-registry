@@ -124,6 +124,10 @@ registry:
     registryId: ""
     staticTokenAuthEnabled: false
     awsRegistryFederationEnabled: false
+    # Cross-account federation role ARNs the registry task may assume.
+    # Empty disables cross-account access (fail closed); only same-account
+    # federation works. Each entry: arn:aws:iam::<account-id>:role/<name>.
+    awsRegistryFederationAssumeRoleArns: []
 
   # Audit logging
   audit:
