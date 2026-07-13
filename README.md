@@ -181,7 +181,17 @@ The registry collects **anonymous, non-sensitive** usage telemetry (version, OS,
 - [Roadmap (GitHub Milestones)](https://github.com/agentic-community/mcp-gateway-registry/milestones), upcoming releases and their issues
 - [Contributing Guide](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security Policy](SECURITY.md)
 
-[![Star History Chart](https://api.star-history.com/svg?repos=agentic-community/mcp-gateway-registry&type=Date)](https://star-history.com/#agentic-community/mcp-gateway-registry&Date)
+### Star History
+
+<a href="https://star-history.com/#agentic-community/mcp-gateway-registry&Date" title="View the interactive star history on star-history.com">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=agentic-community/mcp-gateway-registry&type=Date&theme=dark" />
+    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=agentic-community/mcp-gateway-registry&type=Date" />
+    <img alt="Star History Chart for agentic-community/mcp-gateway-registry (click to view)" src="https://api.star-history.com/svg?repos=agentic-community/mcp-gateway-registry&type=Date" width="720" />
+  </picture>
+</a>
+
+If the chart above does not render (star-history.com occasionally rate-limits or times out), view it directly at [star-history.com](https://star-history.com/#agentic-community/mcp-gateway-registry&Date).
 
 ## License
 
