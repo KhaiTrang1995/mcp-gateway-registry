@@ -86,7 +86,7 @@ from registry.audit.models import Identity, MCPServer, TokenMintAuditRecord
 from registry.audit.service import AuditLogger, NonDurableAuditError, enforce_durable_audit_sink
 from registry.audit.sink import emit_audit_event
 from registry.common.scopes_loader import reload_scopes_config
-from registry.common.secret_key import validate_secret_key
+from registry.common.secret_key import validate_secret_key, validate_signing_secret
 from registry.core.config import settings
 from registry.repositories.factory import get_scope_repository
 
@@ -510,8 +510,21 @@ _registry_static_token_requested: bool = (
     os.environ.get("REGISTRY_STATIC_TOKEN_AUTH_ENABLED", "false").lower() == "true"
 )
 
-# Static API key for Registry API (must match Bearer token value when enabled)
-REGISTRY_API_TOKEN: str = os.environ.get("REGISTRY_API_TOKEN", "")
+# Static API key for Registry API (must match Bearer token value when enabled).
+#
+# When set, this token is promoted to a legacy admin entry with unrestricted
+# scopes (see _build_static_token_map), so it grants the highest privilege in
+# the system. It must therefore clear the same strength bar as the application
+# signing secret: presence is optional (an unset token simply means no legacy
+# entry is created), but a value that IS present must be strong. Validating
+# through the canonical signing-secret helper fails closed at startup on an
+# empty/whitespace-only, too-short, or known-weak/placeholder value rather than
+# silently accepting a weak admin credential.
+REGISTRY_API_TOKEN: str = validate_signing_secret(
+    os.environ.get("REGISTRY_API_TOKEN"),
+    "REGISTRY_API_TOKEN",
+    required=False,
+)
 
 # Issue #779: multiple static API keys with per-key groups.
 _REGISTRY_API_KEYS_RAW: str = os.environ.get("REGISTRY_API_KEYS", "").strip()
@@ -594,6 +607,26 @@ class _RegistryApiKeyEntry(BaseModel):
                 f"Key name '{v}' is reserved (legacy/internal). Pick a different name."
             )
         return v
+
+    @field_validator("key")
+    @classmethod
+    def _validate_key(
+        cls,
+        v: str,
+    ) -> str:
+        # A keyed entry grants the scopes mapped from its groups (which may
+        # include admin), so the key bypasses IdP JWT validation and must clear
+        # the same weak-value bar as every other privilege-granting credential.
+        # The min_length=32 Field constraint alone accepts a >=32-char known
+        # placeholder (e.g. the .env.example value); route the key through the
+        # canonical validator to reject well-known literals too. Pydantic
+        # validators must raise ValueError, so re-wrap the validator's
+        # RuntimeError -- the error then flows through _parse_registry_api_keys'
+        # fail-closed path (invalid REGISTRY_API_KEYS disables the feature).
+        try:
+            return validate_signing_secret(v, "REGISTRY_API_KEYS key", required=True)
+        except RuntimeError as e:
+            raise ValueError(str(e)) from e
 
 
 def _repair_stripped_json(
@@ -783,17 +816,30 @@ if _federation_static_token_requested and not FEDERATION_STATIC_TOKEN:
 else:
     FEDERATION_STATIC_TOKEN_AUTH_ENABLED = _federation_static_token_requested
 
-# Warn if token is too short (weak entropy)
 MIN_FEDERATION_TOKEN_LENGTH: int = 32
-if (
-    FEDERATION_STATIC_TOKEN_AUTH_ENABLED
-    and len(FEDERATION_STATIC_TOKEN) < MIN_FEDERATION_TOKEN_LENGTH
-):
-    logging.warning(
-        f"FEDERATION_STATIC_TOKEN is only {len(FEDERATION_STATIC_TOKEN)} characters. "
-        f"Recommended minimum is {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-        'Generate a stronger token with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-    )
+
+# The federation static token bypasses IdP JWT validation, so it must be held to
+# the same strength bar as every other signing/marker secret: a short OR
+# well-known placeholder value must never be armed for authentication. The
+# operator explicitly enabled the feature, so the token is required=True here.
+# This is an optional feature, so on a weak/invalid token we degrade gracefully
+# (disable the feature) rather than crash the whole process -- mirroring the
+# missing-token branch above. Failing closed means the weak token is NOT armed.
+if FEDERATION_STATIC_TOKEN_AUTH_ENABLED:
+    try:
+        FEDERATION_STATIC_TOKEN = validate_signing_secret(
+            FEDERATION_STATIC_TOKEN,
+            "FEDERATION_STATIC_TOKEN",
+            required=True,
+        )
+    except RuntimeError as e:
+        logging.error(
+            "FEDERATION_STATIC_TOKEN_AUTH_ENABLED=true but FEDERATION_STATIC_TOKEN is weak: %s "
+            "Federation static token auth is DISABLED. Set a strong FEDERATION_STATIC_TOKEN or "
+            "disable the feature. Falling back to standard IdP JWT validation.",
+            e,
+        )
+        FEDERATION_STATIC_TOKEN_AUTH_ENABLED = False
 
 # Federation endpoint path patterns (scoped access for federation static token)
 # REGISTRY_ROOT_PATH is prepended so pattern matching works when hosted on a base path
@@ -2774,9 +2820,15 @@ async def validate_request(request: Request):
             if hmac.compare_digest(bearer_token, FEDERATION_STATIC_TOKEN):
                 logger.info(f"Federation static token: Authenticated for {original_url}")
 
+                # The federation static token is a long-lived, non-expiring
+                # credential intended for federation DATA SYNC. It is therefore
+                # least-privilege READ-ONLY: it grants only "federation/read".
+                # Peer/federation-config management (create/update/delete) is a
+                # privileged operation and must be driven by a real admin
+                # credential, not this static token, so "federation/peers" is
+                # deliberately NOT granted here.
                 federation_scopes = [
                     "federation/read",
-                    "federation/peers",
                 ]
                 response_data: dict[str, Any] = {
                     "valid": True,
@@ -3779,17 +3831,29 @@ async def manage_federation_token(request: Request):
     body = await request.json()
     new_token = body.get("new_token")
 
-    # Validate minimum token length if a new token is provided
-    if new_token and len(new_token) < MIN_FEDERATION_TOKEN_LENGTH:
-        return JSONResponse(
-            content={
-                "detail": (
-                    f"Token must be at least {MIN_FEDERATION_TOKEN_LENGTH} characters. "
-                    'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
-                )
-            },
-            status_code=400,
-        )
+    # A rotated token arms the same privileged static credential as startup, so
+    # it must clear the same strength bar. Run it through the canonical validator
+    # (rejects too-short AND known-weak/placeholder values, weak-check before
+    # length) rather than a bare length check -- otherwise an admin could rotate
+    # to a long-but-well-known placeholder and silently undo the startup
+    # hardening.
+    if new_token:
+        try:
+            new_token = validate_signing_secret(
+                new_token,
+                "FEDERATION_STATIC_TOKEN",
+                required=True,
+            )
+        except RuntimeError as e:
+            return JSONResponse(
+                content={
+                    "detail": (
+                        f"{e} "
+                        'Generate with: python3 -c "import secrets; print(secrets.token_urlsafe(32))"'
+                    )
+                },
+                status_code=400,
+            )
 
     if new_token:
         FEDERATION_STATIC_TOKEN = new_token

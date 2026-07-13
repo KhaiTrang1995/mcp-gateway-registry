@@ -147,6 +147,8 @@ spec:
               value: {{ .Values.app.ideOauthClientId | default "" | quote }}
             - name: IDE_OAUTH_CALLBACK_PORT
               value: {{ .Values.app.ideOauthCallbackPort | default 0 | toString | quote }}
+            - name: IDE_CONNECT_SCOPE
+              value: {{ .Values.app.ideConnectScope | default "" | quote }}
             # Custom entity types (admin-defined, schema-driven catalog types)
             - name: CUSTOM_ENTITY_TYPES_ENABLED
               value: {{ .Values.app.customEntityTypesEnabled | default false | toString | quote }}

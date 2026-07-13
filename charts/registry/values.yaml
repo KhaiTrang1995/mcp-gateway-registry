@@ -321,6 +321,12 @@ app:
   # set the same value here so the Connect dialog emits --callback-port. 0
   # (default) lets the IDE pick a port (correct for Keycloak's wildcard redirect).
   ideOauthCallbackPort: 0
+  # Optional install scope for the Claude Code Connect snippet (local|project|
+  # user). When set, the generated `claude mcp add` command emits `--scope <value>`
+  # (e.g. "user" = install for every project, not just the current directory).
+  # Empty (default) omits the flag, keeping Claude Code's default (local). Only
+  # affects the displayed Claude Code snippet.
+  ideConnectScope: ""
 # Metrics scrape configuration (Issue #1122)
 # Controls the NetworkPolicy that gates the OTel exporter-prometheus port.
 metricsScrape:

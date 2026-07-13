@@ -235,6 +235,19 @@ class Settings(BaseSettings):
         ge=0,
         le=65535,
     )
+    ide_connect_scope: str = Field(
+        default="",
+        description=(
+            "Optional scope for the Claude Code Connect snippet. When set, the "
+            "generated `claude mcp add` command emits `--scope <value>` (e.g. "
+            "`user` to install the server for every project instead of only the "
+            "current directory, or `project` to share it via .mcp.json). Empty "
+            "(default) omits the flag entirely, preserving Claude Code's own "
+            "default (`local`) and the historical snippet. Only affects the "
+            "displayed Claude Code snippet — no effect on Cursor/Codex configs "
+            "or on gateway behaviour."
+        ),
+    )
 
     # Registration webhook settings (Issue #742)
     registration_webhook_url: str | None = Field(
@@ -1027,6 +1040,28 @@ class Settings(BaseSettings):
             "Allowed: aws, azure, gcp, on_premises, other."
         ),
     )
+
+    @field_validator("ide_connect_scope", mode="before")
+    @classmethod
+    def _validate_ide_connect_scope(cls, v: str | None) -> str:
+        # Constrain to Claude Code's known scopes so the value can never inject
+        # arbitrary tokens into the displayed `claude mcp add` snippet. Anything
+        # else (including a typo) is dropped back to "" -> flag omitted.
+        if v is None:
+            return ""
+        v_lower = str(v).strip().lower()
+        if v_lower == "":
+            return ""
+        if v_lower not in {"local", "project", "user"}:
+            import logging as _logging
+
+            display = v_lower[:16] + ("..." if len(v_lower) > 16 else "")
+            _logging.getLogger(__name__).warning(
+                f"IDE_CONNECT_SCOPE={display!r} is not a valid Claude Code scope "
+                "(local|project|user); ignoring"
+            )
+            return ""
+        return v_lower
 
     @field_validator("mcp_cloud_provider")
     @classmethod
