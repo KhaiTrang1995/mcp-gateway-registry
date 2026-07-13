@@ -36,6 +36,27 @@ sanitizer that isn't called) is equivalent to no check.
   right error. Normalize (strip) and reuse the same value everywhere so all
   services derive an identical key (avoids cross-replica signature mismatches).
   Wire the validator into EVERY signing entrypoint — grep for all of them.
+- **Every credential that grants privilege must go through the ONE canonical
+  signing-secret validator at its startup entrypoint — the legacy/backward-compat
+  path is where this check gets skipped.** When a newer keyed scheme enforces a
+  minimum length/weak-value bar but an older single-value credential is read raw
+  (`os.environ.get("TOKEN", "")`) and then promoted to a privileged (often admin,
+  unrestricted-scope) entry, that legacy credential is asymmetrically weaker than
+  both the keyed entries and the app signing secret. Run it through the SAME
+  `validate_signing_secret` helper (missing AND weak: unset/empty/whitespace,
+  `< 32` stripped chars, known-weak literals, weak-check before length) at the
+  point it is read/built, and fail closed. Presence may be optional (unset simply
+  means the legacy entry is not created — that is the safe outcome), but a value
+  that IS present must be strong; never silently accept a weak privilege-granting
+  credential just because it predates the current key scheme. This applies to ALL
+  sibling credential paths, not only the reported one — a federation/static bypass
+  token, each per-key entry in a keyed scheme, and any other value that bypasses
+  IdP validation must each run through the SAME validator. A `min_length`-only
+  Pydantic constraint or a `logging.warning(...)` on a short value is NOT fail
+  closed: a weak privilege-granting token that is merely warned about is still
+  armed. Reject it — raise where a raise is safe, or (for an optional feature that
+  degrades gracefully) disable the feature so the weak token is never armed —
+  never merely warn.
 - **Match placeholder markers as substrings ANYWHERE, not just as a prefix.** An
   operator rarely leaves the `.env.example` value verbatim — they prepend a
   prefix or edit the middle (`internal-CHANGE-ME-...`, `prod-generate-with-openssl-...`).
@@ -176,6 +197,14 @@ sanitizer that isn't called) is equivalent to no check.
 - **Attach a shared/global credential only on explicit opt-in.** Make the
   privileged code path default to not attaching it and gate its use behind an
   admin check.
+- **A static, long-lived, non-expiring token must be least-privilege.** Never
+  bundle a management/write scope onto a token whose purpose is read/data-sync.
+  A token meant for federation (or any) data sync should grant only the read
+  scope (`.../read`); create/update/delete of peers or config is a management
+  operation that must stay behind a real admin credential, not the shared static
+  token. The blast radius of a leaked never-expiring token is exactly the union
+  of the scopes it carries, so keep that union minimal and audit any grant that
+  couples a read scope with a management scope on the same static token.
 - **Never forward the caller's inbound credential to a proxied/untrusted
   destination.** When the gateway proxies to a registrant-controlled upstream (or
   an agent calls a discovered remote agent), strip `Authorization`/`Cookie` from

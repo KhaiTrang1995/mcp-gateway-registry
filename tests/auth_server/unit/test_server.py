@@ -4926,3 +4926,434 @@ class TestValidateA2AAgentAccess:
         repo = self._repo({})
         with patch("auth_server.server.get_scope_repository", return_value=repo):
             assert await validate_a2a_agent_access("/travel", ["missing-scope"]) is False
+
+
+# =============================================================================
+# LEGACY STATIC ADMIN TOKEN STRENGTH VALIDATION AT STARTUP
+# =============================================================================
+
+
+class TestLegacyRegistryTokenStrengthValidation:
+    """Startup strength validation for the legacy REGISTRY_API_TOKEN.
+
+    When set, REGISTRY_API_TOKEN is promoted to an unrestricted admin entry, so
+    it grants the highest privilege in the system. It must therefore clear the
+    same strength bar as the application signing secret: an unset token is fine
+    (the feature simply has no legacy entry), but a token that is present must
+    be strong (non-empty after stripping, at least the minimum length, and not a
+    known-weak placeholder). A present-but-weak value must fail closed at
+    startup rather than silently arm a weak admin credential.
+
+    These tests reload the server module under a patched environment so the
+    real module-level validation runs, then restore a known-good module state
+    for the rest of the suite.
+    """
+
+    _STRONG = "x" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_token(self, token_value):
+        """Reload auth_server.server with REGISTRY_API_TOKEN set to token_value.
+
+        A ``None`` token_value means the variable is unset entirely. Returns the
+        freshly reloaded module. Raises whatever the module raises at import.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        if token_value is not None:
+            env["REGISTRY_API_TOKEN"] = token_value
+
+        # patch.dict(clear=False) plus explicit pop keeps unrelated env intact
+        # while giving us precise control over REGISTRY_API_TOKEN.
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("REGISTRY_API_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state so later tests see a sane module."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("REGISTRY_API_TOKEN", None)
+            importlib.reload(server_module)
+
+    def test_unset_token_is_accepted_and_empty(self):
+        """An unset token is fine: no legacy admin credential, no raise."""
+        reloaded = self._reload_with_token(None)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_strong_token_is_accepted(self):
+        """A sufficiently long, non-placeholder token is accepted verbatim."""
+        reloaded = self._reload_with_token(self._STRONG)
+        assert reloaded.REGISTRY_API_TOKEN == self._STRONG
+
+    def test_short_token_fails_closed(self):
+        """A present but too-short token must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("short")
+
+    def test_whitespace_only_token_is_treated_as_unset(self):
+        """A whitespace-only token is equivalent to unset: no admin credential.
+
+        The canonical validator treats a whitespace-only value as unset when the
+        secret is optional, which is the fail-closed outcome here: no legacy
+        admin entry is armed. A whitespace-only value is never accepted as a
+        usable credential (it strips to empty), so no weak admin token results.
+        """
+        reloaded = self._reload_with_token("   " * 20)
+        assert reloaded.REGISTRY_API_TOKEN == ""
+
+    def test_known_weak_literal_token_fails_closed(self):
+        """A present but known-weak placeholder literal must raise at startup."""
+        with pytest.raises(RuntimeError):
+            self._reload_with_token("change-this-immediately-use-a-strong-random-key-in-production")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN IS LEAST-PRIVILEGE READ-ONLY
+# =============================================================================
+
+
+class TestFederationStaticTokenReadOnly:
+    """The federation static token grants read-only access.
+
+    The federation static token is a long-lived, non-expiring credential meant
+    for federation data sync. It must be least-privilege: it grants only
+    ``federation/read`` and must NOT carry a peer/federation management scope.
+    Peer management stays behind a real admin credential.
+    """
+
+    _TOKEN = "f" * 40
+
+    def test_validate_grants_only_read_scope(self):
+        """A matching federation token yields scopes == ['federation/read']."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["method"] == "federation-static"
+        assert data["scopes"] == ["federation/read"]
+
+    def test_validate_does_not_grant_peer_management_scope(self):
+        """The federation token must not carry the peer-management scope."""
+        import auth_server.server as server_module
+
+        with (
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", self._TOKEN),
+        ):
+            client = TestClient(server_module.app)
+            response = client.get(
+                "/validate",
+                headers={
+                    "Authorization": f"Bearer {self._TOKEN}",
+                    "X-Original-URL": "https://example.com/api/federation/peers",
+                },
+            )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert "federation/peers" not in data["scopes"]
+        assert "federation/peers" not in response.headers.get("X-Scopes", "")
+
+
+# =============================================================================
+# FEDERATION STATIC TOKEN STRENGTH VALIDATION (FAIL CLOSED ON WEAK TOKEN)
+# =============================================================================
+
+
+class TestFederationStaticTokenStrengthValidation:
+    """Startup strength validation for FEDERATION_STATIC_TOKEN.
+
+    The federation static token bypasses IdP JWT validation when armed, so it
+    must clear the same weak-value bar as every other privilege-granting
+    credential. When the operator explicitly enables the feature, the token is
+    required and must be strong: a short OR known-weak placeholder value must
+    NOT be armed. Because this is an optional feature, a weak token degrades
+    gracefully -- the feature is DISABLED (fail closed) rather than crashing the
+    process -- mirroring the missing-token branch. Warn-only is not fail closed.
+
+    These tests reload the server module under a patched environment so the real
+    module-level validation runs, then restore a known-good module state for the
+    rest of the suite.
+    """
+
+    _STRONG = "f" * 40
+    _RESTORE_ENV = {
+        "SECRET_KEY": "test-secret-key-that-is-definitely-long-enough-32b",
+        "DOCUMENTDB_HOST": "localhost",
+    }
+
+    def _reload_with_federation_token(self, token_value):
+        """Reload auth_server.server with the feature enabled and a given token.
+
+        A ``None`` token_value means FEDERATION_STATIC_TOKEN is unset entirely.
+        Returns the freshly reloaded module.
+        """
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        env = dict(self._RESTORE_ENV)
+        env["FEDERATION_STATIC_TOKEN_AUTH_ENABLED"] = "true"
+        if token_value is not None:
+            env["FEDERATION_STATIC_TOKEN"] = token_value
+
+        with patch.dict(os.environ, env, clear=False):
+            if token_value is None:
+                os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            return importlib.reload(server_module)
+
+    def teardown_method(self):
+        """Restore a valid module state (feature disabled) for later tests."""
+        import importlib
+        import os
+
+        import auth_server.server as server_module
+
+        with patch.dict(os.environ, self._RESTORE_ENV, clear=False):
+            os.environ.pop("FEDERATION_STATIC_TOKEN", None)
+            os.environ.pop("FEDERATION_STATIC_TOKEN_AUTH_ENABLED", None)
+            importlib.reload(server_module)
+
+    def test_strong_token_stays_enabled_and_armed(self):
+        """A strong token keeps the feature enabled and arms the token."""
+        reloaded = self._reload_with_federation_token(self._STRONG)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True
+        assert reloaded.FEDERATION_STATIC_TOKEN == self._STRONG
+
+    def test_short_token_disables_feature(self):
+        """A short token disables the feature (fail closed), does not raise."""
+        reloaded = self._reload_with_federation_token("short")
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_known_weak_literal_disables_feature(self):
+        """A known-weak >=32-char placeholder disables the feature."""
+        reloaded = self._reload_with_federation_token(
+            "change-this-immediately-use-a-strong-random-key-in-production"
+        )
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_unset_token_disables_feature(self):
+        """Enabling the feature without a token disables it (fail closed)."""
+        reloaded = self._reload_with_federation_token(None)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+    def test_validate_does_not_authenticate_weak_token(self):
+        """A weak token is not armed: the /validate federation path rejects it."""
+        weak = "short"
+        reloaded = self._reload_with_federation_token(weak)
+        assert reloaded.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+
+        client = TestClient(reloaded.app)
+        response = client.get(
+            "/validate",
+            headers={
+                "Authorization": f"Bearer {weak}",
+                "X-Original-URL": "https://example.com/api/federation/peers",
+            },
+        )
+        # The weak token is not armed, so it never authenticates via the
+        # federation-static path (it falls through to standard JWT validation,
+        # which rejects a non-JWT bearer).
+        assert response.status_code != 200 or response.json().get("method") != ("federation-static")
+
+
+# =============================================================================
+# REGISTRY_API_KEYS ENTRY WEAK-VALUE REJECTION (FAIL CLOSED)
+# =============================================================================
+
+
+class TestRegistryApiKeyEntryStrengthValidation:
+    """Per-key REGISTRY_API_KEYS entries must reject weak key values.
+
+    A keyed entry grants the scopes mapped from its groups (which may include
+    admin), so its key bypasses IdP JWT validation and must clear the same
+    weak-value bar as every other privilege-granting credential. The Pydantic
+    ``min_length=32`` constraint alone accepts a >=32-char known placeholder, so
+    the key is additionally routed through the canonical validator, which
+    rejects short AND known-weak literals. A weak key must fail closed: the
+    entry is rejected and the parse path disables the feature rather than arming
+    a weak keyed credential.
+    """
+
+    _STRONG = "x" * 40
+
+    def test_strong_key_validates(self):
+        """A strong, non-placeholder key builds a valid entry."""
+        import auth_server.server as server_module
+
+        entry = server_module._RegistryApiKeyEntry(
+            name="deploy-pipeline",
+            key=self._STRONG,
+            groups=["mcp-registry-admin"],
+        )
+        assert entry.key == self._STRONG
+
+    def test_short_key_raises(self):
+        """A key shorter than the minimum raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="short",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_known_weak_literal_key_raises(self):
+        """A >=32-char known-weak placeholder key raises a validation error."""
+        import pydantic
+
+        import auth_server.server as server_module
+
+        with pytest.raises((pydantic.ValidationError, ValueError)):
+            server_module._RegistryApiKeyEntry(
+                name="deploy-pipeline",
+                key="change-this-immediately-use-a-strong-random-key-in-production",
+                groups=["mcp-registry-admin"],
+            )
+
+    def test_parse_rejects_weak_key_entry(self):
+        """A >=32-char weak-literal key fails the parser (fail closed)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with pytest.raises(ValueError, match="Invalid entry"):
+            server_module._parse_registry_api_keys(raw)
+
+    async def test_build_static_token_map_disabled_on_weak_key(self):
+        """A weak keyed entry disables static-token auth (matches malformed-JSON)."""
+        import json
+
+        import auth_server.server as server_module
+
+        raw = json.dumps(
+            {
+                "deploy-pipeline": {
+                    "key": "change-this-immediately-use-a-strong-random-key-in-production",
+                    "groups": ["mcp-registry-admin"],
+                }
+            }
+        )
+        with (
+            patch.object(server_module, "REGISTRY_STATIC_TOKEN_AUTH_ENABLED", True),
+            patch.object(server_module, "_REGISTRY_API_KEYS_RAW", raw),
+            patch.object(server_module, "REGISTRY_API_TOKEN", ""),
+            patch.object(server_module, "_STATIC_TOKEN_MAP", {}),
+        ):
+            await server_module._build_static_token_map()
+            assert server_module.REGISTRY_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module._STATIC_TOKEN_MAP == {}
+
+
+# =============================================================================
+# RUNTIME FEDERATION-TOKEN ROTATION MUST ENFORCE THE SAME STRENGTH BAR
+# =============================================================================
+
+
+class TestFederationTokenRotationStrength:
+    """The runtime rotation endpoint must reject weak new tokens.
+
+    Rotating the federation static token arms the same privileged credential as
+    startup, so the rotation endpoint must clear the same weak-value bar: a short
+    OR known-weak placeholder value must be rejected with 400 and must NOT arm
+    the token, otherwise an admin could rotate to a long-but-well-known
+    placeholder and silently undo the startup hardening.
+    """
+
+    _ADMIN = "a" * 40
+    _STRONG = "f" * 40
+
+    def _client_and_module(self):
+        import auth_server.server as server_module
+
+        return TestClient(server_module.app), server_module
+
+    def test_short_new_token_rejected(self):
+        """A short rotation token is rejected (400) and does not arm the token."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "short"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_known_weak_literal_new_token_rejected(self):
+        """A long-but-known-placeholder rotation token is rejected (400)."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": "change-this-immediately-use-a-strong-random-key-in-production"},
+            )
+            assert response.status_code == 400
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is False
+            assert server_module.FEDERATION_STATIC_TOKEN == ""
+
+    def test_strong_new_token_rotates(self):
+        """A strong rotation token is accepted and arms the feature."""
+        client, server_module = self._client_and_module()
+        with (
+            patch.object(server_module, "REGISTRY_API_TOKEN", self._ADMIN),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN", ""),
+            patch.object(server_module, "FEDERATION_STATIC_TOKEN_AUTH_ENABLED", False),
+        ):
+            response = client.post(
+                "/admin/federation-token",
+                headers={"Authorization": f"Bearer {self._ADMIN}"},
+                json={"new_token": self._STRONG},
+            )
+            assert response.status_code == 200
+            assert response.json()["action"] == "rotated"
+            assert server_module.FEDERATION_STATIC_TOKEN == self._STRONG
+            assert server_module.FEDERATION_STATIC_TOKEN_AUTH_ENABLED is True
