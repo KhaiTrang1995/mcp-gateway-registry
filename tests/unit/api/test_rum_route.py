@@ -30,7 +30,6 @@ from fastapi.testclient import TestClient
 import registry.main as registry_main
 from registry.main import app
 
-
 RUM_JS_CONTENT: str = '<script>window.__RUM_TEST__=true;console.log("rum loaded");</script>'
 
 

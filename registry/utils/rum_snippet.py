@@ -24,7 +24,6 @@ import binascii
 import logging
 import re
 
-
 # Configure logging with basicConfig
 logging.basicConfig(
     level=logging.INFO,  # Set the log level to INFO

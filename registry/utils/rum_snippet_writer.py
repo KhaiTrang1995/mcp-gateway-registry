@@ -19,7 +19,6 @@ import sys
 
 from registry.utils.rum_snippet import resolve_rum_snippet
 
-
 # Configure logging with basicConfig
 logging.basicConfig(
     level=logging.INFO,  # Set the log level to INFO

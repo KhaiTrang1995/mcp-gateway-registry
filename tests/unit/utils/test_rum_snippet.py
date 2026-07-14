@@ -35,8 +35,7 @@ def _b64(
 
 
 SNIPPET_SIGNALFX: str = (
-    '<script src="https://cdn.signalfx.com/o11y-gdi-rum/latest/splunk-otel-web.js">'
-    "</script>"
+    '<script src="https://cdn.signalfx.com/o11y-gdi-rum/latest/splunk-otel-web.js"></script>'
 )
 
 
