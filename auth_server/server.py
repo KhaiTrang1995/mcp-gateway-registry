@@ -2384,8 +2384,9 @@ def _get_a2a_agent_path(
 # broad server grant -- so an MCP server scope never gates agent invoke. The set
 # matches the registry's own admin determination (registry/auth/dependencies.py
 # _user_is_admin): both the "mcp-registry-admin" scope and the "registry-admins"
-# bootstrap group/scope count as admin.
-_A2A_ADMIN_MARKERS: frozenset[str] = frozenset({"mcp-registry-admin", "registry-admins"})
+# bootstrap group/scope count as admin. Sourced from the shared single source of
+# truth so this cannot drift from the other layers that gate on admin groups.
+from registry.auth.privileged_constants import ADMIN_GROUP_MARKERS as _A2A_ADMIN_MARKERS
 
 
 async def validate_a2a_agent_access(
@@ -3950,6 +3951,112 @@ async def _emit_token_mint_audit(
         logger.warning("Failed to emit token-mint audit record", exc_info=True)
 
 
+def _validate_context_group_scope_shape(
+    user_context: dict[str, Any],
+) -> None:
+    """Fail closed on a malformed groups/scopes shape in a mint request body.
+
+    The internal mint endpoint stamps ``groups`` and ``scopes`` from the request
+    body straight into the minted JWT. The body is only reachable to a caller
+    holding the internal signing key, but we still refuse to mint from a
+    structurally ambiguous context rather than coerce it: ``groups`` and
+    ``scopes`` must each be a list of non-empty strings when present. A scalar,
+    ``None`` element, or non-string entry is rejected (a coerced
+    ``groups: "admin"`` string would otherwise be iterated character-by-character
+    downstream). Missing keys are allowed (they default to empty).
+
+    Raises:
+        HTTPException: 400 if either field is present but not a list of strings.
+    """
+    for field in ("groups", "scopes"):
+        value = user_context.get(field)
+        if value is None:
+            continue
+        if not isinstance(value, list) or not all(
+            isinstance(item, str) and item.strip() for item in value
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"user_context.{field} must be a list of non-empty strings",
+                headers={"Connection": "close"},
+            )
+
+
+async def _reconcile_context_against_session(
+    user_context: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Reconcile a mint request's groups/scopes against the authoritative session.
+
+    The mint endpoint receives the caller-supplied ``user_context`` in the
+    request body. When that context carries a ``session_id``, we do not trust the
+    body's groups/scopes: we resolve the session from the authoritative session
+    store and reconcile against the groups persisted there at login. The minted
+    token then reflects the session's groups (and scopes derived from them), and
+    a body that tries to claim a privileged group the session does not hold is
+    rejected outright rather than silently minted. This binds a session-backed
+    mint to what the user actually had, closing the forged-context path for the
+    session-backed case.
+
+    When no ``session_id`` is present (pure internal / M2M callers with no
+    session-backed source), the body's own groups/scopes are used unchanged --
+    that trust boundary is explicit and documented; the caller already holds the
+    internal signing key.
+
+    Returns:
+        Tuple ``(groups, scopes)`` to stamp into the token.
+
+    Raises:
+        HTTPException: 403 if the body claims a privileged group the resolved
+            session does not hold, or 401 if the session_id cannot be resolved.
+    """
+    body_groups = list(user_context.get("groups") or [])
+    body_scopes = list(user_context.get("scopes") or [])
+
+    session_id = user_context.get("session_id")
+    if not session_id:
+        # No authoritative session-backed source for this caller. Trust boundary
+        # is the internal-JWT gate + validate_scope_subset; use the body as-is.
+        return body_groups, body_scopes
+
+    from session_store import resolve_session
+
+    session_data = await resolve_session(session_id)
+    if not session_data:
+        # A session_id was supplied but does not resolve to a live session ->
+        # fail closed rather than fall back to trusting the body.
+        raise HTTPException(
+            status_code=401,
+            detail="Session could not be resolved for token mint",
+            headers={"Connection": "close"},
+        )
+
+    session_groups = list(session_data.get("groups") or [])
+    session_group_set = set(session_groups)
+
+    # A body may not claim any privileged group the session does not hold.
+    forged_privileged = (set(body_groups) & _A2A_ADMIN_MARKERS) - session_group_set
+    if forged_privileged:
+        logger.warning(
+            "Refusing token mint: request claimed privileged group(s) %s not held by session for '%s'",
+            sorted(forged_privileged),
+            hash_username(session_data.get("username") or ""),
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Requested groups exceed the session's granted groups",
+            headers={"Connection": "close"},
+        )
+
+    # Mint the intersection of requested and session-held groups so the token can
+    # never exceed the session, then derive scopes from the reconciled groups.
+    if body_groups:
+        reconciled_groups = [g for g in body_groups if g in session_group_set]
+    else:
+        reconciled_groups = session_groups
+    reconciled_scopes = await map_groups_to_scopes(reconciled_groups)
+    return reconciled_groups, reconciled_scopes
+
+
 @internal_router.post("/tokens", response_model=GenerateTokenResponse)
 async def generate_user_token(
     body: GenerateTokenRequest,
@@ -4004,6 +4111,9 @@ async def generate_user_token(
     try:
         # Extract user context
         user_context = request.user_context
+        # Fail closed on a structurally ambiguous groups/scopes shape before any
+        # of it is trusted for scope-subset checks or stamped into a JWT.
+        _validate_context_group_scope_shape(user_context)
         username = user_context.get("username")
         user_scopes = user_context.get("scopes", [])
         # Human-readable identity for the audit record (email ->
@@ -4063,8 +4173,16 @@ async def generate_user_token(
         # Check if user has stored OAuth tokens from their login session
         provider = user_context.get("provider")
         auth_method = user_context.get("auth_method")
-        user_groups = user_context.get("groups", [])
         user_email = user_context.get("email", "")
+
+        # Reconcile the caller-supplied groups/scopes against the authoritative
+        # session store when a session_id is present, so a forged body cannot
+        # inject groups/scopes the session never granted. When no session_id is
+        # present the body is used as-is (explicit, documented trust boundary).
+        user_groups, reconciled_scopes = await _reconcile_context_against_session(user_context)
+        # Re-narrow the requested scopes to what the reconciled context allows so
+        # a session-backed mint can never exceed the session's granted scopes.
+        requested_scopes = [s for s in requested_scopes if s in set(reconciled_scopes)]
 
         logger.info(
             f"Token request for user '{hash_username(username)}': "

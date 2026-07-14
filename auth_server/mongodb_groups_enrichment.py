@@ -38,6 +38,44 @@ _mongodb_database: AsyncIOMotorDatabase | None = None
 _ENABLED_FILTER: dict[str, Any] = {"enabled": {"$ne": False}}
 
 
+# Group names that confer registry-administrator privileges. Enrichment from a
+# mutable DB collection is a legitimate authorization source for machine (M2M)
+# clients that carry no group claim, but write access to that collection is a
+# privileged-group injection vector. We do not silently trust it: when
+# enrichment adds one of these groups we emit a WARNING-level audit line so the
+# grant is attributable and reviewable. Sourced from the shared single source of
+# truth so this cannot drift from the auth server's admin markers.
+from registry.auth.privileged_constants import ADMIN_GROUP_MARKERS as _PRIVILEGED_GROUPS
+
+# Sentinel client_id assigned to self-signed *user* tokens (see the auth
+# server's self-signed validation path). It is not a real M2M client id, so a
+# token carrying it must never be treated as an M2M client for the purpose of
+# M2M group enrichment.
+_USER_GENERATED_CLIENT_ID: str = "user-generated"
+
+
+def _audit_privileged_enrichment(
+    subject: str,
+    source: str,
+    added_groups: list[str],
+) -> None:
+    """Emit an audit warning when enrichment grants a privileged group.
+
+    A no-op unless ``added_groups`` intersects :data:`_PRIVILEGED_GROUPS`.
+    Logs the subject and source collection so a privileged grant that came
+    from the mutable enrichment store is attributable during review.
+    """
+    privileged = sorted(set(added_groups) & _PRIVILEGED_GROUPS)
+    if not privileged:
+        return
+    logger.warning(
+        "AUDIT: DB group enrichment granted privileged group(s) %s to '%s' from %s",
+        privileged,
+        subject,
+        source,
+    )
+
+
 def _is_record_enabled(doc: dict[str, Any]) -> bool:
     """Return whether an enrichment record is active (not operator-disabled).
 
@@ -149,6 +187,7 @@ async def enrich_groups_from_mongodb(
                 logger.info(
                     f"Enriched {len(db_groups)} groups for client {client_id} from database"
                 )
+                _audit_privileged_enrichment(client_id, "idp_m2m_clients", db_groups)
                 return db_groups
             else:
                 logger.debug(f"Client {client_id} found in database but has no groups")
@@ -164,23 +203,44 @@ async def enrich_groups_from_mongodb(
 
 
 def should_enrich_groups(validation_result: dict) -> bool:
-    """Check if groups should be enriched from MongoDB.
+    """Check if groups should be enriched from the M2M client collection.
+
+    The M2M enrichment fallback exists because machine (client_credentials)
+    tokens legitimately arrive with no group claim; the DB is the authoritative
+    group source for them. It must therefore be strictly gated to M2M clients
+    and must never enrich a normal *user* token whose groups were legitimately
+    empty -- otherwise a user with no groups could be silently escalated by a
+    matching row in ``idp_m2m_clients``. Fail closed on every gate.
 
     Args:
         validation_result: Token validation result dictionary
 
     Returns:
-        True if groups enrichment should be attempted
+        True only if the token is a valid M2M token with empty groups and a
+        real (non-sentinel) client_id.
     """
     # Only enrich if:
     # 1. Token is valid
     # 2. Groups list is empty (not present or empty array)
-    # 3. Has a client_id
+    # 3. Has a real client_id
+    # 4. Is NOT a self-signed user token (those are not M2M clients even when
+    #    they carry a client_id, so enriching them from the M2M collection would
+    #    be a privilege source the user never had).
     is_valid = validation_result.get("valid", False)
     groups = validation_result.get("groups", [])
     client_id = validation_result.get("client_id")
+    token_type = validation_result.get("token_type")
 
-    return is_valid and not groups and client_id is not None
+    if not is_valid or groups or client_id is None:
+        return False
+
+    # A user-generated / user token is not an M2M client. Gate it out both by
+    # token_type and by the sentinel client_id, so a token missing one marker is
+    # still rejected (fail closed).
+    if token_type == "user_generated" or client_id == _USER_GENERATED_CLIENT_ID:  # nosec B105 - token-type marker, not a credential
+        return False
+
+    return True
 
 
 async def enrich_user_groups_from_mongodb(
@@ -234,6 +294,7 @@ async def enrich_user_groups_from_mongodb(
             db_groups = doc.get("groups", [])
             if db_groups:
                 logger.info(f"Enriched {len(db_groups)} groups for user {username} from database")
+                _audit_privileged_enrichment(username, "idp_user_groups", db_groups)
                 return db_groups
             else:
                 logger.debug(f"User {username} found in database but has no groups")

@@ -106,12 +106,22 @@ def normalize_sse_endpoint_url(endpoint_url: str) -> str:
 import httpx
 
 
-def _build_headers_for_server(server_info: dict = None) -> dict[str, str]:
+def _build_headers_for_server(
+    server_info: dict = None,
+    destination_url: str | None = None,
+) -> dict[str, str]:
     """
     Build HTTP headers for server requests by merging server-specific headers.
 
     Args:
         server_info: Server configuration dictionary
+        destination_url: The URL the resulting headers will be sent to. When any
+            encrypted secret (custom headers or an auth credential) would be
+            attached, this destination is re-validated through the shared SSRF
+            guard before decryption. If it is missing or fails validation, the
+            decrypted secrets are NOT attached (fail closed) so a mutated /
+            unvalidated backend can never receive them. Non-secret headers
+            (Accept/Content-Type and plaintext server headers) are unaffected.
 
     Returns:
         Headers dictionary with server-specific headers
@@ -135,6 +145,28 @@ def _build_headers_for_server(server_info: dict = None) -> dict[str, str]:
                     logger.debug(
                         f"Added server headers to MCP client: {redact_headers(header_dict)}"
                     )
+
+        # Gate every decrypted secret on a fresh SSRF re-validation of the exact
+        # destination the headers will be sent to. Callers validate before
+        # connecting, but self-guarding here means a future caller that forgets
+        # cannot leak a decrypted credential to a private/metadata address. If we
+        # have a secret to attach but no validated destination, fail closed and
+        # attach no secret.
+        _has_secret = bool(
+            server_info.get("custom_headers_encrypted")
+            or (
+                server_info.get("auth_scheme", "none") != "none"
+                and server_info.get("auth_credential_encrypted")
+            )
+        )
+        _destination_safe = bool(destination_url) and _assert_mcp_url_fetchable(destination_url)
+        if _has_secret and not _destination_safe:
+            logger.warning(
+                "Not attaching decrypted headers/credential for '%s': destination "
+                "missing or failed SSRF re-validation.",
+                server_info.get("service_path", "unknown"),
+            )
+            return headers
 
         # Custom headers go first; auth_scheme below overwrites name collisions
         encrypted_custom = server_info.get("custom_headers_encrypted")
@@ -347,8 +379,9 @@ async def _get_tools_streamable_http(base_url: str, server_info: dict = None) ->
     if not _assert_mcp_url_fetchable(explicit_endpoint or base_url):
         return None
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=explicit_endpoint or base_url)
 
     # If explicit endpoint is provided, use it directly (single attempt)
     if explicit_endpoint:
@@ -478,8 +511,9 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
     if not _assert_mcp_url_fetchable(mcp_server_url):
         return None
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=mcp_server_url)
 
     try:
         # Monkey patch httpx to fix mount path issues (legacy SSE support)
@@ -678,8 +712,9 @@ async def get_mcp_connection_result(
 
     logger.info(f"Getting MCP connection result from {base_url} using {transport} transport...")
 
-    # Build headers for the server
-    headers = _build_headers_for_server(server_info)
+    # Build headers for the server (destination re-validated inside before any
+    # decrypted secret is attached).
+    headers = _build_headers_for_server(server_info, destination_url=explicit_endpoint or base_url)
 
     if explicit_endpoint:
         mcp_url = explicit_endpoint

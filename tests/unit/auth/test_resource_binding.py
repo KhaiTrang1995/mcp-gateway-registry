@@ -655,3 +655,60 @@ class TestValidateUserCanBindResource:
                 "skill", "python-linter", ctx
             )
         assert result is False
+
+
+class TestNormalizePathTraversal:
+    """The classifier and deny-list consume an attacker-controlled raw request
+    URI (nginx forwards $request_uri percent-encoded). _normalize_path must
+    percent-decode and resolve ../. segments so an encoded traversal
+    classifies identically to its canonical form and cannot bypass the
+    byte-exact deny-list."""
+
+    def test_encoded_and_literal_traversal_match_canonical(self) -> None:
+        # Encoded and literal dot-dot must normalize to the same canonical path
+        # as the fully-decoded equivalent.
+        encoded = resource_binding._normalize_path("/api/agents/%2e%2e/tokens/generate")
+        literal = resource_binding._normalize_path("/api/agents/../tokens/generate")
+        canonical = resource_binding._normalize_path("/api/tokens/generate")
+        assert encoded == literal == canonical == "/api/tokens/generate"
+
+    def test_mixed_encoding_matches_canonical(self) -> None:
+        mixed = resource_binding._normalize_path("/api/agents/%2e./tokens/generate")
+        assert mixed == "/api/tokens/generate"
+
+    def test_encoded_traversal_to_blocked_prefix_is_denied(self) -> None:
+        # An encoded traversal that resolves onto a deny-listed prefix must be
+        # denied, exactly like the literal form.
+        assert (
+            resource_binding.check_resource_token_allowed("/api/agents/%2e%2e/tokens/generate")
+            is False
+        )
+        assert resource_binding.check_resource_token_allowed("/api/x/%2e%2e/admin/config") is False
+
+    def test_encoded_traversal_classifies_like_canonical(self) -> None:
+        assert resource_binding.classify_request_url(
+            "/api/agents/%2e%2e/skills/foo"
+        ) == resource_binding.classify_request_url("/api/skills/foo")
+
+    def test_escape_above_root_is_clamped_not_allowed(self) -> None:
+        # A traversal trying to escape above root is clamped to an absolute
+        # path, never a relative/ambiguous one.
+        assert resource_binding._normalize_path("/api/%2e%2e/%2e%2e/etc/passwd") == "/etc/passwd"
+
+    def test_double_encoding_stays_literal(self) -> None:
+        # Decode exactly once: a doubly-encoded %252e stays literal and does
+        # NOT resolve to a traversal (fail closed toward the more restrictive
+        # outcome -- it will not silently reach a blocked prefix).
+        normalized = resource_binding._normalize_path("/api/agents/foo/%252e%252e/tokens")
+        assert "%2e%2e" in normalized
+        assert normalized == "/api/agents/foo/%2e%2e/tokens"
+
+    def test_benign_path_unchanged(self) -> None:
+        assert (
+            resource_binding._normalize_path("/api/agents/code-reviewer")
+            == "/api/agents/code-reviewer"
+        )
+
+    def test_consecutive_slashes_still_collapsed(self) -> None:
+        assert resource_binding._normalize_path("//api//tokens//generate") == "/api/tokens/generate"
+        assert resource_binding.check_resource_token_allowed("//api//tokens//generate") is False

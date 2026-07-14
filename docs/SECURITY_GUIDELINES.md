@@ -138,6 +138,22 @@ sanitizer that isn't called) is equivalent to no check.
   time.** A pre-fetch check followed by a separate client call re-resolves DNS =
   TOCTOU / DNS-rebinding. Pin the validated public IP into the transport
   (preserve Host header + TLS SNI) and re-validate on every redirect hop.
+- **Re-validate the destination through the SSRF guard at the moment a stored
+  credential is attached.** Registration-time validation is not enough when the
+  destination is mutable — a `proxy_pass_url`/endpoint changed after registration
+  (or a registration-time bypass) could point a stored credential at a
+  private/metadata address. Every site that decrypts a stored credential and
+  hands it to an outbound request (including an external scanner or SDK client
+  that opens its own connection, which the pinned guarded transport cannot
+  protect) must re-run `validate_url` with the proxy profile first and fail
+  closed: no valid destination, no credential. Grep every `decrypt_credential` /
+  credential-attach site, not just the reported one; a single guarded helper
+  they all call is ideal. Make the header/credential builder SELF-GUARD on the
+  destination it is handed rather than trusting each caller to have validated
+  first — a builder that decrypts a secret only because the caller "should have"
+  checked leaks that secret the first time a caller forgets. Pass the destination
+  into the builder and have it withhold the decrypted secret (return only
+  non-secret headers) when the destination is missing or fails validation.
 - **Never build or attach credentials for a target that fails validation.**
   Validate the URL before decrypting/attaching stored credentials, so a
   malicious registered URL cannot exfiltrate them.
@@ -212,12 +228,28 @@ sanitizer that isn't called) is equivalent to no check.
 - **Enforce ownership server-side before EVERY mutation — across the whole
   endpoint family, not just the reported one.** If register-overwrite needs an
   ownership check, so do the version, rename, auth-credential, and delete
-  siblings. Add CSRF (or non-cookie auth) to all state-changing endpoints.
+  siblings. Add CSRF (or non-cookie auth) to all state-changing endpoints. The
+  member that gets forgotten is usually delete/remove — a family whose update
+  handlers require permission-AND-ownership but whose delete handler checks only
+  permission lets a user with a delete grant destroy someone else's resource.
+  Combine permission and ownership (defense in depth) uniformly, and fail closed
+  when ownership cannot be established (a missing `registered_by` denies a
+  non-admin).
 - **`getattr(a_dict, "key", None)` always returns None** (dicts don't expose keys
   as attributes) — the guard becomes dead code that never denies. Use
   `dict.get("key")`; watch for dict-vs-Pydantic-model confusion.
 - **No substring matching for privilege decisions** (`"unrestricted" in scope`
   accepted access scopes as admin). Match exact, centralized constants.
+- **Canonicalize a path before any deny-list / classifier decision.** A path
+  that drives an authorization decision (a resource-token deny-list, a route
+  classifier) arrives from an attacker-controlled raw request URI, typically
+  percent-encoded (nginx forwards `$request_uri`). Percent-decode ONCE and
+  resolve `.`/`..` segments to a canonical absolute path BEFORE matching — an
+  encoded traversal like `/api/agents/%2e%2e/tokens/generate` must classify
+  identically to its canonical `/api/tokens/generate`, or it bypasses the
+  byte-exact deny-list. Decode exactly once (a doubly-encoded `%252e` stays
+  literal and fails closed), clamp traversal at root, and put the normalization
+  inside the single shared entrypoint so every consumer benefits.
 - **Attach a shared/global credential only on explicit opt-in.** Make the
   privileged code path default to not attaching it and gate its use behind an
   admin check.
@@ -267,6 +299,27 @@ sanitizer that isn't called) is equivalent to no check.
   path silently confers privilege. Drive the mapping from config, fail closed to
   no groups when unset/malformed, and grep every provider's sync sibling (okta,
   auth0, …) for the same pattern.
+- **Never mint privilege (groups/scopes/roles) from an unverified request
+  body.** A token-mint endpoint that stamps the groups/scopes carried in its
+  POST body into the issued token trusts the caller to be honest about identity.
+  Reconcile against an authoritative source — resolve the session id from the
+  session store and mint only the intersection of requested and session-held
+  groups, rejecting any privileged group the session does not hold. Where no
+  session-backed source exists (pure service-to-service), keep the subset check
+  but make the trust boundary explicit and fail closed on a missing/malformed
+  context (a `groups: "admin"` string must be rejected, not iterated
+  character-by-character). Note the residual: a caller holding the internal
+  signing key can bypass the endpoint entirely, so this is defense in depth
+  pending asymmetric signing.
+- **Group enrichment from a mutable store must be strictly gated and audited.**
+  When empty-group tokens are enriched from a DB collection, gate it to exactly
+  the token class it is designed for (machine/M2M) — a check of "has some
+  client_id" is not "is an M2M client"; a self-signed user token can carry a
+  client_id and would otherwise be escalated from the M2M table. Gate by an
+  explicit token-type marker AND the sentinel value, fail closed if either is
+  missing, honor the record's disabled flag in the query AND on the returned doc,
+  and emit a WARNING-level audit line whenever enrichment adds a privileged
+  group so a write to the collection is attributable.
 - **Protect the admin population from lockout and self-harm.** Admin user-mgmt
   must refuse self-deletion, refuse removing/demoting the LAST admin (count
   remaining admins first, fail closed if the population can't be enumerated), and
