@@ -22,6 +22,7 @@
     "publish_agent": ["all"],
     "modify_agent": ["all"],
     "delete_agent": ["all"],
+    "publish_skill": ["all"],
     "list_service": ["all"],
     "register_service": ["all"],
     "health_check_service": ["all"],
