@@ -313,6 +313,20 @@ for i in $(seq 1 99); do
 done
 echo "MCP Server configuration processing completed."
 
+# --- Optional customer RUM (Real User Monitoring) snippet ---
+# RUM_SNIPPET_B64 holds a base64-encoded HTML snippet (vendor <script> tags).
+# The resolver decodes it and, when RUM_ALLOWED_HOSTS is set, rejects any snippet
+# that references a host outside the allowlist. It always writes a valid file
+# (empty/invalid stub on failure) so /rum.js is a valid 200 and container startup
+# never fails on a bad value (set -e is on). RUM_SNIPPET_B64 / RUM_ALLOWED_HOSTS
+# are read from the environment by the resolver, never passed on argv (a secret
+# on argv is world-readable via ps).
+RUM_JS_PATH="/app/frontend/build/rum.js"
+if [ -d "/app/frontend/build" ]; then
+    /app/.venv/bin/python -m registry.utils.rum_snippet_writer "${RUM_JS_PATH}" \
+        || echo "RUM: resolver failed unexpectedly; leaving existing/stub rum.js" >&2
+fi
+
 # --- Start Background Services ---
 # Export embeddings configuration for the registry service
 export EMBEDDINGS_PROVIDER=$EMBEDDINGS_PROVIDER

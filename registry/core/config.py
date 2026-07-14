@@ -161,6 +161,16 @@ class Settings(BaseSettings):
     # docs/unified-parameter-reference.md (Group 4) for details.
     bind_host: str = "0.0.0.0"  # nosec B104 - bind to all IPv4 interfaces inside container
 
+    # Frontend Real User Monitoring (RUM) hook
+    rum_snippet_b64: str = Field(
+        default="",
+        description="Base64-encoded HTML snippet injected as /rum.js for Real User Monitoring (RUM). Empty disables RUM (default). May contain a vendor access token, so treat as sensitive.",
+    )
+    rum_allowed_hosts: str = Field(
+        default="",
+        description="Comma-separated allowlist of hosts the RUM snippet may reference (script src and beacon endpoints). If set, the snippet is rejected (fail closed) when it references any host not on the list. Empty disables the check.",
+    )
+
     # Auth settings
     secret_key: str = ""
     session_cookie_name: str = "mcp_gateway_session"

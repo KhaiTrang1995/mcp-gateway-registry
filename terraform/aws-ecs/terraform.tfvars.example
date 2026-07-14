@@ -403,6 +403,30 @@ storage_backend = "documentdb"
 # mongodb_connection_string            = ""
 # mongodb_connection_string_secret_arn = ""
 
+# ----------------------------------------------------------------------------
+# Frontend RUM snippet (feature #1471)
+# ----------------------------------------------------------------------------
+# Optional base64-encoded HTML snippet served as /rum.js for Real User
+# Monitoring. Empty disables RUM. Prefer registry_rum_snippet_secret_arn when
+# the snippet contains a vendor token (the plain-text variable value lands in
+# Terraform state). The operator supplies the ARN of their own secret.
+#
+# Produce the base64 value from a snippet file:
+#   base64 -w0 my-rum-snippet.html            # Linux
+#   base64 my-rum-snippet.html | tr -d '\n'   # macOS
+#
+# Examples:
+#   registry_rum_snippet_b64        = "PHNjcmlwdD4vLyBydW08L3NjcmlwdD4="
+#   registry_rum_snippet_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:rum-snippet-XXXXXX"
+# registry_rum_snippet_b64        = ""
+# registry_rum_snippet_secret_arn = ""
+#
+# Optional comma-separated host allowlist for the RUM snippet. When set, a
+# snippet referencing any host not on the list is rejected at startup (fail
+# closed). Empty disables the check.
+#   registry_rum_allowed_hosts = "cdn.signalfx.com,rum-ingest.us0.signalfx.com"
+# registry_rum_allowed_hosts = ""
+
 # ============================================================================
 # EXTERNAL MONGODB (Atlas, self-managed) - issue #955
 # ============================================================================

@@ -445,6 +445,14 @@ CONFIG_GROUPS: dict[str, dict[str, Any]] = {
             ("rate_limit_backend_timeout_ms", "Backend Op Timeout (ms)", False),
         ],
     },
+    "frontend_observability": {
+        "title": "Frontend Observability",
+        "order": 28,
+        "fields": [
+            ("rum_snippet_b64", "RUM Snippet (base64)", True),
+            ("rum_allowed_hosts", "RUM Allowed Hosts", False),
+        ],
+    },
 }
 
 

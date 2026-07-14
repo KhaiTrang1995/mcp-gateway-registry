@@ -598,6 +598,30 @@ variable "mongodb_connection_string_secret_arn" {
   default     = ""
 }
 
+# Base64-encoded HTML snippet served as /rum.js for frontend Real User
+# Monitoring (RUM). Empty disables RUM. Prefer registry_rum_snippet_secret_arn
+# when the snippet carries a vendor token, to avoid storing secrets in
+# Terraform state (mirrors the mongodb_connection_string plaintext-or-secret
+# pattern).
+variable "registry_rum_snippet_b64" {
+  description = "Optional base64-encoded HTML snippet served as /rum.js for frontend RUM (plain text). Empty disables RUM. Prefer registry_rum_snippet_secret_arn when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "registry_rum_snippet_secret_arn" {
+  description = "Optional Secrets Manager ARN for the base64-encoded RUM snippet. Preferred over registry_rum_snippet_b64 when the snippet contains a vendor token."
+  type        = string
+  default     = ""
+}
+
+variable "registry_rum_allowed_hosts" {
+  description = "Optional comma-separated allowlist of hosts the RUM snippet may reference (script src and beacon). When set, a snippet referencing any host not on the list is rejected at startup (fail closed). Empty disables the check."
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # CLOUDFRONT CONFIGURATION (CloudFront HTTPS Support feature)
 # =============================================================================

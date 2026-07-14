@@ -118,6 +118,20 @@ spec:
               value: {{ .Values.app.codingAssistants | default "" | quote }}
             - name: UI_TITLE
               value: {{ .Values.app.uiTitle | default "" | quote }}
+            # Frontend RUM (feature #1471): base64 HTML snippet served as /rum.js.
+            # Rendered only when the plain value is set. For token-bearing
+            # snippets leave rumSnippetB64 empty and inject RUM_SNIPPET_B64 from
+            # a Secret via extraEnvFrom (see values.yaml). Rendering
+            # conditionally keeps that secret source from being shadowed.
+            {{- if .Values.rumSnippetB64 }}
+            - name: RUM_SNIPPET_B64
+              value: {{ .Values.rumSnippetB64 | quote }}
+            {{- end }}
+            # RUM host allowlist (fail-closed when set). Rendered only when set.
+            {{- if .Values.rumAllowedHosts }}
+            - name: RUM_ALLOWED_HOSTS
+              value: {{ .Values.rumAllowedHosts | quote }}
+            {{- end }}
             # Tool-level access control (issue #1026)
             - name: MCP_TOOLS_LIST_FILTER_ENABLED
               value: {{ .Values.app.mcpToolsListFilterEnabled | toString | quote }}

@@ -534,6 +534,22 @@ ingress:
   routingMode: subdomain
   # Path prefix when using path-based routing (default: /registry)
   path: /registry
+# Frontend RUM (feature #1471): base64-encoded HTML snippet served as /rum.js
+# for Real User Monitoring. Empty (default) disables RUM. This renders as a
+# plain RUM_SNIPPET_B64 env value, so it is fine for token-free snippets. For a
+# snippet that carries a vendor token, do NOT set this plain value; instead
+# keep rumSnippetB64 empty and supply RUM_SNIPPET_B64 from a Secret via
+# extraEnvFrom (RUM_SNIPPET_B64 is a reserved name, so it cannot be set through
+# extraEnv). The chart renders the plain env only when this value is non-empty,
+# so the Secret-sourced key is not shadowed. Example:
+#   extraEnvFrom:
+#     - secretRef:
+#         name: my-rum-secret   # must expose a RUM_SNIPPET_B64 key
+rumSnippetB64: ""
+# Comma-separated allowlist of hosts the RUM snippet may reference (script src +
+# beacon). When set, a snippet referencing any host not on the list is rejected
+# at startup (fail closed, empty stub served). Empty (default) disables the check.
+rumAllowedHosts: ""
 # Extra environment variables appended to the container's `env:` list.
 # Uses the native Kubernetes EnvVar schema, so `valueFrom` is supported.
 #

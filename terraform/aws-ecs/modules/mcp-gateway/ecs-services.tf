@@ -1714,6 +1714,24 @@ module "ecs_service_registry" {
             value = var.mongodb_connection_string
           }
         ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (plain-text variant).
+        # Only emitted when var.registry_rum_snippet_b64 is non-empty and a
+        # Secrets Manager ARN was not provided. When empty, RUM is disabled.
+        var.registry_rum_snippet_b64 != "" && var.registry_rum_snippet_secret_arn == "" ? [
+          {
+            name  = "RUM_SNIPPET_B64"
+            value = var.registry_rum_snippet_b64
+          }
+        ] : [],
+        # Feature #1471: RUM host allowlist (plain text, not secret). Only
+        # emitted when non-empty; when set the snippet is rejected at startup
+        # (fail closed) if it references a host outside the list.
+        var.registry_rum_allowed_hosts != "" ? [
+          {
+            name  = "RUM_ALLOWED_HOSTS"
+            value = var.registry_rum_allowed_hosts
+          }
+        ] : [],
         # Extra environment variables from user (Issue #1000)
         var.registry_extra_env
       )
@@ -1751,6 +1769,15 @@ module "ecs_service_registry" {
           {
             name      = "MONGODB_CONNECTION_STRING"
             valueFrom = var.mongodb_connection_string_secret_arn
+          }
+        ] : [],
+        # Feature #1471: RUM snippet served as /rum.js (Secrets Manager variant).
+        # Preferred when the snippet contains a vendor token (avoids plain text
+        # in state). The operator supplies the ARN of their own secret.
+        var.registry_rum_snippet_secret_arn != "" ? [
+          {
+            name      = "RUM_SNIPPET_B64"
+            valueFrom = var.registry_rum_snippet_secret_arn
           }
         ] : [],
         var.storage_backend == "documentdb" ? [

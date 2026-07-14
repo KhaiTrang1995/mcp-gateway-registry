@@ -156,6 +156,12 @@ module "mcp_gateway" {
   mongodb_connection_string            = var.mongodb_connection_string
   mongodb_connection_string_secret_arn = var.mongodb_connection_string_secret_arn
 
+  # Optional base64-encoded RUM snippet served as /rum.js (feature #1471). Plain
+  # text or Secrets Manager ARN; see variable docs in variables.tf.
+  registry_rum_snippet_b64        = var.registry_rum_snippet_b64
+  registry_rum_snippet_secret_arn = var.registry_rum_snippet_secret_arn
+  registry_rum_allowed_hosts      = var.registry_rum_allowed_hosts
+
   # Security scanning configuration
   security_scan_enabled         = var.security_scan_enabled
   security_scan_on_registration = var.security_scan_on_registration

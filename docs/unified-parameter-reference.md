@@ -614,6 +614,15 @@ Weights must sum to 1.0 ± 0.001 or the registry process refuses to start (valid
 
 ---
 
+## Group 25a — Frontend RUM (Real User Monitoring) (Issue #1471)
+
+| Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
+|-----------|-----------------|-----------------------|----------------------|---------|
+| RUM snippet **(secret)** | `RUM_SNIPPET_B64` | `registry_rum_snippet_b64` (plaintext, token-free) / `registry_rum_snippet_secret_arn` (Secrets Manager, token-bearing) | `registry.rumSnippetB64` (plaintext) or `extraEnv` + `secretKeyRef` (token-bearing) | Base64-encoded HTML snippet served as `/rum.js` and injected into the frontend `<head>` for browser Real User Monitoring (Splunk, Datadog, New Relic, Grafana Faro, etc.). Empty disables RUM (default no-op stub). Operator/deploy-time trust boundary: the value runs as JavaScript in every user's browser, so it must never be set from user input or a non-admin API. See [docs/frontend-rum.md](frontend-rum.md). |
+| RUM allowed script/beacon hosts | `RUM_ALLOWED_HOSTS` | `registry_rum_allowed_hosts` | `registry.rumAllowedHosts` | Comma-separated allowlist of hosts the RUM snippet may reference (script `src` and beacon endpoints). Startup validation fails closed (writes the empty stub, logs an error) if the decoded snippet references a host not on this list. Empty disables the check. Guardrail against misconfiguration/tampering, not a control against a trusted operator. |
+
+---
+
 ## Group 26 — Grafana / Observability Pipeline
 
 | Parameter | Docker (`.env`) | Terraform (`.tfvars`) | Helm (`values.yaml`) | Purpose |
