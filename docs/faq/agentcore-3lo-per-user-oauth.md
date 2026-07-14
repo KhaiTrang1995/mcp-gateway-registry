@@ -69,9 +69,9 @@ The gateway's authorizer only trusts specific client IDs. Add the new 3LO client
 
 ```bash
 aws bedrock-agentcore-control update-gateway --region us-east-1 \
-  --gateway-identifier geo-mcp-rqqjviriim \
+  --gateway-identifier geo-mcp-XXXXXXXXXX \
   --name geo-mcp \
-  --role-arn "arn:aws:iam::015469603702:role/agentcore-geo-mcp-role" \
+  --role-arn "arn:aws:iam::123456789012:role/agentcore-geo-mcp-role" \
   --protocol-type MCP \
   --authorizer-type CUSTOM_JWT \
   --authorizer-configuration '{"customJWTAuthorizer":{
