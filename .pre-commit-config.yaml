@@ -80,6 +80,15 @@ repos:
         description: Check for pdb and ipdb debugger statements
 
   # Detect-secrets - Prevent secrets from being committed
+  #
+  # NOTE: .secrets.baseline is a SLIM baseline (no line numbers, no
+  # generated_at timestamp). This is deliberate: a non-slim baseline pins each
+  # allowlisted secret to a line number, so any edit that adds or removes a
+  # line above a secret shifts those numbers and makes the hook rewrite the
+  # baseline, failing CI on PRs that never touched a secret. A slim baseline
+  # is immune to line shifts while still blocking genuinely new secrets.
+  # When regenerating, always keep it slim:
+  #   detect-secrets scan --slim --exclude-files '^(tests/|docs/|cli/examples/)' > .secrets.baseline
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
     hooks:
