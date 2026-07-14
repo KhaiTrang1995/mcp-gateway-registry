@@ -470,7 +470,11 @@ async def _get_tools_sse(base_url: str, server_info: dict = None) -> list[dict] 
     secure_prefix = "s" if sse_url.startswith("https://") else ""
     mcp_server_url = f"http{secure_prefix}://{sse_url[len(f'http{secure_prefix}://') :]}"
 
-    # Fail closed on SSRF BEFORE decrypting/building credential headers.
+    # Fail closed on SSRF BEFORE decrypting/building credential headers. This
+    # validates the ACTUAL connection target (mcp_server_url), whose host is
+    # taken verbatim from the explicit sse_endpoint when one is set, so an
+    # sse_endpoint pointing at a private/metadata/loopback address is rejected
+    # before any credential is built or attached.
     if not _assert_mcp_url_fetchable(mcp_server_url):
         return None
 
@@ -656,11 +660,17 @@ async def get_mcp_connection_result(
 
     # Determine the MCP endpoint URL
     explicit_endpoint = server_info.get("mcp_endpoint") if server_info else None
+    explicit_sse_endpoint = server_info.get("sse_endpoint") if server_info else None
 
     # Fail closed on SSRF BEFORE any transport probe or credential build: a
     # target that resolves to a private/metadata address must never receive the
-    # server's decrypted backend credentials.
+    # server's decrypted backend credentials. Validate BOTH override endpoint
+    # fields (mcp_endpoint and sse_endpoint) here because either one can be the
+    # actual connection target below depending on the negotiated transport; the
+    # SDK client is unpinnable, so this is the fetch-time re-validation.
     if not _assert_mcp_url_fetchable(explicit_endpoint or base_url):
+        return None
+    if explicit_sse_endpoint and not _assert_mcp_url_fetchable(explicit_sse_endpoint):
         return None
 
     # Use transport-aware detection

@@ -1573,7 +1573,14 @@ map "$uri:$http_x_mcp_server_version" $versioned_backend {{
                 parsed_url = urlparse(proxy_pass_url)
                 upstream_host = parsed_url.netloc
 
-                # Build MCP endpoint URL from the server's mcp_endpoint or proxy_pass_url
+                # Build MCP endpoint URL from the server's mcp_endpoint or proxy_pass_url.
+                # mcp_endpoint is defended by two layers: (1) registration-time
+                # validation rejects an mcp_endpoint containing nginx
+                # metacharacters (including "$") via the same canonical guard as
+                # proxy_pass_url, so a "$" can never legitimately be stored; and
+                # (2) the render-time _sanitize_for_nginx_set below strips "$"
+                # and escapes quotes/backslashes as defense in depth for any
+                # legacy value persisted before validation existed.
                 mcp_endpoint = server_info.get("mcp_endpoint", "")
                 if mcp_endpoint:
                     mcp_parsed = urlparse(mcp_endpoint)

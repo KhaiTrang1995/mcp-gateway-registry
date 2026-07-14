@@ -48,6 +48,18 @@ class TestAssertFetchable:
             with pytest.raises(ArdValidationError):
                 g.assert_fetchable("https://evil.example/x")
 
+    def test_blocks_cgnat_shared_address_space(self):
+        """Carrier-grade NAT (100.64.0.0/10, RFC 6598) must be blocked."""
+        with patch.object(g.socket, "getaddrinfo", _resolve_to("100.64.0.1")):
+            with pytest.raises(ArdValidationError):
+                g.assert_fetchable("https://evil.example/x")
+
+    def test_cgnat_range_pinned_in_blocked_nets(self):
+        """Pin the exact CGNAT range so a runtime-semantics change fails loudly."""
+        import ipaddress
+
+        assert ipaddress.ip_network("100.64.0.0/10") in g._BLOCKED_NETS
+
     def test_same_domain_allows_subdomain(self):
         with patch.object(g.socket, "getaddrinfo", _resolve_to("93.184.216.34")):
             assert g.assert_fetchable("https://sub.acme.com/x", allowed_domain="acme.com")
