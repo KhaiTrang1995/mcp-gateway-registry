@@ -202,6 +202,20 @@ sanitizer that isn't called) is equivalent to no check.
   never fall back to a raw user string when tokenization yields nothing. Escape
   at the SINK (the repository method that builds the query), not at the caller —
   a caller-escape contract silently breaks the moment a new caller forgets it.
+- **A user-supplied value interpolated into an outbound URL PATH segment must be
+  validated against a strict identifier allowlist — mirror the resource's own
+  canonical name rule (e.g. `^[a-z0-9]+(-[a-z0-9]+)*\Z`) rather than a looser
+  superset — BEFORE building the URL.** Otherwise a value like
+  `../../api/management/iam/users` normalizes (via the HTTP client) to a
+  DIFFERENT endpoint after the request is issued, and if the client carries a
+  privileged credential (M2M / API token) the traversed request inherits that
+  privilege. A non-empty `.strip()` check is not sufficient. Anchor the pattern
+  with `\Z`, not `$`: Python's `$` also matches just before a trailing newline,
+  so `^...+$` would accept `"validname\n"`. Validate at the interpolation site —
+  do not trust the downstream service to reject the traversed path. Fail closed:
+  return the handler's error shape, do not raise. Query parameters are lower risk
+  (they don't traverse the path), but still reject absolute (`/`-leading) and
+  `..`-containing values as defense-in-depth.
 
 ## Authorization & ownership
 

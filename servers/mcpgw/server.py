@@ -11,6 +11,7 @@ Supports two auth modes:
 
 import logging
 import os
+import re
 import time
 from typing import Any
 
@@ -41,6 +42,19 @@ REGISTRY_EXTERNAL_URL = os.getenv("REGISTRY_EXTERNAL_URL", "")
 MAX_QUERY_LENGTH: int = 500
 MIN_TOP_N: int = 1
 MAX_TOP_N: int = 50
+
+# Skill names are simple identifiers. A user-supplied value that is interpolated
+# into an outbound URL PATH segment must match this strict allowlist before the
+# URL is built; otherwise a value like "../../api/management/iam/users" would
+# normalize to a different registry endpoint and inherit this server's
+# privileged registry credential. Fail closed: reject anything that is not a
+# single safe path segment.
+#
+# The rule mirrors the registry's own skill-name schema (lowercase alphanumerics
+# in hyphen-separated groups), so it is exact rather than merely safe. \Z (not
+# $) anchors the true end of string: Python's $ also matches just before a
+# trailing newline, which would let "validname\n" slip through.
+_SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*\Z")
 
 # Max number of withheld candidates itemized in a discovery receipt. The full
 # count is always reported; this caps the listed near-miss items so the receipt
@@ -569,6 +583,28 @@ async def get_skill_content(
         return {"error": "skill_name cannot be empty", "status": "failed"}
 
     skill_name = skill_name.strip()
+
+    # skill_name is interpolated into an outbound URL path segment below, so it
+    # must be a single safe path segment. Reject anything that is not, before
+    # building the URL. This blocks path traversal ("..", "/"), encoded forms
+    # ("%2f"), and whitespace because none of them match the allowlist. Fail
+    # closed rather than trust downstream URL normalization.
+    if not _SKILL_NAME_PATTERN.match(skill_name):
+        return {
+            "skill_name": skill_name,
+            "error": ("skill_name must be a single identifier matching ^[a-z0-9]+(-[a-z0-9]+)*$"),
+            "status": "failed",
+        }
+
+    # resource_path is passed as a query parameter (lower risk than a path
+    # segment), but reject absolute paths and traversal sequences as
+    # defense-in-depth before forwarding it.
+    if resource_path and (resource_path.startswith("/") or ".." in resource_path):
+        return {
+            "skill_name": skill_name,
+            "error": "resource_path must not be absolute or contain '..'",
+            "status": "failed",
+        }
 
     try:
         headers = await _get_registry_headers(ctx)
