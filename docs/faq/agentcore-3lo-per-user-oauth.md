@@ -1,10 +1,10 @@
-# FAQ: Using a 3LO (Per-User OAuth) AgentCore Gateway with the Registry
+# How do I use a 3LO (per-user OAuth) AgentCore Gateway with the registry?
 
-This FAQ explains how to make an Amazon Bedrock AgentCore Gateway that authenticates with OAuth work with the MCP Gateway Registry's **three-legged OAuth (3LO)** per-user egress path, so that a coding assistant (Claude Code, Cursor, VS Code, or any MCP client) calls the gateway **as the individual end user** rather than with a single shared machine credential.
+This FAQ explains how to make an Amazon Bedrock AgentCore Gateway that authenticates with OAuth work with the registry's **three-legged OAuth (3LO)** per-user egress path, so that a coding assistant (Claude Code, Cursor, VS Code, or any MCP client) calls the gateway **as the individual end user** rather than with a single shared machine credential.
 
-The worked example uses **Amazon Cognito** with **Claude Code**, because that is what we verified end to end. The important thing to understand up front: **this works the same way for any OIDC identity provider and any coding assistant.** The moving parts are identical; the only per-provider quirks are in how scopes are named and formatted (see [What is provider-specific?](#what-is-provider-specific)).
+The worked example uses **Amazon Cognito** with **Claude Code**, because that is what we verified end to end. The important thing to understand up front: this works the same way for any OIDC identity provider and any coding assistant. The moving parts are identical; the only per-provider quirks are in how scopes are named and formatted (see [What is provider-specific?](#what-is-provider-specific)).
 
----
+If you just want a shared service token (machine-to-machine), use [bulk auto-registration](agentcore-bulk-registration.md) instead. That path does not need any of the steps below.
 
 ## Background: 3LO vs. M2M
 
@@ -16,22 +16,18 @@ An AgentCore Gateway with a `CUSTOM_JWT` authorizer accepts JWTs from an OIDC pr
 | Who the token represents | A service/application | An individual human user |
 | Browser login required | No | Yes (one-time consent) |
 | Registry egress mode | static token / auto-registration | `oauth_user` (per-user vault) |
-| Callback/redirect URL needed | No | **Yes** |
+| Callback/redirect URL needed | No | Yes |
 
-This FAQ is about the **3LO** column. If you just want a shared service token, use the [AgentCore auto-registration CLI](agentcore.md) instead (that path does not need any of the steps below).
+This FAQ is about the **3LO** column.
 
-> **Key provider constraint (Cognito, and common elsewhere):** a single OAuth app client usually cannot enable both the `client_credentials` and the `code` flow at the same time. Cognito rejects it outright:
-> `client_credentials flow can not be selected along with code flow or implicit flow`.
-> So for 3LO you create a **separate** app client dedicated to the `code` flow, and add it to the gateway's list of allowed clients alongside any existing M2M client.
-
----
+> **Key provider constraint (Cognito, and common elsewhere):** a single OAuth app client usually cannot enable both the `client_credentials` and the `code` flow at the same time. Cognito rejects it outright: `client_credentials flow can not be selected along with code flow or implicit flow`. So for 3LO you create a **separate** app client dedicated to the `code` flow, and add it to the gateway's list of allowed clients alongside any existing M2M client.
 
 ## What you need before you start
 
 - An AgentCore Gateway with a `CUSTOM_JWT` authorizer backed by an OIDC provider (Cognito, Auth0, Okta, Entra ID, Keycloak, or any custom OIDC IdP).
 - Admin access to that OIDC provider (to create an app client and set a redirect URL).
 - Admin access to the running MCP Gateway Registry.
-- The registry's egress vault feature enabled (`EGRESS_AUTH_ENABLED=true`) with a public callback base URL set (`EGRESS_OAUTH_CALLBACK_BASE_URL`). See the [Egress Credential Vault guide](egress-credential-vault.md).
+- The registry's egress vault feature enabled (`EGRESS_AUTH_ENABLED=true`) with a public callback base URL set (`EGRESS_OAUTH_CALLBACK_BASE_URL`). See the [Per-User Egress Credential Vault](../egress-credential-vault.md) guide.
 
 Throughout, the registry's callback URL is:
 
@@ -41,15 +37,11 @@ Throughout, the registry's callback URL is:
 
 In our verified example that was `https://mcpgateway.ddns.net/oauth2/egress/callback`.
 
----
-
-## The five steps (works for any IdP)
-
-### Step 1: Create a 3LO OAuth app client in your IdP
+## Step 1: Create a 3LO OAuth app client in your IdP
 
 Create a **new** confidential app client (with a client secret) configured for the `authorization_code` flow, and register the registry's callback URL as its redirect URI.
 
-**Cognito example** (any IdP is the same idea, different console):
+Cognito example (any IdP is the same idea, different console):
 
 ```bash
 aws cognito-idp create-user-pool-client --region us-east-1 \
@@ -67,11 +59,11 @@ aws cognito-idp create-user-pool-client --region us-east-1 \
 
 Note the returned **Client ID** and **Client Secret**.
 
-> **Tip (AWS CLI quirk):** if `--callback-urls` fails with *"Unable to retrieve ... non 200 status code"*, the CLI is trying to fetch the URL. Disable that once with `aws configure set cli_follow_urlparam false` and retry.
+> **Tip (AWS CLI quirk):** if `--callback-urls` fails with "Unable to retrieve ... non 200 status code", the CLI is trying to fetch the URL. Disable that once with `aws configure set cli_follow_urlparam false` and retry.
 
-For a **Cognito** pool you also need its **Hosted UI domain** enabled so the login page renders (`https://<domain>.auth.<region>.amazoncognito.com`). Other IdPs expose their authorize/token endpoints directly.
+For a Cognito pool you also need its Hosted UI domain enabled so the login page renders (`https://<domain>.auth.<region>.amazoncognito.com`). Other IdPs expose their authorize/token endpoints directly.
 
-### Step 2: Add the new client to the gateway's allowed clients
+## Step 2: Add the new client to the gateway's allowed clients
 
 The gateway's authorizer only trusts specific client IDs. Add the new 3LO client so tokens it mints are accepted. Keep any existing M2M client in the list.
 
@@ -89,9 +81,9 @@ aws bedrock-agentcore-control update-gateway --region us-east-1 \
 
 Wait for the gateway to return to `READY`.
 
-On other IdPs there is no "allowed clients" list on a gateway to edit; instead the equivalent is making sure the gateway's authorizer `audience`/`client` validation accepts your new client. The principle is the same: **the gateway must trust the client that mints the user token.**
+On other IdPs there is no "allowed clients" list on a gateway to edit; instead the equivalent is making sure the gateway's authorizer audience/client validation accepts your new client. The principle is the same: the gateway must trust the client that mints the user token.
 
-### Step 3: Find your IdP's authorize and token endpoints
+## Step 3: Find your IdP's authorize and token endpoints
 
 Every OIDC provider publishes them at its discovery document:
 
@@ -105,9 +97,9 @@ For Cognito these are the Hosted UI domain URLs, e.g.:
 - Authorize: `https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/authorize`
 - Token: `https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/token`
 
-### Step 4: Configure custom-OIDC egress on the server in the registry
+## Step 4: Configure custom-OIDC egress on the server in the registry
 
-Register the gateway as an MCP server (if not already), then configure per-user egress OAuth on it. This is **admin-only**. You can do it in the server-edit modal in the UI, or via the API:
+Register the gateway as an MCP server (if not already), then configure per-user egress OAuth on it. This is admin-only. You can do it in the server-edit modal in the UI, or via the API:
 
 ```bash
 curl -X POST "https://mcpgateway.ddns.net/api/servers/geo-mcp/egress-auth" \
@@ -128,11 +120,11 @@ Field notes:
 
 - `egress_provider: custom` is the generic OIDC path. Built-in providers (`github`, `google`, `atlassian`, `microsoft`, `slack`) skip the two `custom_*` URLs.
 - `client_secret` is write-only: Fernet-encrypted with the gateway `SECRET_KEY`, never echoed back.
-- `custom_scope_separator` defaults to a single space. **Leave it blank.** (See the [scopes gotcha](#the-1-gotcha-scopes) below.)
+- `custom_scope_separator` defaults to a single space. Leave it blank. (See the [scopes gotcha](#the-1-gotcha-scopes) below.)
 - `custom_token_auth_style` defaults to `post_body`; use `basic_header` only if your IdP requires the secret in an HTTP Basic header.
 - `custom_resource` (optional, RFC 8707) binds the token to one protected resource; needed by some providers (e.g. Atlassian Rovo MCP), not by Cognito.
 
-### Step 5: Run the per-user consent flow from your coding assistant
+## Step 5: Run the per-user consent flow from your coding assistant
 
 Point the user's browser at the registry's connect facade for this server:
 
@@ -142,9 +134,7 @@ https://mcpgateway.ddns.net/oauth2/egress/connect?server=/geo-mcp
 
 This redirects to your IdP's Hosted UI / login page, the user signs in and consents, and the callback lands back at the registry, which vaults **that user's** access + refresh tokens keyed by their OIDC `sub`. From then on, every call the coding assistant makes through the gateway transparently vends (and refreshes) that user's token.
 
-In our verified run, the user logged in through the Cognito Hosted UI, consented, and the geo-mcp tool (`geolocation___getGeolocationByIp`) was then callable **from Claude Code** using the per-user token. The same connect URL works identically whether the client is Claude Code, Cursor, or any MCP client that supports the consent elicitation.
-
----
+In our verified run, the user logged in through the Cognito Hosted UI, consented, and the geo-mcp tool (`geolocation___getGeolocationByIp`) was then callable from Claude Code using the per-user token. The same connect URL works identically whether the client is Claude Code, Cursor, or any MCP client that supports the consent elicitation.
 
 ## The #1 gotcha: scopes
 
@@ -154,12 +144,12 @@ The single most common failure is a scope formatting mismatch. The consent flow 
 /oauth2/egress/callback?error=invalid_request&error_description=invalid_scope&state=...
 ```
 
-**Cause:** the scopes were sent **comma-separated** instead of **space-separated**. OIDC/OAuth requires a space-delimited scope string; Cognito (and most IdPs) reject commas with `invalid_scope`.
+**Cause:** the scopes were sent comma-separated instead of space-separated. OIDC/OAuth requires a space-delimited scope string; Cognito (and most IdPs) reject commas with `invalid_scope`.
 
 **Fix:**
 
-- Leave `custom_scope_separator` **blank** (defaults to a single space).
-- Enter scopes as **separate list entries**, never as one comma-joined string:
+- Leave `custom_scope_separator` blank (defaults to a single space).
+- Enter scopes as separate list entries, never as one comma-joined string:
   - `openid`
   - `simple-agentcore-gateway/gateway:read`
   - `simple-agentcore-gateway/gateway:write`
@@ -171,11 +161,9 @@ curl -s -o /dev/null -w "%{redirect_url}\n" \
   "https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/authorize?client_id=<id>&response_type=code&scope=openid+simple-agentcore-gateway/gateway:read&redirect_uri=https://mcpgateway.ddns.net/oauth2/egress/callback"
 ```
 
----
-
 ## "User does not exist" at the IdP login page
 
-If the login page rejects your credentials with *"user does not exist"*, you are almost certainly typing the **registry's** admin login (for example `admin@example.com`) into the **IdP's** login page. Those are different identity stores.
+If the login page rejects your credentials with "user does not exist", you are almost certainly typing the **registry's** admin login (for example `admin@example.com`) into the **IdP's** login page. Those are different identity stores.
 
 The 3LO login must use a user that exists **in the OIDC provider backing the gateway**. For Cognito that means in that specific user pool (e.g. `us-east-1_esQkOgbl5`), which may be entirely separate from the registry's own login pool and may be empty.
 
@@ -190,9 +178,7 @@ aws cognito-idp admin-create-user --region us-east-1 \
   --message-action SUPPRESS
 ```
 
-The Hosted UI prompts for a permanent password on first login. Also note this pool uses **plain usernames** (log in as `geotest`, not an email); check your pool's username/alias configuration, as this varies.
-
----
+The Hosted UI prompts for a permanent password on first login. Also note this pool uses plain usernames (log in as `geotest`, not an email); check your pool's username/alias configuration, as this varies.
 
 ## What is provider-specific?
 
@@ -209,27 +195,23 @@ The flow is identical across IdPs. The differences are narrow:
 
 Everything else is the same for every provider and every coding assistant: the callback URL, `egress_provider: custom`, the two `custom_*` URLs, the `/oauth2/egress/connect?server=...` consent trigger, and the space-separated scopes rule.
 
----
-
-## Troubleshooting quick reference
+## Troubleshooting
 
 | Symptom | Likely cause / fix |
 |---|---|
 | Callback returns `error=invalid_request&error_description=invalid_scope` | Comma-separated scopes. Set `custom_scope_separator` blank; enter scopes as separate space-delimited values. |
 | IdP login says "user does not exist" | Logging into the wrong identity store. Use a user in the OIDC provider/pool backing the gateway, not the registry's admin login. |
 | Cognito refuses to add a callback URL to the M2M client | `client_credentials` and `code` cannot coexist on one client. Create a separate 3LO client (Step 1). |
-| `--callback-urls` CLI error "Unable to retrieve ... non 200" | AWS CLI URL-following. `aws configure set cli_follow_urlparam false`, retry. |
+| `--callback-urls` CLI error "Unable to retrieve ... non 200" | AWS CLI URL-following. Run `aws configure set cli_follow_urlparam false`, then retry. |
 | Gateway returns 401/403 to the minted user token | The gateway does not trust the 3LO client. Add it to `allowedClients` (Step 2) and wait for `READY`. |
 | Client never gets a consent prompt | The MCP client must support consent elicitation (url mode), and the server's `egress_auth_mode` must be `oauth_user`. |
 | "Connection failed" with `state user mismatch` in logs | Session predates the `sub`-persisting login. Log out and back in, then reconnect. |
 
-See the [Egress Credential Vault guide](egress-credential-vault.md#operations-and-troubleshooting) for the full operations table.
+See the [Egress Credential Vault](../egress-credential-vault.md#operations-and-troubleshooting) guide for the full operations table.
 
----
+## Related Documentation
 
-## Related documentation
-
-- [Registering Amazon Bedrock AgentCore Assets](agentcore.md): bulk and manual registration, including the M2M path.
-- [AgentCore Auto-Registration Prerequisites](agentcore-auto-registration-prerequisites.md): IdP M2M client setup and IAM permissions.
-- [Per-User Egress Credential Vault](egress-credential-vault.md): the full 3LO / OBO architecture, security model, and API surface.
-- [OAuth Discovery Endpoints](oauth-discovery-endpoints.md): how the registry discovers provider endpoints.
+- [AgentCore Full Reference](../agentcore.md)
+- [Bulk-register AgentCore Gateways and Runtimes](agentcore-bulk-registration.md)
+- [Auto-Registration Prerequisites](../agentcore-auto-registration-prerequisites.md)
+- [Per-User Egress Credential Vault](../egress-credential-vault.md)
