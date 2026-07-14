@@ -154,7 +154,7 @@ sequenceDiagram
     K-->>S: miss
     S-->>V: consent_required + authorize_url + connect_url + request_state
     V-->>P: EgressTokenResponse(consent_required=true)
-    Note over P,C: -32042 elicitation only on token-requiring methods<br/>(tools/call, prompts/get, resources/read); others get a plain JSON-RPC error
+    Note over P,C: -32042 elicitation fires only on token-requiring methods<br/>(tools/call, prompts/get, resources/read). Other methods get a plain JSON-RPC error.
     P-->>C: JSON-RPC -32042 URLElicitationRequiredError (mode=url, url=connect_url)
 
     Note over C,TP: User consents (browser)
