@@ -20,6 +20,36 @@ An AgentCore Gateway with a `CUSTOM_JWT` authorizer accepts JWTs from an OIDC pr
 
 This FAQ is about the **3LO** column.
 
+## How the two tokens fit together
+
+There are **two** tokens in play, and they are easy to conflate:
+
+- **Ingress token**: how your coding assistant authenticates **to** the gateway. Created in the coding assistant itself when you add the server and run its OAuth login (`/mcp`, then authorize). See [Step 6](#step-6-add-the-gateway-to-your-coding-assistant).
+- **Egress token**: how the gateway authenticates to the upstream AgentCore gateway **as you**. This is the per-user token vaulted by the 3LO consent flow in Steps 1 to 5.
+
+Once both exist, a tool call flows straight through with no further prompts:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant CC as Claude Code (coding assistant)
+    participant GW as MCP Gateway Registry
+    participant AC as AgentCore Gateway
+
+    Note over CC,GW: Ingress (one-time, in the coding assistant)
+    CC->>GW: /mcp authorize (OAuth login to the registry)
+    GW-->>CC: ingress token stored in the coding assistant
+
+    Note over GW,AC: Egress (one-time, Steps 1 to 5 of this FAQ)
+    GW->>GW: per-user token already vaulted via 3LO consent
+
+    Note over CC,AC: Every subsequent tool call
+    CC->>GW: MCP request + ingress token
+    GW->>AC: forward + vaulted egress token (as the user)
+    AC-->>GW: tool result
+    GW-->>CC: tool result
+```
+
 > **Key provider constraint (Cognito, and common elsewhere):** a single OAuth app client usually cannot enable both the `client_credentials` and the `code` flow at the same time. Cognito rejects it outright: `client_credentials flow can not be selected along with code flow or implicit flow`. So for 3LO you create a **separate** app client dedicated to the `code` flow, and add it to the gateway's list of allowed clients alongside any existing M2M client.
 
 ## What you need before you start
@@ -135,6 +165,20 @@ https://mcpgateway.example.com/oauth2/egress/connect?server=/geo-mcp
 This redirects to your IdP's Hosted UI / login page, the user signs in and consents, and the callback lands back at the registry, which vaults **that user's** access + refresh tokens keyed by their OIDC `sub`. From then on, every call the coding assistant makes through the gateway transparently vends (and refreshes) that user's token.
 
 In our verified run, the user logged in through the Cognito Hosted UI, consented, and the geo-mcp tool (`geolocation___getGeolocationByIp`) was then callable from Claude Code using the per-user token. The same connect URL works identically whether the client is Claude Code, Cursor, or any MCP client that supports the consent elicitation.
+
+## Step 6: Add the gateway to your coding assistant
+
+With egress consent done, connect the gateway to your coding assistant so it can call it. For Claude Code:
+
+```bash
+claude mcp add --transport http geo-mcp https://mcpgateway.example.com/geo-mcp
+```
+
+Then start Claude Code, run `/mcp`, and **authorize** the `geo-mcp` server. This runs the coding assistant's own OAuth login against the registry and stores an **ingress** token inside Claude Code. This ingress token is separate from the egress token vaulted in Steps 1 to 5.
+
+From then on the two tokens compose automatically: the ingress token lets Claude Code authenticate **to** the gateway, and the gateway uses your already-vaulted egress token to call the AgentCore gateway **as you**. There are no further prompts on subsequent calls. (See [How the two tokens fit together](#how-the-two-tokens-fit-together) for the sequence.)
+
+Other coding assistants (Cursor, VS Code, and similar) follow the same pattern: add the server URL, then complete the assistant's OAuth authorize step.
 
 ## The #1 gotcha: scopes
 
