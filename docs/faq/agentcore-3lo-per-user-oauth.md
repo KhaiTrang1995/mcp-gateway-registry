@@ -35,7 +35,7 @@ Throughout, the registry's callback URL is:
 {EGRESS_OAUTH_CALLBACK_BASE_URL}/oauth2/egress/callback
 ```
 
-In our verified example that was `https://mcpgateway.ddns.net/oauth2/egress/callback`.
+In our verified example that was `https://mcpgateway.example.com/oauth2/egress/callback`.
 
 ## Step 1: Create a 3LO OAuth app client in your IdP
 
@@ -45,7 +45,7 @@ Cognito example (any IdP is the same idea, different console):
 
 ```bash
 aws cognito-idp create-user-pool-client --region us-east-1 \
-  --user-pool-id us-east-1_esQkOgbl5 \
+  --user-pool-id us-east-1_XXXXXXXXX \
   --client-name "geo-mcp-registry-3lo" \
   --generate-secret \
   --explicit-auth-flows ALLOW_REFRESH_TOKEN_AUTH \
@@ -54,7 +54,7 @@ aws cognito-idp create-user-pool-client --region us-east-1 \
   --allowed-o-auth-flows-user-pool-client \
   --allowed-o-auth-scopes "openid" "email" "profile" \
       "simple-agentcore-gateway/gateway:read" "simple-agentcore-gateway/gateway:write" \
-  --callback-urls "https://mcpgateway.ddns.net/oauth2/egress/callback"
+  --callback-urls "https://mcpgateway.example.com/oauth2/egress/callback"
 ```
 
 Note the returned **Client ID** and **Client Secret**.
@@ -75,7 +75,7 @@ aws bedrock-agentcore-control update-gateway --region us-east-1 \
   --protocol-type MCP \
   --authorizer-type CUSTOM_JWT \
   --authorizer-configuration '{"customJWTAuthorizer":{
-      "discoveryUrl":"https://cognito-idp.us-east-1.amazonaws.com/us-east-1_esQkOgbl5/.well-known/openid-configuration",
+      "discoveryUrl":"https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX/.well-known/openid-configuration",
       "allowedClients":["<existing-m2m-client-id>","<new-3lo-client-id>"]}}'
 ```
 
@@ -88,21 +88,21 @@ On other IdPs there is no "allowed clients" list on a gateway to edit; instead t
 Every OIDC provider publishes them at its discovery document:
 
 ```bash
-curl -s "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_esQkOgbl5/.well-known/openid-configuration" \
+curl -s "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_XXXXXXXXX/.well-known/openid-configuration" \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['authorization_endpoint']); print(d['token_endpoint'])"
 ```
 
 For Cognito these are the Hosted UI domain URLs, e.g.:
 
-- Authorize: `https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/authorize`
-- Token: `https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/token`
+- Authorize: `https://us-east-1xxxxxxxxx.auth.us-east-1.amazoncognito.com/oauth2/authorize`
+- Token: `https://us-east-1xxxxxxxxx.auth.us-east-1.amazoncognito.com/oauth2/token`
 
 ## Step 4: Configure custom-OIDC egress on the server in the registry
 
 Register the gateway as an MCP server (if not already), then configure per-user egress OAuth on it. This is admin-only. You can do it in the server-edit modal in the UI, or via the API:
 
 ```bash
-curl -X POST "https://mcpgateway.ddns.net/api/servers/geo-mcp/egress-auth" \
+curl -X POST "https://mcpgateway.example.com/api/servers/geo-mcp/egress-auth" \
   -H "Authorization: Bearer <admin-token>" \
   -H "Content-Type: application/json" \
   -d '{
@@ -111,8 +111,8 @@ curl -X POST "https://mcpgateway.ddns.net/api/servers/geo-mcp/egress-auth" \
         "client_id": "<new-3lo-client-id>",
         "client_secret": "<new-3lo-client-secret>",
         "scopes": ["openid", "simple-agentcore-gateway/gateway:read", "simple-agentcore-gateway/gateway:write"],
-        "custom_authorize_url": "https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/authorize",
-        "custom_token_url": "https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/token"
+        "custom_authorize_url": "https://us-east-1xxxxxxxxx.auth.us-east-1.amazoncognito.com/oauth2/authorize",
+        "custom_token_url": "https://us-east-1xxxxxxxxx.auth.us-east-1.amazoncognito.com/oauth2/token"
       }'
 ```
 
@@ -129,7 +129,7 @@ Field notes:
 Point the user's browser at the registry's connect facade for this server:
 
 ```text
-https://mcpgateway.ddns.net/oauth2/egress/connect?server=/geo-mcp
+https://mcpgateway.example.com/oauth2/egress/connect?server=/geo-mcp
 ```
 
 This redirects to your IdP's Hosted UI / login page, the user signs in and consents, and the callback lands back at the registry, which vaults **that user's** access + refresh tokens keyed by their OIDC `sub`. From then on, every call the coding assistant makes through the gateway transparently vends (and refreshes) that user's token.
@@ -158,20 +158,20 @@ You can sanity-check a scope string against your IdP before wiring the registry.
 
 ```bash
 curl -s -o /dev/null -w "%{redirect_url}\n" \
-  "https://us-east-1esqkogbl5.auth.us-east-1.amazoncognito.com/oauth2/authorize?client_id=<id>&response_type=code&scope=openid+simple-agentcore-gateway/gateway:read&redirect_uri=https://mcpgateway.ddns.net/oauth2/egress/callback"
+  "https://us-east-1xxxxxxxxx.auth.us-east-1.amazoncognito.com/oauth2/authorize?client_id=<id>&response_type=code&scope=openid+simple-agentcore-gateway/gateway:read&redirect_uri=https://mcpgateway.example.com/oauth2/egress/callback"
 ```
 
 ## "User does not exist" at the IdP login page
 
 If the login page rejects your credentials with "user does not exist", you are almost certainly typing the **registry's** admin login (for example `admin@example.com`) into the **IdP's** login page. Those are different identity stores.
 
-The 3LO login must use a user that exists **in the OIDC provider backing the gateway**. For Cognito that means in that specific user pool (e.g. `us-east-1_esQkOgbl5`), which may be entirely separate from the registry's own login pool and may be empty.
+The 3LO login must use a user that exists **in the OIDC provider backing the gateway**. For Cognito that means in that specific user pool (e.g. `us-east-1_XXXXXXXXX`), which may be entirely separate from the registry's own login pool and may be empty.
 
 Create or use a user in that pool. For Cognito:
 
 ```bash
 aws cognito-idp admin-create-user --region us-east-1 \
-  --user-pool-id us-east-1_esQkOgbl5 \
+  --user-pool-id us-east-1_XXXXXXXXX \
   --username geotest \
   --user-attributes Name=email,Value=geotest@example.com Name=email_verified,Value=true \
   --temporary-password 'GeoTemp#2026!' \
