@@ -266,6 +266,49 @@ class TestNginxMetacharacters:
         with pytest.raises(UrlValidationError):
             url_guard.validate_server_path("")
 
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/all",
+            "all",
+            "/ALL",
+            "/All",
+            "all/",
+            "//all//",
+            "/*",
+            "*",
+        ],
+    )
+    def test_validate_server_path_rejects_reserved_wildcard_names(self, path):
+        """Reserved cross-server wildcard names (all/*), any case or slash
+        wrapping, must be rejected (privilege escalation)."""
+        with pytest.raises(UrlValidationError):
+            url_guard.validate_server_path(path)
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/github",
+            "/my-server",
+            "/fininfo",
+            "/all-tools",
+            "/all/leaf",
+            "/callthing",
+        ],
+    )
+    def test_validate_server_path_allows_adjacent_names(self, path):
+        """Only the EXACT reserved names are blocked; superstrings and paths
+        that merely contain 'all' as a segment or substring stay valid."""
+        url_guard.validate_server_path(path)  # does not raise
+
+    @pytest.mark.parametrize("path", ["/", "//", "///"])
+    def test_validate_server_path_allows_root_and_slashes_only(self, path):
+        """A slashes-only path normalizes to an empty server name, which is
+        falsy and grants no access in the resolver, so it is not part of the
+        reserved-wildcard escalation and must stay registerable (the escalation
+        is narrowly about the 'all'/'*' sentinels, not empty names)."""
+        url_guard.validate_server_path(path)  # does not raise
+
 
 # ---------------------------------------------------------------------------
 # Allowlist bypass behaviour
