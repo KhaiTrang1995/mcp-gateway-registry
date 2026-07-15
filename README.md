@@ -147,11 +147,11 @@ Across all of them you get semantic + lexical search, UI, REST, and MCP-native i
 
 ## Roadmap
 
-The roadmap is best tracked on the [GitHub Milestones](https://github.com/agentic-community/mcp-gateway-registry/milestones) page. At a high level, as of July-August 2026 the big features we're working on are:
+The roadmap is best tracked on the [GitHub Milestones](https://github.com/agentic-community/mcp-gateway-registry/milestones) page. Per-user egress auth (3LO and OBO) and A2A traffic routing shipped in [1.27.0](docs/release-notes/1.27.0.md); at a high level, the big features we're working on next are:
 
-- **3LO, OBO, and CIMD for coding assistants**: richer per-user auth flows so coding assistants connect with the least friction across identity providers.
-- **Generic routing to any HTTP endpoint**: so the gateway can proxy A2A traffic between agents (and skills, and REST endpoints in future) through the same single ingress.
-- **Registry Copilot**: an embedded agent-builder experience for discovering assets and composing agents from inside the registry.
+- **Finish per-user egress auth ([1.28.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: add per-user PAT/API-key injection (vault-pat) so the credentials broker covers every egress mode, plus the ready coding-assistant OAuth phases (Entra scope pass-through, RFC 8707 resource enforcement).
+- **CIMD and ID-JAG for coding assistants ([1.29.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: Client ID Metadata Documents and RFC 8693 token exchange so coding assistants connect with the least friction across identity providers.
+- **Registry Copilot ([1.30.0](https://github.com/agentic-community/mcp-gateway-registry/milestones))**: an embedded chat + agent-builder experience for discovering assets and composing agents from inside the registry.
 
 Have a feature request? Please [open a GitHub issue](https://github.com/agentic-community/mcp-gateway-registry/issues/new), we build in the open.
 
