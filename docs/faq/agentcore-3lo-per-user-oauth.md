@@ -4,6 +4,8 @@ This FAQ explains how to make an Amazon Bedrock AgentCore Gateway that authentic
 
 The worked example uses **Amazon Cognito** with **Claude Code**, because that is what we verified end to end. The important thing to understand up front: this works the same way for any OIDC identity provider and any coding assistant. The moving parts are identical; the only per-provider quirks are in how scopes are named and formatted (see [What is provider-specific?](#what-is-provider-specific)).
 
+**Watch the walkthrough:** [OAuth 3-Legged Authentication (3LO) demo](https://github.com/user-attachments/assets/3585d258-66a1-458a-bc86-450f917f7cfd).
+
 If you just want a shared service token (machine-to-machine), use [bulk auto-registration](agentcore-bulk-registration.md) instead. That path does not need any of the steps below.
 
 ## Background: 3LO vs. M2M
