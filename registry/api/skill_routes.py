@@ -307,7 +307,11 @@ async def list_skills(
 @router.post("/parse-skill-md", summary="Parse SKILL.md content from URL")
 async def parse_skill_md(
     user_context: Annotated[dict, Depends(nginx_proxied_auth)],
-    url: str = Query(..., description="URL to SKILL.md file"),
+    url: str = Query(
+        ...,
+        max_length=4096,
+        description="URL to SKILL.md file",
+    ),
     auth_scheme: str = Query(
         "none", description="Auth scheme: none, global_credentials, bearer, api_key"
     ),
