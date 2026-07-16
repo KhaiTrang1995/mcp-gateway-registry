@@ -657,9 +657,7 @@ def run_tests(
     # its OWN MCP_REGISTRY_URL (not the harness's). Surface it here so the whole
     # topology is in one place. Best-effort: skipped cleanly if Docker is absent.
     if not is_live:
-        ta_config = _read_container_discovery_config(
-            _AGENT_CONTAINER_NAMES["travel_assistant"]
-        )
+        ta_config = _read_container_discovery_config(_AGENT_CONTAINER_NAMES["travel_assistant"])
         if ta_config:
             print(
                 "  travel_assistant in-container discovery -> "
