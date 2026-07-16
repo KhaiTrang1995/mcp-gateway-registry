@@ -278,7 +278,7 @@ exposition form** (after the OTel exporter appends the unit suffix).
 
 | Metric | Source | Labels | What it counts |
 |---|---|---|---|
-| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server` | Authenticated /validate calls |
+| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server`, `target_kind` | Authenticated /validate calls (`target_kind` = `a2a_agent` \| `mcp_server` \| `unknown` for routing breakdown) |
 | `mcpgw_registry_tool_execution_total` | auth-server | `tool_name`, `server_name`, `success`, `method`, `client_name`, `client_version` | MCP tool calls detected at the auth layer |
 | `mcpgw_registry_operation_total` | registry middleware | `operation`, `resource_type`, `success` | Registry API operations (list/create/update/delete/search) |
 | `tool_discovery_total` | registry middleware | `results_count_bucket` | Semantic search calls |
@@ -310,7 +310,7 @@ exposition form** (after the OTel exporter appends the unit suffix).
 
 | Metric | Source | Labels | What it measures |
 |---|---|---|---|
-| `mcpgw_registry_auth_request_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server | `success`, `method`, `server` | Auth /validate latency |
+| `mcpgw_registry_auth_request_duration_milliseconds` (`_count`, `_sum`, `_bucket`) | auth-server | `success`, `method`, `server`, `target_kind` | Auth /validate latency |
 | `tool_execution_duration_milliseconds` | auth-server | same as `mcpgw_registry_tool_execution_total` | Tool call latency at auth layer |
 | `mcpgw_registry_protocol_latency_milliseconds` | auth-server | `flow_step`, `server_name` | Time between MCP protocol stages (init → tools/list, etc.) |
 | `mcpgw_registry_operation_duration_milliseconds` | registry middleware | same as `mcpgw_registry_operation_total` | Registry API operation latency |
@@ -382,6 +382,7 @@ Replace `<TARGET>` with the path you care about (e.g. `/api/servers`,
 | Goal | Query |
 |---|---|
 | Auth requests per second by outcome | `sum by (success)(rate(mcpgw_registry_auth_request_total[5m]))` |
+| Routing split: agent vs MCP-server traffic | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m]))` |
 | Auth p95 latency | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_registry_auth_request_duration_milliseconds_bucket[5m])))` |
 | Session-store hit rate | `sum(rate(mcpgw_registry_session_store_resolve_total{result="hit"}[5m])) / sum(rate(mcpgw_registry_session_store_resolve_total[5m]))` |
 | Federation peer sync failures by type | `sum by (peer_id, failure_type)(rate(peer_sync_failures_total[5m]))` |
