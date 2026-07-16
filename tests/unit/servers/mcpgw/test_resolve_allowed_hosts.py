@@ -24,10 +24,7 @@ import pytest
 @pytest.fixture
 def resolve_allowed_hosts():
     """Import _resolve_allowed_hosts under an isolated, restored module state."""
-    saved = {
-        name: sys.modules.get(name)
-        for name in ("fastmcp", "servers.mcpgw.server", "server")
-    }
+    saved = {name: sys.modules.get(name) for name in ("fastmcp", "servers.mcpgw.server", "server")}
 
     fastmcp_stub = types.ModuleType("fastmcp")
     fastmcp_stub.Context = type("Context", (), {})
