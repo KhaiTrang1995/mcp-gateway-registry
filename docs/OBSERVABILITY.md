@@ -278,7 +278,7 @@ exposition form** (after the OTel exporter appends the unit suffix).
 
 | Metric | Source | Labels | What it counts |
 |---|---|---|---|
-| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server`, `target_kind` | Authenticated /validate calls (`target_kind` = `a2a_agent` \| `mcp_server` \| `unknown` for routing breakdown) |
+| `mcpgw_registry_auth_request_total` | auth-server | `success`, `method`, `server`, `target_kind` | Authenticated /validate calls. `target_kind` = `a2a_agent` \| `virtual_mcp_server` \| `mcp_server` \| `control_plane` \| `unknown` (routing breakdown; `control_plane` = `/api/*`, static, oauth2 — never counted as a data-plane target) |
 | `mcpgw_registry_tool_execution_total` | auth-server | `tool_name`, `server_name`, `success`, `method`, `client_name`, `client_version` | MCP tool calls detected at the auth layer |
 | `mcpgw_registry_operation_total` | registry middleware | `operation`, `resource_type`, `success` | Registry API operations (list/create/update/delete/search) |
 | `tool_discovery_total` | registry middleware | `results_count_bucket` | Semantic search calls |
@@ -382,8 +382,21 @@ Replace `<TARGET>` with the path you care about (e.g. `/api/servers`,
 | Goal | Query |
 |---|---|
 | Auth requests per second by outcome | `sum by (success)(rate(mcpgw_registry_auth_request_total[5m]))` |
-| Routing split: agent vs MCP-server traffic | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m]))` |
 | Auth p95 latency | `histogram_quantile(0.95, sum by (le)(rate(mcpgw_registry_auth_request_duration_milliseconds_bucket[5m])))` |
+
+#### Target-type routing (`target_kind`)
+
+`mcpgw_registry_auth_request_total` carries a `target_kind` label so you can see how `/validate` traffic splits across routed targets: `a2a_agent`, `virtual_mcp_server`, `mcp_server`, `control_plane` (the `/api/*` / static / oauth2 control plane, never a data-plane target), and `unknown`. Chart these as a Grafana **Time series** panel with legend `{{target_kind}}`.
+
+| Goal | Query |
+|---|---|
+| Routing split — one line per target kind (main timeseries) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m]))` |
+| Data-plane only (drop control-plane / dashboard noise) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total{target_kind!="control_plane"}[5m]))` |
+| A2A agent routing only | `sum(rate(mcpgw_registry_auth_request_total{target_kind="a2a_agent"}[5m]))` |
+| Routing split by success/failure | `sum by (target_kind, success)(rate(mcpgw_registry_auth_request_total[5m]))` |
+| Share of total per target kind (stacked %) | `sum by (target_kind)(rate(mcpgw_registry_auth_request_total[5m])) / ignoring(target_kind) group_left sum(rate(mcpgw_registry_auth_request_total[5m]))` |
+| p95 auth latency per target kind | `histogram_quantile(0.95, sum by (le, target_kind)(rate(mcpgw_registry_auth_request_duration_milliseconds_bucket[5m])))` |
+| Cumulative counts (raw growth, not rate) | `sum by (target_kind)(mcpgw_registry_auth_request_total)` |
 | Session-store hit rate | `sum(rate(mcpgw_registry_session_store_resolve_total{result="hit"}[5m])) / sum(rate(mcpgw_registry_session_store_resolve_total[5m]))` |
 | Federation peer sync failures by type | `sum by (peer_id, failure_type)(rate(peer_sync_failures_total[5m]))` |
 | Logout JWT validation failure rate | `rate(mcpgw_registry_logout_jwt_validation_failed_total[5m])` |
