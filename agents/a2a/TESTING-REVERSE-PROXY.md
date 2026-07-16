@@ -76,15 +76,19 @@ cp .env.example .env        # set MCP_REGISTRY_URL, a registry JWT, AGENT_AUTH_P
 
 ### 3. Register + enable both agents (url rewritten to the gateway)
 
-From the repo root, with a token in `.token`:
+From the repo root, with a token in `.token`. The registry UI's "Get JWT Token" button
+saves the **nested** format (`{"tokens": {"access_token": "<jwt>"}}`), but `cli/agent_mgmt.py`
+expects a **flat** file (`{"access_token": "<jwt>"}`). Flatten it into `.token.flat` first
+(this one-liner handles both the nested and already-flat cases):
 
 ```bash
-CLI="uv run python cli/agent_mgmt.py --token-file .token"
+python3 -c "import json; d=json.load(open('.token')); t=d.get('access_token') or d['tokens']['access_token']; json.dump({'access_token': t}, open('.token.flat','w'))"
+CLI="uv run python cli/agent_mgmt.py --token-file .token.flat"
 
 $CLI register cli/examples/flight_booking_agent_card.json
 $CLI toggle /flight-booking true
 $CLI register cli/examples/travel_assistant_agent_card.json
-$CLI toggle /travel-assistant true
+$CLI toggle /travel-assistant-agent true
 ```
 
 Confirm the split as an admin (advertised `url` = gateway, `proxy_pass_url` = backend):
@@ -104,7 +108,7 @@ For a least-privilege caller, add a per-agent rule to that group's scope (see
 ### 5. Verify each hop through the gateway
 
 ```bash
-TOKEN=$(jq -r .access_token .token)
+TOKEN=$(jq -r .access_token .token.flat)   # .token.flat created in step 3
 REGISTRY_URL=http://localhost
 
 # Agent card THROUGH the gateway -> card.url must be the gateway, not the backend.
@@ -118,7 +122,7 @@ curl -s "$REGISTRY_URL/agent/flight-booking/" \
   -H "X-Authorization: Bearer $TOKEN" \
   -H "Authorization: Bearer any-nonempty-value" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"any flights NYC to SFO?"}]}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","messageId":"msg-1","parts":[{"kind":"text","text":"any flights NYC to SFO?"}]}}}'
 ```
 
 Without an `invoke_agent` grant the JSON-RPC call returns **403** at the gateway (the backend
@@ -134,10 +138,27 @@ Drive the Travel Assistant to discover and call the Flight Booking agent, so the
 is agent → gateway → auth → gateway → agent:
 
 ```bash
-uv run python agents/a2a/test/simple_agents_test.py --endpoint local --debug
+# The test calls the agents directly, so it needs a bearer. Under presence-only
+# auth any non-empty value works (set AGENT_BEARER_TOKEN or REGISTRY_JWT_TOKEN).
+# --registry-url is the harness's reachability probe target (defaults to
+# http://localhost); point it at the gateway you enabled reverse-proxy on.
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python agents/a2a/test/simple_agents_test.py \
+    --endpoint local --debug --registry-url http://localhost
 ```
 
 `--debug` prints the JSON-RPC payloads, response bodies, and timing for each hop.
+
+The startup banner prints the topology, including the Travel Assistant's own
+**in-container `MCP_REGISTRY_URL`** (read via `docker exec`) — this is the registry
+it actually discovers against, which is independent of `--registry-url`. The agent
+then connects to the discovered card's URL (e.g. `<registry>/agent/flight-booking/`).
+Confirm the exact registry + `/agent/` URL it invokes in the container log:
+
+```bash
+docker logs travel-assistant-agent \
+  | grep -iE "RegistryDiscoveryClient initialized|Initializing A2A client|HTTP Request"
+```
 
 ---
 
@@ -190,7 +211,9 @@ advertised `url` to the CloudFront `/agent/{path}/` and stores the host backend 
 
 ```bash
 export REGISTRY_URL=https://<your-distribution>.cloudfront.net
-CLI="uv run python cli/agent_mgmt.py --token-file .token --base-url $REGISTRY_URL"
+# Flatten the nested UI token as in Part 1 step 3 (creates .token.flat).
+python3 -c "import json; d=json.load(open('.token')); t=d.get('access_token') or d['tokens']['access_token']; json.dump({'access_token': t}, open('.token.flat','w'))"
+CLI="uv run python cli/agent_mgmt.py --token-file .token.flat --base-url $REGISTRY_URL"
 
 $CLI register cli/examples/flight_booking_agent_ecs.json
 $CLI toggle /flight-booking true
@@ -200,7 +223,7 @@ $CLI get /flight-booking | jq '{url, proxy_pass_url}'   # url=CloudFront, proxy_
 ### 4. Verify through CloudFront
 
 ```bash
-TOKEN=$(jq -r .access_token .token)
+TOKEN=$(jq -r .access_token .token.flat)   # .token.flat created in step 3
 
 # Card through CloudFront -> url advertises https + the CloudFront host (see scheme note below).
 curl -s -H "X-Authorization: Bearer $TOKEN" \
@@ -211,7 +234,7 @@ curl -s "$REGISTRY_URL/agent/flight-booking/" \
   -H "X-Authorization: Bearer $TOKEN" \
   -H "Authorization: Bearer any-nonempty-value" \
   -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","parts":[{"kind":"text","text":"any flights NYC to SFO?"}]}}}'
+  -d '{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"role":"user","messageId":"msg-1","parts":[{"kind":"text","text":"any flights NYC to SFO?"}]}}}'
 ```
 
 Trace hops with ECS Exec / CloudWatch:

@@ -140,6 +140,9 @@ class RemoteAgentClient:
         # Send a natural language message to the remote agent.
         await self._ensure_initialized()
 
+        # Always log the exact target URL for this A2A call (not just on first
+        # init), so every invocation shows which endpoint it is proxied through.
+        logger.info(f"A2A call -> {self.agent_url} (target agent: {self.agent_name})")
         logger.info(f"Sending message to {self.agent_name}: {message[:100]}...")
 
         try:

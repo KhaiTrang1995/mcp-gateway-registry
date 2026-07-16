@@ -150,13 +150,20 @@ Run comprehensive tests against local or live deployments to verify agent functi
 
 **Run Tests:**
 
+The local tests call the agents directly, so they need an `Authorization` bearer.
+The script reads it from `AGENT_BEARER_TOKEN` (or `REGISTRY_JWT_TOKEN`); under
+presence-only auth any non-empty value works. The `live` endpoint uses boto3 and
+does not need it.
+
 ```bash
 # Test local Docker containers (from repo root)
-uv run python agents/a2a/test/simple_agents_test.py --endpoint local
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python agents/a2a/test/simple_agents_test.py --endpoint local
 
 # Test local Docker containers (from agents/a2a directory)
 cd agents/a2a
-uv run python test/simple_agents_test.py --endpoint local
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python test/simple_agents_test.py --endpoint local
 
 # Test AgentCore Runtime (from repo root)
 uv run python agents/a2a/test/simple_agents_test.py --endpoint live
@@ -168,10 +175,12 @@ For detailed request/response tracing, use the `--debug` flag:
 
 ```bash
 # View full JSON-RPC payloads, response bodies, and timing (from repo root)
-uv run python agents/a2a/test/simple_agents_test.py --endpoint local --debug
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python agents/a2a/test/simple_agents_test.py --endpoint local --debug
 
 # Or from agents/a2a directory:
-uv run python test/simple_agents_test.py --endpoint local --debug
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python test/simple_agents_test.py --endpoint local --debug
 ```
 
 This displays:
@@ -271,7 +280,8 @@ agents/a2a/deploy_local.sh
 
 3. Run the test suite (includes discovery test):
 ```bash
-uv run python agents/a2a/test/simple_agents_test.py --endpoint local --debug
+AGENT_BEARER_TOKEN=any-nonempty-value \
+  uv run python agents/a2a/test/simple_agents_test.py --endpoint local --debug
 ```
 
 4. View agent logs to see discovery in action:

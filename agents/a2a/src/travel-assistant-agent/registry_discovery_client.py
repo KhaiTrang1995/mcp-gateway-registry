@@ -115,6 +115,7 @@ class RegistryDiscoveryClient:
 
         token = await self._get_token()
         discovery_url = f"{self.registry_url}/api/agents/discover/semantic"
+        logger.info(f"Discovery call -> POST {discovery_url} (registry={self.registry_url})")
         # Do NOT override Host: the client derives it from registry_url. A hardcoded
         # "localhost" is rejected (403) by a real CDN/ALB (e.g. CloudFront) that
         # matches on the distribution host.
@@ -138,7 +139,9 @@ class RegistryDiscoveryClient:
                     agents_data = result.get("agents", [])
 
                     agents = [DiscoveredAgent(**agent) for agent in agents_data]
-                    logger.info(f"Found {len(agents)} agents")
+                    logger.info(f"Found {len(agents)} agents via {discovery_url}")
+                    for a in agents:
+                        logger.info(f"  discovered agent: {a.name} (path={a.path}) -> url={a.url}")
 
                     return agents
 
